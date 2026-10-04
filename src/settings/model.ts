@@ -1,8 +1,14 @@
+import { DEFAULT_EXCLUDES } from '../sync/exclude';
+import type { ConflictStrategy, SyncDirection } from '../sync/types';
+
 /**
  * 插件设置的**数据模型**：字段定义、默认值、取值收敛。
  *
  * 面板怎么渲染不在这里（见 `fields/` 与 `tab.ts`）；这里只回答
  * "有哪些设置、默认是多少、脏数据怎么收敛"。
+ *
+ * 设置项的组织参照了 Remotely Save 的思路（目标 / 方向 / 删除 / 冲突 / 排除 / 自动同步），
+ * 但把「远程」换成了「本地文件夹」，并多了「同步包」一组。
  */
 
 /** 日志级别：控制台里输出多少（见 src/utils/log.ts） */
@@ -16,7 +22,46 @@ export const LOG_LEVEL_OPTIONS: Record<LogLevel, string> = {
 	debug: '全部输出（排查问题时用）',
 };
 
+export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
+	both: '双向同步（本地改动推上去，副本改动拉回来）',
+	upload: '仅上传（本地 → 副本，副本只作备份）',
+	download: '仅下载（副本 → 本地，本地改动不推）',
+};
+
+export const CONFLICT_OPTIONS: Record<ConflictStrategy, string> = {
+	'keep-both': '两份都留（新的占原名，旧的存成冲突副本）',
+	'local-wins': '以本地为准',
+	'remote-wins': '以副本为准',
+};
+
+/** 自动同步间隔（分钟）：键是存进 data.json 的值，值是面板上的文案 */
+export const SYNC_INTERVAL_OPTIONS: Record<string, string> = {
+	'0': '不自动同步',
+	'5': '每 5 分钟',
+	'15': '每 15 分钟',
+	'30': '每 30 分钟',
+	'60': '每 1 小时',
+	'180': '每 3 小时',
+};
+
+/** 保存后延迟多久再同步（秒）：给连续打字留出停顿，别每敲一个字就同步一次 */
+export const SAVE_DELAY_OPTIONS: Record<string, string> = {
+	'10': '10 秒',
+	'30': '30 秒',
+	'60': '1 分钟',
+	'300': '5 分钟',
+};
+
+export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
+	full: '完整副本（整个仓库）',
+	changes: '仅改动（自上次导出后变过的文件）',
+};
+
+/** 同步包文件的后缀由格式模块定义，这里只用于界面提示 */
+export const BUNDLE_EXTENSION = '.lsave';
+
 export interface PluginSettings {
+	// ------------------------------------------------------------ 通用
 	/** 总开关：关掉后插件自己注册的入口不工作（设置面板本身仍然可用） */
 	enabled: boolean;
 	/** 控制台输出级别 */
@@ -25,9 +70,49 @@ export interface PluginSettings {
 	startupNotice: boolean;
 	/** 上面那条通知的文案 */
 	greeting: string;
+
+	// ------------------------------------------------------------ 同步目标
+	/** 同步到的本地文件夹（绝对路径），副本就放在这里 */
+	targetDir: string;
+	/** 同步方向 */
+	syncDirection: SyncDirection;
+	/** 删除要不要跟着传播（关掉的话，删掉的文件会被从另一边拉回来） */
+	propagateDeletions: boolean;
+	/** 删除的文件先挪进回收目录而不是直接删 */
+	deletedToTrash: boolean;
+	/** 两边都改了怎么办 */
+	conflictStrategy: ConflictStrategy;
+	/** 排除规则，一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
+	excludePatterns: string;
+
+	// ------------------------------------------------------------ 自动同步
+	/** Obsidian 启动后自动同步一次 */
+	syncOnStartup: boolean;
+	/** 定时同步间隔（分钟），0 = 关 */
+	autoSyncInterval: number;
+	/** 保存笔记后自动同步 */
+	syncAfterSave: boolean;
+	/** 保存后等多久再同步（秒），避免连续打字时反复触发 */
+	syncAfterSaveDelay: number;
+	/** 状态栏显示上次同步时间 */
+	showLastSyncInStatusBar: boolean;
+
+	// ------------------------------------------------------------ 同步包
+	/** 同步包放哪个文件夹（留空＝每次导出时再问） */
+	bundleDir: string;
+	/** 导出完整副本还是仅改动 */
+	bundleMode: 'full' | 'changes';
+	/** 应用完整副本时，删掉本地多出来的文件 */
+	bundleDeleteMissing: boolean;
+	/** 应用前校验包的完整性（读一遍全包算校验和，大包会慢一点） */
+	bundleVerify: boolean;
+	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
+	rememberFingerprints: boolean;
+
+	// ------------------------------------------------------------ 界面
 	/** 在左侧栏放一个插件图标 */
 	ribbonIcon: boolean;
-	/** 在右下角状态栏显示插件状态 */
+	/** 在右下角状态栏显示状态 */
 	showStatusBar: boolean;
 }
 
@@ -36,6 +121,26 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	logLevel: 'error',
 	startupNotice: true,
 	greeting: '插件已加载',
+
+	targetDir: '',
+	syncDirection: 'both',
+	propagateDeletions: true,
+	deletedToTrash: true,
+	conflictStrategy: 'keep-both',
+	excludePatterns: DEFAULT_EXCLUDES,
+
+	syncOnStartup: false,
+	autoSyncInterval: 0,
+	syncAfterSave: false,
+	syncAfterSaveDelay: 30,
+	showLastSyncInStatusBar: true,
+
+	bundleDir: '',
+	bundleMode: 'full',
+	bundleDeleteMissing: false,
+	bundleVerify: true,
+	rememberFingerprints: true,
+
 	ribbonIcon: true,
 	showStatusBar: true,
 };
@@ -53,12 +158,30 @@ export function coerceChoice<T extends string>(value: unknown, allowed: readonly
 	return typeof value === 'string' && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }
 
+/** 下拉框存的是数字时用它（控件给回来的一定是字符串） */
+export function coerceNumberChoice(value: unknown, allowed: readonly number[], fallback: number): number {
+	const parsed = typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+	return allowed.includes(parsed) ? parsed : fallback;
+}
+
 export function coerceText(value: unknown, fallback = ''): string {
 	return typeof value === 'string' ? value : fallback;
 }
 
 export function coerceLogLevel(value: unknown): LogLevel {
 	return coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel);
+}
+
+export function coerceDirection(value: unknown): SyncDirection {
+	return coerceChoice(value, ['both', 'upload', 'download'] as const, DEFAULT_SETTINGS.syncDirection);
+}
+
+export function coerceConflict(value: unknown): ConflictStrategy {
+	return coerceChoice(value, ['keep-both', 'local-wins', 'remote-wins'] as const, DEFAULT_SETTINGS.conflictStrategy);
+}
+
+export function coerceBundleMode(value: unknown): 'full' | 'changes' {
+	return coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode);
 }
 
 /**
@@ -75,6 +198,34 @@ export function settingsFrom(data: unknown): PluginSettings {
 		logLevel: coerceLogLevel(raw.logLevel),
 		startupNotice: coerceBoolean(raw.startupNotice, DEFAULT_SETTINGS.startupNotice),
 		greeting: coerceText(raw.greeting, DEFAULT_SETTINGS.greeting),
+
+		targetDir: coerceText(raw.targetDir, DEFAULT_SETTINGS.targetDir),
+		syncDirection: coerceDirection(raw.syncDirection),
+		propagateDeletions: coerceBoolean(raw.propagateDeletions, DEFAULT_SETTINGS.propagateDeletions),
+		deletedToTrash: coerceBoolean(raw.deletedToTrash, DEFAULT_SETTINGS.deletedToTrash),
+		conflictStrategy: coerceConflict(raw.conflictStrategy),
+		excludePatterns: coerceText(raw.excludePatterns, DEFAULT_SETTINGS.excludePatterns),
+
+		syncOnStartup: coerceBoolean(raw.syncOnStartup, DEFAULT_SETTINGS.syncOnStartup),
+		autoSyncInterval: coerceNumberChoice(
+			raw.autoSyncInterval,
+			Object.keys(SYNC_INTERVAL_OPTIONS).map(Number),
+			DEFAULT_SETTINGS.autoSyncInterval,
+		),
+		syncAfterSave: coerceBoolean(raw.syncAfterSave, DEFAULT_SETTINGS.syncAfterSave),
+		syncAfterSaveDelay: coerceNumberChoice(
+			raw.syncAfterSaveDelay,
+			Object.keys(SAVE_DELAY_OPTIONS).map(Number),
+			DEFAULT_SETTINGS.syncAfterSaveDelay,
+		),
+		showLastSyncInStatusBar: coerceBoolean(raw.showLastSyncInStatusBar, DEFAULT_SETTINGS.showLastSyncInStatusBar),
+
+		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
+		bundleMode: coerceBundleMode(raw.bundleMode),
+		bundleDeleteMissing: coerceBoolean(raw.bundleDeleteMissing, DEFAULT_SETTINGS.bundleDeleteMissing),
+		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
+		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
+
 		ribbonIcon: coerceBoolean(raw.ribbonIcon, DEFAULT_SETTINGS.ribbonIcon),
 		showStatusBar: coerceBoolean(raw.showStatusBar, DEFAULT_SETTINGS.showStatusBar),
 	};

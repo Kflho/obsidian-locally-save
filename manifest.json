@@ -1,10 +1,10 @@
-{
-	"id": "new-plugin",
-	"name": "New Plugin",
+﻿{
+	"id": "locally-save",
+	"name": "Localy Save",
 	"version": "0.1.0",
 	"minAppVersion": "1.7.0",
-	"description": "TODO：一句话说明这个插件做什么（提交社区前必须换掉）。",
+	"description": "Syncs your vault to a local folder copy in seconds, and exports changes as a single transferable file you can carry on a USB drive.",
 	"author": "KahoTAT",
 	"authorUrl": "https://github.com/Kflho",
-	"isDesktopOnly": false
+	"isDesktopOnly": true
 }

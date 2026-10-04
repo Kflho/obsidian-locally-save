@@ -15,9 +15,9 @@
  *   7. 面板结构：按功能分页、页内分组有标题且不重名
  */
 import type { App } from "obsidian";
-import { DEFAULT_SETTINGS, LOG_LEVELS, NewPluginSettingTab, settingsFrom } from "../src/settings";
+import { DEFAULT_SETTINGS, LOG_LEVELS, LocallySaveSettingTab, settingsFrom } from "../src/settings";
 import type { PluginSettings } from "../src/settings";
-import type NewPlugin from "../src/main";
+import type LocallySavePlugin from "../src/main";
 
 // -------------------------------------------------------------------- 断言
 let checks = 0;
@@ -59,8 +59,8 @@ function createTab(overrides?: Partial<PluginSettings>) {
 	const plugin = {
 		settings,
 		saveSettings: async () => { saves++; },
-	} as unknown as NewPlugin;
-	const tab = new NewPluginSettingTab({} as App, plugin);
+	} as unknown as LocallySavePlugin;
+	const tab = new LocallySaveSettingTab({} as App, plugin);
 	return { tab, settings, saveCount: () => saves };
 }
 
@@ -73,7 +73,7 @@ function collectLeaves(items: AnyDefinition[], out: AnyDefinition[] = []): AnyDe
 	return out;
 }
 
-function defsOf(tab: NewPluginSettingTab): AnyDefinition[] {
+function defsOf(tab: LocallySaveSettingTab): AnyDefinition[] {
 	return collectLeaves(tab.getSettingDefinitions() as unknown as AnyDefinition[]);
 }
 
