@@ -3,7 +3,6 @@ import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import type { SyncOutcome } from '../sync/runner';
 import { ACTION_LABELS, CHANGE_LABELS } from '../sync/types';
-import { formatBytes, formatDuration } from '../utils/format';
 
 /** 预览里最多列多少条 —— 几千条会把界面拖垮，剩下的用计数说明 */
 const MAX_ROWS = 200;
@@ -83,24 +82,4 @@ export class SyncPreviewModal extends Modal {
 	onClose(): void {
 		this.contentEl.empty();
 	}
-}
-
-/** 同步结果的一句话总结（通知与状态栏共用） */
-export function summarizeOutcome(outcome: SyncOutcome): string {
-	if (outcome.plan.actions.length === 0) {
-		return `已是最新：${outcome.scannedLocal} 个文件都一致（${formatDuration(outcome.durationMs)}）`;
-	}
-	const { summary } = outcome.plan;
-	const parts: string[] = [];
-	if (summary.add > 0) parts.push(`新增 ${summary.add}`);
-	if (summary.modify > 0) parts.push(`修改 ${summary.modify}`);
-	if (summary.move > 0) parts.push(`移动 ${summary.move}`);
-	if (summary.delete > 0) parts.push(`删除 ${summary.delete}`);
-	if (summary.conflict > 0) parts.push(`冲突 ${summary.conflict}`);
-
-	const result = outcome.result;
-	const failed = result?.failed.length ?? 0;
-	const size = result && result.bytesCopied > 0 ? `，${formatBytes(result.bytesCopied)}` : '';
-	const tail = failed > 0 ? `，失败 ${failed}` : '';
-	return `${parts.join('、')}${size}${tail}（${formatDuration(outcome.durationMs)}）`;
 }

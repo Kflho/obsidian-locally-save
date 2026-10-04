@@ -35,10 +35,18 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
 - **`.lsave` 容器**：头部先写、偏移量提前算好（不回写，回写最容易断电写坏）；
   尾部布局是 `[标记][JSON][长度]`，读的时候先看文件末尾 4 字节 —— 写读顺序必须一致。
 - **文件名要带包 ID 前几位**：时间戳只到秒，同秒连导两个包会互相覆盖。
+- **上次同步的结果必须落盘**：存在 `sync-state.json` 的 `lastSync`（结构化数据，
+  由 `recordFromOutcome` 写入、`statusBarText`/`describeRecord` 负责显示），
+  启动时 `restoreLastSync()` 读回来。以前只存内存，重启后状态栏变回"尚未同步"——
+  用户会以为同步记录丢了（这是报过的 bug，别再犯）。
 - **同步包默认放在副本的 `.lsave/bundles` 下**：`.lsave` 在扫描副本时是**整个跳过**的，
-  包才不会被当成"副本新增文件"同步回仓库。完整包与改动包分 `full` / `changes` 两个子目录
+  包才不会被当成"副本新增文件"同步回仓库。完整包与更新包分 `full` / `changes` 两个子目录
   （`src/bundle/paths.ts`）。两个自动留包的开关**各自独立**，导出顺序必须是
-  **先改动包、后完整包** —— 完整包会把"上次导出的样子"更新成当前仓库，反过来改动包就没内容可装了。
+  **先更新包、后完整包** —— 完整包会把"上次导出的样子"更新成当前仓库，反过来更新包就没内容可装了。
+- **更新包是以完整包为基准累积的**（`state.bundle.fullFiles` / `fullGeneration` / `history`）：
+  成员按"自完整包以来变过"挑，但每个条目的 `base` 用**上次导出**时的样子 ——
+  这样按顺序应用的人零冲突；`history` 则是为了认出"对方跳过了几个包、手里是我发过的中间版本"。
+  没有基准（没导过完整包）时**拒绝**导更新包，不要悄悄退化成旧的"相对上次导出"语义。
 
 ## 目录结构
 
@@ -63,7 +71,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 210 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 321 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

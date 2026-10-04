@@ -9,7 +9,7 @@ import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
 import { listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
-import { summarizeOutcome } from './sync-modal';
+import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { pickBundleFromDrop } from './drop';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -601,7 +601,7 @@ export class ApplyBundleModal extends Modal {
 			if (this.plugin.settings.showLastSyncInStatusBar) {
 				this.plugin.statusBar.setSummary('同步包已应用 · 副本已同步');
 			}
-			return `副本已同步（${summarizeOutcome(outcome)}）`;
+			return `副本已同步（${describeRecord(recordFromOutcome(outcome))}）`;
 		} catch (error) {
 			// 包已经应用成功了，副本没跟上只是"备份旧一点"，不该让前者看起来失败
 			new Notice(`同步包已应用，但同步到本地副本失败：${describe(error)}`, 9000);

@@ -9,6 +9,7 @@ import { parsePatterns } from './exclude';
 import { executePlan } from './execute';
 import type { ExecuteResult } from './execute';
 import { loadState, saveState, setTargetBaseline, targetBaseline } from './state';
+import { recordFromOutcome } from './summary';
 import type { Inventory, SyncDirection, SyncPlan } from './types';
 
 /**
@@ -172,9 +173,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		rebuildState(localAfter, remoteAfter, DEFAULT_MTIME_TOLERANCE_MS),
 		Date.now(),
 	);
-	await saveState(stateFile, state);
-
-	return {
+	const outcome: SyncOutcome = {
 		targetDir,
 		plan: planned,
 		result,
@@ -185,6 +184,13 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		changed: result ? countTouched(result) : 0,
 		localInventory: localAfter,
 	};
+
+	// 连同"这次干了什么"一起存盘：重启 Obsidian 之后状态栏要接着显示，
+	// 不能又变回"尚未同步"（以前这份记录只活在内存里）
+	state.lastSync = recordFromOutcome(outcome);
+	await saveState(stateFile, state);
+
+	return outcome;
 }
 
 /** 这一轮动过几个文件（同步结果 → 一个数） */
