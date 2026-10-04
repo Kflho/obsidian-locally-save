@@ -34,6 +34,14 @@ export interface DiffOptions {
 	propagateDeletions: boolean;
 	conflictStrategy: ConflictStrategy;
 	/**
+	 * 方向是否顺带决定冲突裁决。
+	 *
+	 * 默认 true：只上传＝本地说了算、只下载＝副本说了算（命令「仅上传 / 仅下载」就是这个语义）。
+	 * 同步包应用时传 false —— 它借"仅下载"这个方向只是为了**不产生写回对方的动作**
+	 * （包是只读的），冲突该怎么裁决还是听设置的。
+	 */
+	directionDecidesConflict?: boolean;
+	/**
 	 * mtime 容差（毫秒）。
 	 * 默认 2000：FAT/exFAT 这类文件系统只精确到 2 秒，U 盘来回拷会被误判成"改过"。
 	 */

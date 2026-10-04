@@ -136,12 +136,16 @@ export function planSync(
 	const moveTargets = new Map(moves.map(pair => [pair.to, pair]));
 	const moveSources = new Set(moves.map(pair => pair.from));
 
-	// 方向会改变冲突的默认裁决：只上传时本地说了算，只下载时副本说了算
-	const strategy = options.direction === 'upload'
-		? 'local-wins'
-		: options.direction === 'download'
-			? 'remote-wins'
-			: options.conflictStrategy;
+	// 方向会改变冲突的默认裁决：只上传时本地说了算，只下载时副本说了算。
+	// 但同步包应用走的是"借用仅下载方向、裁决仍听设置"（见 DiffOptions.directionDecidesConflict）
+	const decides = options.directionDecidesConflict !== false;
+	const strategy = decides
+		? (options.direction === 'upload'
+			? 'local-wins'
+			: options.direction === 'download'
+				? 'remote-wins'
+				: options.conflictStrategy)
+		: options.conflictStrategy;
 	const allowsUpload = options.direction !== 'download';
 	const allowsDownload = options.direction !== 'upload';
 

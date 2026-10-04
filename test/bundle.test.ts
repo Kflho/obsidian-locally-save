@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
-import type { ApplyMode, ApplyOptions } from '../src/bundle/apply';
+import type { ApplyOptions } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { readBundleInfo, verifyBundle } from '../src/bundle/format';
@@ -63,7 +63,18 @@ const exists = (root: string, rel: string) => fs.existsSync(abs(root, rel));
 function hasConflictCopy(root: string, relDir: string): boolean {
 	const dir = abs(root, relDir);
 	if (!fs.existsSync(dir)) return false;
-	return fs.readdirSync(dir).some(name => name.includes('冲突副本'));
+	return fs.readdirSync(dir).some(name => isConflictCopyName(name));
+}
+
+/** 冲突副本的两种命名：本地那份是输家时叫「本地冲突副本」，包里那份输时叫「包里的版本」 */
+function isConflictCopyName(name: string): boolean {
+	return name.includes('冲突副本') || name.includes('包里的版本');
+}
+
+/** 读第一份冲突副本的内容（用来核对"存下来的到底是哪一份"） */
+function readConflictCopy(root: string): string | null {
+	const name = fs.readdirSync(root).find(item => isConflictCopyName(item));
+	return name ? fs.readFileSync(path.join(root, name), 'utf8') : null;
 }
 
 const log = createLogger(() => 'silent');
@@ -83,7 +94,7 @@ function applyOptions(
 	root: string,
 	stateFile: string,
 	file: string,
-	options: { mode?: ApplyMode; keepBackup?: boolean } = {},
+	options: { conflictStrategy?: 'keep-both' | 'local-wins' | 'remote-wins'; propagateDeletions?: boolean; keepBackup?: boolean } = {},
 ): ApplyOptions {
 	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
 }
@@ -173,7 +184,6 @@ check(
 plan = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
 check('跳过中间包也能直接应用（基准是完整包，世代 ≥ 基准即可）', plan.report.mode, 'fast');
 check('本地停在"我发过的中间版本" → 不算冲突', plan.report.conflicts, 0);
-checkTrue('而且认出它来了', plan.report.historyMatches >= 1, `实际 ${plan.report.historyMatches}`);
 check('新文件算新增', plan.report.adds, 1);
 result = await executeBundlePlan(plan, applyOptions(B, STATE_B, fourth.file as string));
 check('跳过包也不会少内容：a.md 是最新的', read(B, 'notes/a.md'), 'AAA-V4');
@@ -184,6 +194,22 @@ checkTrue('没有产生冲突副本（认得出中间版本）', !hasConflictCop
 const again = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
 check('已经应用过的包 → 同步程度 100%', again.report.syncPercent, 100);
 check('全部条目都被跳过', again.report.skips, 2);
+
+// 5a2. 基准丢了（比如状态文件被删）也不该误判成冲突：
+//      包里记着"这个文件经历过的中间版本"，认得出"这是你发过的，不是我自己改的"
+const I = path.join(ROOT, 'machineI');
+const STATE_LOST = path.join(ROOT, 'state-lost.json');
+fs.mkdirSync(I, { recursive: true });
+const fourthInfoForHistory = await readBundleInfo(fourth.file as string);
+const aEntry = fourthInfoForHistory.header.entries.find(entry => entry.path === 'notes/a.md');
+const past = aEntry?.history?.[0];
+checkTrue('包里带着中间版本记录', past !== undefined, JSON.stringify(aEntry?.history));
+if (past) {
+	write(I, 'notes/a.md', 'AAA', past.mtime); // 手里正是那个中间版本（记录对得上）
+	const lostPlan = await planBundleApply(applyOptions(I, STATE_LOST, fourth.file as string));
+	check('基准丢了、但手里是我发过的版本 → 不算冲突', lostPlan.report.conflicts, 0);
+	checkTrue('而且认得出来', lostPlan.report.historyMatches >= 1, `实际 ${lostPlan.report.historyMatches}`);
+}
 
 // 5b. 真·本地改动还是要留冲突副本（上一条不能把这条也放过）
 write(B, 'notes/a.md', 'B 自己改的', Date.now() + 300_000);
@@ -231,7 +257,7 @@ try {
 }
 checkTrue('损坏的包在计划阶段就被拒绝', thrown.includes('校验失败'), `实际：${thrown}`);
 
-// 8. 完整包 + 「清老的」：只删比包旧的多余文件
+// 8. 删除与新增：与副本同步同一套规则 —— 只有"基准里也有、这次包里没有"的才删（＝对方删过的）
 const C = path.join(ROOT, 'machineC');
 const STATE_C = path.join(ROOT, 'state-c.json');
 fs.mkdirSync(C, { recursive: true });
@@ -239,83 +265,98 @@ write(A, 'only.md', 'ONLY');
 const full = await exportBundle(exportOptions(A, STATE_A));
 checkTrue('再导一个完整包', full.file !== null, full.reason ?? '');
 const fullInfo = await readBundleInfo(full.file as string);
-write(C, 'notes/a.md', 'AAA-V4'); // 内容与时间都跟包里不一样，但比包旧 → 会被覆盖
-write(C, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
-write(C, 'new-extra.md', 'NEW', fullInfo.header.created + 60_000);
 
-plan = await planBundleApply(applyOptions(C, STATE_C, full.file as string, { mode: 'delete-old' }));
-check('应用方式被记进报告', plan.report.applyMode, 'delete-old');
-check('完整包里的文件会新增', plan.report.adds > 0, true);
-check('本地多出来的旧文件会被删', plan.report.extraDeletes, 1);
-result = await executeBundlePlan(
-	plan,
-	applyOptions(C, STATE_C, full.file as string, { mode: 'delete-old' }),
+// C 先应用一遍，于是它有了基准 —— 删除判断全靠基准
+await executeBundlePlan(
+	await planBundleApply(applyOptions(C, STATE_C, full.file as string)),
+	applyOptions(C, STATE_C, full.file as string),
 );
-check('比包旧的多余文件被删了', exists(C, 'old-extra.md'), false);
-check('比包新的文件不动（那是这边刚写的）', exists(C, 'new-extra.md'), true);
+// C 自己也有一个"对方从没见过"的文件
+write(C, 'only-mine.md', 'MINE', fullInfo.header.created + 60_000);
+
+// 对方删掉一个文件、又加了一个，重新导完整包
+const victim = 'notes/a.md';
+checkTrue('C 里有这个文件', exists(C, victim), `缺 ${victim}`);
+fs.rmSync(abs(A, victim));
+write(A, 'brand-new.md', 'NEW');
+const second = await exportBundle(exportOptions(A, STATE_A));
+checkTrue('第二个完整包', second.file !== null, second.reason ?? '');
+
+plan = await planBundleApply(applyOptions(C, STATE_C, second.file as string));
+check('对方删掉的会被删', plan.report.deletes, 1);
+check('算进"对方删过"这一类', plan.report.extraDeletes, 1);
+check('对方新加的是新增', plan.report.adds, 1);
+
+result = await executeBundlePlan(plan, applyOptions(C, STATE_C, second.file as string));
+check('对方删掉的文件这边也删了', exists(C, victim), false);
 check('删掉的进了回收目录（没直接消失）', fs.existsSync(path.join(C, '.trash', 'locally-save')), true);
+checkTrue('我独有的文件一个都没删', exists(C, 'only-mine.md'), '基准里没有的文件不该删');
+check('对方新加的文件到了', read(C, 'brand-new.md'), 'NEW');
 
-// 9. 默认「所有都保留」：一个多余文件都不删
-const D = path.join(ROOT, 'machineD');
-const STATE_D = path.join(ROOT, 'state-d.json');
-fs.mkdirSync(D, { recursive: true });
-write(D, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
-plan = await planBundleApply(applyOptions(D, STATE_D, full.file as string));
-check('默认应用方式是「所有都保留」', plan.report.applyMode, 'keep-all');
-check('默认一个多余文件都不删', plan.report.extraDeletes, 0);
-
-// 10. 强制应用：让仓库与包完全一致
+// 9. 冲突：**新的那份占原名**，旧的那份存成冲突副本 —— 与副本同步完全一致
+// （以前是"包的内容无条件占原名"，本地改得更新也没用 —— 这就是用户报的那个问题）
 const F = path.join(ROOT, 'machineF');
 const STATE_F = path.join(ROOT, 'state-f.json');
 fs.mkdirSync(F, { recursive: true });
-write(F, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
-write(F, 'new-extra.md', 'NEW', fullInfo.header.created + 60_000);
-write(F, 'notes/a.md', '本地改过的内容', fullInfo.header.created + 120_000);
-
-plan = await planBundleApply(applyOptions(F, STATE_F, full.file as string, { mode: 'force' }));
-check('强制应用：多余文件全删（不管新旧）', plan.report.extraDeletes, 2);
-checkTrue(
-	'强制应用：本地改过的会被覆盖，且计入报告',
-	plan.report.forcedOverwrites >= 1,
-	`实际 ${plan.report.forcedOverwrites}`,
+// F 先应用一遍，拿到基准
+await executeBundlePlan(
+	await planBundleApply(applyOptions(F, STATE_F, second.file as string)),
+	applyOptions(F, STATE_F, second.file as string),
 );
-result = await executeBundlePlan(
-	plan,
-	applyOptions(F, STATE_F, full.file as string, { mode: 'force' }),
-);
-check('比包旧的多余文件没了', exists(F, 'old-extra.md'), false);
-check('比包新的也没了（这才是"强制一致"）', exists(F, 'new-extra.md'), false);
-check('本地改动被包的内容覆盖', read(F, 'notes/a.md'), 'AAA-V5');
-check('被覆盖的本地版本进了回收目录', fs.existsSync(path.join(F, '.trash', 'locally-save')), true);
+check('基准建立：文件在 F 里', read(F, 'brand-new.md'), 'NEW');
 
-// 10b. 完整包 + 「所有都保留」：本地改过的（比包新的）留冲突副本，不静默覆盖
+// 两边都改同一个文件，F 改得更新
+write(F, 'brand-new.md', 'F 改的（更新）', Date.now() + 600_000);
+write(A, 'brand-new.md', 'A 改的（更旧）', Date.now() + 300_000);
+const thirdFull = await exportBundle(exportOptions(A, STATE_A));
+checkTrue('第三个完整包', thirdFull.file !== null, thirdFull.reason ?? '');
+
+plan = await planBundleApply(applyOptions(F, STATE_F, thirdFull.file as string));
+check('两边都改过 → 冲突', plan.report.conflicts, 1);
+result = await executeBundlePlan(plan, applyOptions(F, STATE_F, thirdFull.file as string));
+check('新的那份（本地的）占原名', read(F, 'brand-new.md'), 'F 改的（更新）');
+checkTrue('旧的那份（包里的）存成了冲突副本', hasConflictCopy(F, '.'), '没找到冲突副本');
+check('冲突副本里是包里的内容', readConflictCopy(F), 'A 改的（更旧）');
+
+// 10. 本地那份只是"旧副本"（包里没给基准）→ 直接覆盖，不该留冲突副本
 const G = path.join(ROOT, 'machineG');
 const STATE_G = path.join(ROOT, 'state-g.json');
 fs.mkdirSync(G, { recursive: true });
-write(G, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
-write(G, 'notes/a.md', '本地改过的内容', fullInfo.header.created + 120_000);
-// 包里也有、但本地这份比包旧 → 那是旧副本，直接覆盖就行（不该判成冲突）
-write(G, 'only.md', '旧内容', fullInfo.header.created - 60_000);
-plan = await planBundleApply(applyOptions(G, STATE_G, full.file as string));
-check('比包新的本地改动 → 冲突（不是直接覆盖）', plan.report.conflicts, 1);
-check('包里也有、但本地是旧副本 → 正常覆盖', plan.report.overwrites, 1);
+const thirdFullInfo = await readBundleInfo(thirdFull.file as string);
+write(G, 'brand-new.md', '很旧的副本', thirdFullInfo.header.created - 600_000);
+plan = await planBundleApply(applyOptions(G, STATE_G, thirdFull.file as string));
+check('比包旧的本地副本不算冲突', plan.report.conflicts, 0);
+checkTrue('算作覆盖', plan.report.overwrites >= 1, `实际 ${plan.report.overwrites}`);
 
-// 11. 防呆：改动包不能配破坏性的应用方式
-let guardMessage = '';
-try {
-	await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES, { mode: 'force' }));
-} catch (error) {
-	guardMessage = error instanceof Error ? error.message : String(error);
-}
-checkTrue('改动包 + 强制应用 → 直接拒绝', guardMessage.includes('完整副本'), guardMessage);
-guardMessage = '';
-try {
-	await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES, { mode: 'delete-old' }));
-} catch (error) {
-	guardMessage = error instanceof Error ? error.message : String(error);
-}
-checkTrue('改动包 + 清老的 → 直接拒绝', guardMessage.includes('完整副本'), guardMessage);
-check('改动包 + 所有都保留 → 照常', (await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES))).report.applyMode, 'keep-all');
+// 11. 「同步删除」关掉时：对方删掉的文件会被取回来（与副本同步一致）
+const H = path.join(ROOT, 'machineH');
+const STATE_H = path.join(ROOT, 'state-h.json');
+fs.mkdirSync(H, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(H, STATE_H, second.file as string)),
+	applyOptions(H, STATE_H, second.file as string),
+);
+check('H 有基准：only.md 在', read(H, 'only.md'), 'ONLY');
+
+// 对方把 only.md 删掉，重导完整包
+fs.rmSync(abs(A, 'only.md'));
+const fourthFull = await exportBundle(exportOptions(A, STATE_A));
+checkTrue('第四个完整包', fourthFull.file !== null, fourthFull.reason ?? '');
+
+const deleteOn = await planBundleApply(applyOptions(H, STATE_H, fourthFull.file as string, {
+	propagateDeletions: true,
+}));
+check('开着同步删除 → 对方删的这边也删', deleteOn.report.deletes, 1);
+
+const deleteOff = await planBundleApply(applyOptions(H, STATE_H, fourthFull.file as string, {
+	propagateDeletions: false,
+}));
+check('关掉同步删除 → 一个都不删（取回来）', deleteOff.report.deletes, 0);
+checkTrue(
+	'而且报告里说明了策略',
+	deleteOff.report.propagateDeletions === false,
+	`实际 ${deleteOff.report.propagateDeletions}`,
+);
 
 // 10. 复用同步扫好的清单：传进去的清单就是准的（自动留包靠它省一次全库遍历）
 const E = path.join(ROOT, 'machineE');
