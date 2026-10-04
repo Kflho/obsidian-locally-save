@@ -86,6 +86,16 @@ export async function pathExists(absPath: string): Promise<boolean> {
 	}
 }
 
+/** 这个目录存不存在（用来把"路径写错了"和"里面没东西"分开说） */
+export async function dirExists(absPath: string): Promise<boolean> {
+	try {
+		const stat = await fs.promises.stat(absPath);
+		return stat.isDirectory();
+	} catch {
+		return false;
+	}
+}
+
 export async function ensureDir(absDir: string): Promise<void> {
 	await fs.promises.mkdir(absDir, { recursive: true });
 }

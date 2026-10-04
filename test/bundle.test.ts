@@ -343,7 +343,25 @@ plan = await planBundleApply(applyOptions(G, STATE_G, thirdFull.file as string))
 check('比包旧的本地副本不算冲突', plan.report.conflicts, 0);
 checkTrue('算作覆盖', plan.report.overwrites >= 1, `实际 ${plan.report.overwrites}`);
 
-// 11. 「同步删除」关掉时：对方删掉的文件会被取回来（与副本同步一致）
+// 12. 应用两次同一个包：我独有的文件**不该**在第二次被删
+// （基准只能记"两边上次一致的样子"，把我独有的文件记进去的话，第二次就会被当成"对方删过它"）
+const J = path.join(ROOT, 'machineJ');
+const STATE_J = path.join(ROOT, 'state-j.json');
+fs.mkdirSync(J, { recursive: true });
+write(J, 'only-mine-2.md', 'MINE'); // 应用**之前**就在，且包里没有它
+await executeBundlePlan(
+	await planBundleApply(applyOptions(J, STATE_J, second.file as string)),
+	applyOptions(J, STATE_J, second.file as string),
+);
+checkTrue('第一次应用后它还在', exists(J, 'only-mine-2.md'), '不该在第一次就被删');
+
+const appliedAgain = await planBundleApply(applyOptions(J, STATE_J, second.file as string));
+check('第二次应用也不会删它（基准里没记它）', appliedAgain.report.deletes, 0);
+await executeBundlePlan(appliedAgain, applyOptions(J, STATE_J, second.file as string));
+checkTrue('第二次应用后它依然在', exists(J, 'only-mine-2.md'), '被当成"对方删过它"删掉了');
+
+// 11. 删除传播：两边都见过、对方又删了的文件 → 第一次就该跟着删
+//（「同步删除」关掉时则取回来；与副本同步一致。12b 那个"我独有的"是另一回事，见 test 12）
 const H = path.join(ROOT, 'machineH');
 const STATE_H = path.join(ROOT, 'state-h.json');
 fs.mkdirSync(H, { recursive: true });
