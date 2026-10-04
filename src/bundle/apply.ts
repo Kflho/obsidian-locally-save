@@ -45,6 +45,16 @@ import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../syn
 const TOLERANCE = DEFAULT_MTIME_TOLERANCE_MS;
 const CHUNK = 4 * 1024 * 1024;
 
+/** 本次应用有多"以包为准"（见 ApplyOptions.strictness） */
+export type ApplyStrictness = 'normal' | 'bundle-wins' | 'mirror';
+
+/** 三档在界面上的说法 */
+export const STRICTNESS_LABELS: Record<ApplyStrictness, string> = {
+	normal: '按设置（安全）：本地改过的保留，分歧留两份，我独有的文件不动',
+	'bundle-wins': '以包为准：分歧一律听包的（本地那份进回收目录），对方删过的也跟着删',
+	mirror: '完全镜像：包里没有的本地文件全删（连我本机新建的），仓库 = 包',
+};
+
 export interface ApplyOptions {
 	settings: PluginSettings;
 	log: Logger;
@@ -56,8 +66,30 @@ export interface ApplyOptions {
 	configDir?: string;
 	/** 本次临时覆盖冲突裁决；不填就跟随设置 */
 	conflictStrategy?: ConflictStrategy;
+	/**
+	 * **强硬程度**（本次应用有多"以包为准"）。
+	 *
+	 * - `normal`（默认）：按设置 —— 本地改过的保留、分歧留两份、我独有的文件不动
+	 * - `bundle-wins`：分歧一律听包的（本地那份进回收目录）；对方删过的文件跟着删，
+	 *   不管本地改没改 —— 用在"对方做过颠覆性改动"之后
+	 * - `mirror`：在 `bundle-wins` 之上，**包里没有的本地文件全删**（连我本机新建的也删）
+	 *   → 参与同步的那部分内容与包完全一致
+	 *
+	 * 排除规则命中的东西（配置目录等）三档都不动。
+	 */
+	strictness?: ApplyStrictness;
 	/** 本次临时覆盖"删不删多余文件"；不填就跟随设置 */
 	propagateDeletions?: boolean;
+	/**
+	 * **强制与包一致**：让本机变成和包一模一样。
+	 *
+	 * 用在"颠覆性改动"之后（在另一台机器上大删大改、重组了目录）：
+	 * - 包里没有的本地文件**全删**（不管基准里有没有 —— 那些"我独有的残留"也会被清掉）
+	 * - 本地改动一律**以包为准**（本地那份进回收目录，不留冲突副本）
+	 *
+	 * 默认关。排除规则命中的东西（配置目录等）不参与，所以"一致"是指"参与同步的那部分一致"。
+	 */
+	force?: boolean;
 	/** 被删掉的本地版本先进回收目录（默认跟随设置里的「删除前先备份」） */
 	keepBackup?: boolean;
 	onProgress?: (done: number, total: number, file: string) => void;
@@ -91,8 +123,12 @@ export interface ApplyReport {
 	overwrites: number;
 	skips: number;
 	conflicts: number;
-	/** 本地改过、却被包覆盖掉的数量（只有"以包为准"才会出现） */
+	/** 本地改过、却被包覆盖掉的数量（"以包为准"或强制一致才会出现） */
 	forcedOverwrites: number;
+	/** 这次是不是"强制与包一致" */
+	forced: boolean;
+	/** 本次用的强硬程度 */
+	strictness: ApplyStrictness;
 	/** 本地停在"对方发过的中间版本"上、直接覆盖的数量 */
 	historyMatches: number;
 	/** 要删的本地文件总数 */
@@ -111,9 +147,9 @@ export interface ApplyReport {
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
 export type ApplyAction =
-	/** 用包里的内容写进这个路径（新增或覆盖） */
-	| { kind: 'write'; path: string; entry: BundleEntry }
-	/** 删掉本地的这个文件（对方删了它） */
+	/** 用包里的内容写进这个路径（新增或覆盖）；backup ＝ 先把本地那份挪进回收目录 */
+	| { kind: 'write'; path: string; entry: BundleEntry; backup?: boolean }
+	/** 删掉本地的这个文件（对方删了它，或强制一致时"包里没有它"） */
 	| { kind: 'delete'; path: string }
 	/** 两边都改过：留两份，新的占原名 */
 	| { kind: 'conflict'; path: string; entry: BundleEntry; winner: 'local' | 'remote' }
@@ -158,8 +194,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (!ok) throw new Error('同步包校验失败：文件可能在传输中损坏了，请重新拷一份再试');
 	}
 
-	const conflictStrategy = options.conflictStrategy ?? settings.conflictStrategy;
-	const propagateDeletions = options.propagateDeletions ?? settings.propagateDeletions;
+	const strictness: ApplyStrictness = options.strictness ?? 'normal';
+	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
+	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
+	const conflictStrategy = strictness === 'normal'
+		? (options.conflictStrategy ?? settings.conflictStrategy)
+		: 'remote-wins';
+	const propagateDeletions = strictness === 'normal'
+		? (options.propagateDeletions ?? settings.propagateDeletions)
+		: true;
 	const keepBackup = options.keepBackup ?? settings.deletedToTrash;
 
 	const state = await loadState(options.stateFile);
@@ -193,14 +236,18 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
 	for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
 
-	const planned = planSync(local, remote, baseline, {
-		// 包是只读的：借"仅下载"方向只为不产生写回对方的动作，冲突裁决仍听设置
-		direction: 'download',
-		directionDecidesConflict: false,
-		conflictStrategy,
-		propagateDeletions,
-		mtimeToleranceMs: TOLERANCE,
-	});
+	const planned = strictness === 'normal'
+		? planSync(local, remote, baseline, {
+			// 包是只读的：借"仅下载"方向只为不产生写回对方的动作，冲突裁决仍听设置
+			direction: 'download',
+			directionDecidesConflict: false,
+			conflictStrategy,
+			propagateDeletions,
+			mtimeToleranceMs: TOLERANCE,
+		})
+		// 强制档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
+		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
+		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0 };
 
 	// ------------------------------------------------- 比对结果 → 落地动作
 	const actions: ApplyAction[] = [];
@@ -211,8 +258,48 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let historyMatches = 0;
 	let deletes = 0;
 	let moves = 0;
+	/** 本地多出来、这次要删的（对方删过的，或镜像档下我独有的） */
+	let extraDeletes = 0;
 
 	const localDeleted = new Set(header.deleted.map(item => item.path));
+
+	// ------------------------------------------------- 强制档：直接"以包为准"
+	if (strictness !== 'normal') {
+		// ① 包里有的：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
+		for (const entry of header.entries) {
+			const here = local.files.get(entry.path);
+			if (!here) {
+				adds++;
+				actions.push({ kind: 'write', path: entry.path, entry });
+				continue;
+			}
+			if (here.size === entry.size && Math.abs(here.mtime - entry.mtime) <= TOLERANCE) continue;
+
+			const base = baseline[entry.path];
+			const localChanged = base
+				? here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE
+				: false;
+			if (localChanged) forcedOverwrites++;
+			overwrites++;
+			actions.push({
+				kind: 'write',
+				path: entry.path,
+				entry,
+				backup: localChanged && keepBackup,
+			});
+		}
+
+		// ② 包里没有的本地文件：
+		//   `bundle-wins` → 只删"基准里也有"的（＝对方删过的）
+		//   `mirror`      → 全删（连本机新建的也删）
+		for (const file of local.files.keys()) {
+			if (entriesByPath.has(file)) continue;
+			const seenBefore = baseline[file] !== undefined;
+			if (strictness === 'bundle-wins' && !seenBefore) continue;
+			deletes++;
+			actions.push({ kind: 'delete', path: file });
+		}
+	}
 
 	for (const action of planned.actions) {
 		const entry = entriesByPath.get(action.path);
@@ -222,15 +309,24 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				const here = local.files.get(action.path);
 				if (!here) {
 					adds++;
-				} else {
-					overwrites++;
-					// 本地改过（不等于基准）却被覆盖 —— 只有"以包为准"才会走到这儿
-					const base = baseline[action.path];
-					if (base && (here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE)) {
-						forcedOverwrites++;
-					}
+					actions.push({ kind: 'write', path: action.path, entry });
+					break;
 				}
-				actions.push({ kind: 'write', path: action.path, entry });
+
+				// 本地有、且内容与包不同 → 覆盖。本地那份动过没有？
+				const base = baseline[action.path];
+				const localChanged = base
+					? here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE
+					: false;
+				if (localChanged) forcedOverwrites++;
+				overwrites++;
+				actions.push({
+					kind: 'write',
+					path: action.path,
+					entry,
+					// 以包为准/镜像时，本地那份动过的要先挪进回收目录（默认模式下走到这儿说明它没动过，没什么可备份的）
+					backup: strictness !== 'normal' && localChanged && keepBackup,
+				});
 				break;
 			}
 			case 'delete-local': {
@@ -277,6 +373,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		}
 	}
 
+	// 完全镜像那档已经在上面一并处理过了（"包里没有的全删"），这里不再补
+
 	// ------------------------------------------------------------ 统计
 	let synchronized = 0;
 	for (const entry of header.entries) {
@@ -288,19 +386,18 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	// "包要求删、但本地改过所以保留"的：只统计，不动手（删除是唯一不可逆的动作）
 	let keptDeletes = 0;
-	let extraDeletes = 0;
+	// 多余文件重新按最终动作统一次数（镜像那一档在上面先记过一批，这里一并算上）
+	extraDeletes = 0;
 	for (const action of actions) {
 		if (action.kind !== 'delete') continue;
-		if (localDeleted.has(action.path)) {
-			// 包里点名要删的
-			continue;
-		}
-		// 包里没点名、却要删 → 是"完整包里没有它、而基准里有"（对方删过的）
-		extraDeletes++;
+		if (localDeleted.has(action.path)) continue; // 包点名要删的
+		extraDeletes++; // 包里没点名、却要删 → "完整包里没有它"（对方删过的，或镜像时的本机独有）
 	}
 	for (const item of header.deleted) {
 		const here = local.files.get(item.path);
 		if (!here) continue;
+		// 强制模式下这些会被删掉，就不算"保留"了
+		if (strictness !== 'normal') continue;
 		const base = baseline[item.path];
 		const stillBase = base && here.size === base.size && Math.abs(here.mtime - base.mtime) <= TOLERANCE;
 		if (!stillBase) keptDeletes++;
@@ -327,6 +424,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		conflictStrategy,
 		propagateDeletions,
 		keepBackup,
+		strictness,
+		forced: strictness !== 'normal',
 		adds,
 		overwrites,
 		skips: synchronized,
@@ -374,6 +473,15 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 
 			switch (action.kind) {
 				case 'write': {
+					// 强制模式下覆盖本地改动前，先把本地那份挪进回收目录
+					if (action.backup) {
+						await moveToTrash(
+							target,
+							toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`),
+							action.path,
+							stamp,
+						);
+					}
 					await extractEntry(options.file, plan.info, action.entry, target);
 					result.written++;
 					result.bytesWritten += action.entry.size;

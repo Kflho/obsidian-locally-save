@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
-import type { ApplyOptions } from '../src/bundle/apply';
+import type { ApplyOptions, ApplyPlan } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { readBundleInfo, verifyBundle } from '../src/bundle/format';
@@ -103,7 +103,12 @@ function applyOptions(
 	root: string,
 	stateFile: string,
 	file: string,
-	options: { conflictStrategy?: 'keep-both' | 'local-wins' | 'remote-wins'; propagateDeletions?: boolean; keepBackup?: boolean } = {},
+	options: {
+		conflictStrategy?: 'keep-both' | 'local-wins' | 'remote-wins';
+		propagateDeletions?: boolean;
+		keepBackup?: boolean;
+		strictness?: 'normal' | 'bundle-wins' | 'mirror';
+	} = {},
 ): ApplyOptions {
 	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
 }
@@ -360,8 +365,55 @@ check('第二次应用也不会删它（基准里没记它）', appliedAgain.rep
 await executeBundlePlan(appliedAgain, applyOptions(J, STATE_J, second.file as string));
 checkTrue('第二次应用后它依然在', exists(J, 'only-mine-2.md'), '被当成"对方删过它"删掉了');
 
-// 11. 删除传播：两边都见过、对方又删了的文件 → 第一次就该跟着删
+// 13. 强硬程度三档：默认 / 以包为准 / 完全镜像
+//     场景：对方做过"颠覆性改动"（大删大改），这台机器要跟包一模一样
+//     （下面会从 A 删掉 notes/new.md，test 11 还要用到它，所以用完再加回来）
+write(A, 'notes/new.md', 'NEW');
+const L = path.join(ROOT, 'machineL');
+const STATE_L = path.join(ROOT, 'state-l.json');
+fs.mkdirSync(L, { recursive: true });
+// 先应用 second（里面有 only.md），再把 only.md 改掉 —— 造出"对方删了、我改了"
+await executeBundlePlan(
+	await planBundleApply(applyOptions(L, STATE_L, second.file as string)),
+	applyOptions(L, STATE_L, second.file as string),
+);
+checkTrue('L 里有 notes/new.md', exists(L, 'notes/new.md'), '');
+write(L, 'notes/new.md', '我改过它', Date.now() + 900_000);
+write(L, 'mine-new.md', '本机新建的');
+
+const hasDelete = (p: ApplyPlan, path: string) =>
+	p.actions.some(action => action.kind === 'delete' && action.path === path);
+
+// 对方把 notes/new.md 删掉，重导一个完整包（这个包里没有它）
+fs.rmSync(abs(A, 'notes/new.md'));
+const noNew = await exportBundle(exportOptions(A, STATE_A));
+checkTrue('导出"没有 notes/new.md"的完整包', noNew.file !== null, noNew.reason ?? '');
+
+const normalPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as string, { strictness: 'normal' }));
+const winsPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as string, { strictness: 'bundle-wins' }));
+const mirrorPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as string, { strictness: 'mirror' }));
+
+check('默认：我改过的、对方删了的 → 保留', hasDelete(normalPlan, 'notes/new.md'), false);
+check('以包为准：删掉它', hasDelete(winsPlan, 'notes/new.md'), true);
+check('默认：本机新建的保留', hasDelete(normalPlan, 'mine-new.md'), false);
+check('以包为准：本机新建的也保留（它不属于"对方删过"）', hasDelete(winsPlan, 'mine-new.md'), false);
+check('完全镜像：连本机新建的也删', hasDelete(mirrorPlan, 'mine-new.md'), true);
+check('镜像档删得最多', mirrorPlan.report.deletes > winsPlan.report.deletes, true);
+
+// 镜像档执行：仓库该与包一致（参与同步的那部分）
+await executeBundlePlan(mirrorPlan, applyOptions(L, STATE_L, noNew.file as string, { strictness: 'mirror' }));
+checkTrue('执行后：我改过的、对方删了的没了', !exists(L, 'notes/new.md'), '');
+checkTrue('执行后：本机新建的也没了', !exists(L, 'mine-new.md'), '');
+check('执行后：包里别的文件都在', read(L, 'brand-new.md'), 'A 改的（更旧）');
+checkTrue(
+	'被删的两份都进了回收目录（没真消失）',
+	fs.existsSync(path.join(L, '.trash', 'locally-save')),
+	'',
+);
 //（「同步删除」关掉时则取回来；与副本同步一致。12b 那个"我独有的"是另一回事，见 test 12）
+// 11. 删除传播：两边都见过、对方又删了的文件 → 第一次就该跟着删
+//（「同步删除」关掉时则取回来，与副本同步一致。test 13 删过 notes/new.md，这里先加回来）
+write(A, 'notes/new.md', 'NEW');
 const H = path.join(ROOT, 'machineH');
 const STATE_H = path.join(ROOT, 'state-h.json');
 fs.mkdirSync(H, { recursive: true });

@@ -1,8 +1,8 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { executeBundlePlan, planBundleApply } from '../bundle/apply';
-import type { ApplyPlan } from '../bundle/apply';
+import { executeBundlePlan, planBundleApply, STRICTNESS_LABELS } from '../bundle/apply';
+import type { ApplyPlan, ApplyStrictness } from '../bundle/apply';
 import { CONFLICT_OPTIONS } from '../settings/model';
 import type { ConflictStrategy } from '../sync/types';
 import { exportBundle } from '../bundle/export';
@@ -216,12 +216,10 @@ export class ApplyBundleModal extends Modal {
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
 	/**
-	 * 本次临时覆盖：默认全部**跟随设置**（与本地副本同步同一套规则）。
-	 * 不搞"三个固定模式"那套死板的东西 —— 冲突与删除本来就该和副本那边一致，
-	 * 这里只是给"这一次我想不一样"留个口子。
+	 * 本次的**强硬程度**：默认"按设置"（与副本同步同一套规则），
+	 * 需要时可以这次性地"以包为准"或"完全镜像"（对方做过颠覆性改动时用）。
 	 */
-	private conflictOverride: 'default' | ConflictStrategy = 'default';
-	private deleteOverride: 'default' | 'yes' | 'no' = 'default';
+	private strictness: ApplyStrictness = 'normal';
 	private keepBackup: boolean;
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
@@ -292,38 +290,20 @@ export class ApplyBundleModal extends Modal {
 					});
 			});
 
-		// ---------------------------------------------------------- 本次策略
-		// 默认跟随设置（与副本同步完全一致）；想"这一次不一样"才动这两项
+		// ---------------------------------------------------------- 应用方式
+		// 一条轴：有多"以包为准"。默认最安全；对面做过颠覆性改动时才往上调
 		new Setting(contentEl)
-			.setName('遇到两边都改的')
-			.setDesc('与副本同步用的是同一套规则；这里只覆盖这一次')
+			.setName('应用方式')
+			.setDesc('默认与本地副本同步同一套规则；对面大删大改过、想让这台机器跟包一模一样时往上调')
 			.addDropdown(dropdown => dropdown
 				.addOptions({
-					default: `跟随设置（${CONFLICT_OPTIONS[this.plugin.settings.conflictStrategy]}）`,
-					'keep-both': CONFLICT_OPTIONS['keep-both'],
-					'local-wins': CONFLICT_OPTIONS['local-wins'],
-					'remote-wins': CONFLICT_OPTIONS['remote-wins'],
+					normal: STRICTNESS_LABELS.normal,
+					'bundle-wins': STRICTNESS_LABELS['bundle-wins'],
+					mirror: STRICTNESS_LABELS.mirror,
 				})
-				.setValue(this.conflictOverride)
+				.setValue(this.strictness)
 				.onChange(value => {
-					this.conflictOverride = value === 'keep-both' || value === 'local-wins' || value === 'remote-wins'
-						? value
-						: 'default';
-					void this.replan();
-				}));
-
-		new Setting(contentEl)
-			.setName('对方删掉的文件')
-			.setDesc('「同步删除」关着时，被删的文件会从包里取回来（与副本同步一致）')
-			.addDropdown(dropdown => dropdown
-				.addOptions({
-					default: `跟随设置（${this.plugin.settings.propagateDeletions ? '跟着删' : '不删，取回来'}）`,
-					yes: '跟着删',
-					no: '不删，取回来',
-				})
-				.setValue(this.deleteOverride)
-				.onChange(value => {
-					this.deleteOverride = value === 'yes' || value === 'no' ? value : 'default';
+					this.strictness = value === 'bundle-wins' || value === 'mirror' ? value : 'normal';
 					void this.replan();
 				}));
 
@@ -520,9 +500,7 @@ export class ApplyBundleModal extends Modal {
 				stateFile: this.plugin.stateFile(),
 				file,
 				configDir: this.plugin.configDir(),
-				// 「跟随设置」＝不传覆盖值，让引擎直接读设置（与副本同步同一套）
-				...(this.conflictOverride === 'default' ? {} : { conflictStrategy: this.conflictOverride }),
-				...(this.deleteOverride === 'default' ? {} : { propagateDeletions: this.deleteOverride === 'yes' }),
+				strictness: this.strictness,
 				keepBackup: this.keepBackup,
 			});
 			this.plan = plan;
