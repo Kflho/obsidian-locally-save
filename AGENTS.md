@@ -54,7 +54,8 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
 - **目录 / 文件冲突**（本地同路径是文件夹、包里是文件）：`normal` 档报成明确失败、**不动那个文件夹**；
   强制两档才把它挪进回收目录腾位置。
 - **上一次应用的结果必须落盘**：`state.bundle.files` 只记**两边都见过、且这次真的写成了一致**的路径 ——
-  绝不能写成"当前仓库的完整清单"（那会把我独有的文件也记进基准，下次应用就被当成"对方删过它"删掉，这是报过的 bug）。（`disk.ts` 的 `CONFLICT_TRASH_DIR`，
+  绝不能写成"当前仓库的完整清单"（那会把我独有的文件也记进基准，下次应用就被当成"对方删过它"删掉，这是报过的 bug）。
+- **冲突输的那一份必须挪进回收目录的「冲突」文件夹**（`disk.ts` 的 `CONFLICT_TRASH_DIR`，
   本地侧 `.trash/locally-save/冲突/时间戳/`、副本侧 `.lsave/trash/冲突/时间戳/`），
   **不要留在原地** —— 留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份、越滚越多。
   两条通道（副本同步 / 应用同步包）都要守这条。
@@ -86,7 +87,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 356 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 382 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
