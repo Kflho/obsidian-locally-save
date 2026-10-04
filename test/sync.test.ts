@@ -189,6 +189,18 @@ checkTrue(
 outcome = await runSync(host());
 check('两边一致时改动数为 0', outcome.changed, 0);
 
+// 11. 包留在副本文件夹里也不会被当成"副本内容"传回仓库
+// （默认的包目录就在目标文件夹的 .lsave 下，这个目录必须整个跳过）
+fs.mkdirSync(path.join(TARGET, '.lsave', 'bundles', 'changes'), { recursive: true });
+fs.writeFileSync(path.join(TARGET, '.lsave', 'bundles', 'changes', 'fake.lsave'), 'FAKE');
+outcome = await runSync(host());
+checkTrue(
+	'留在副本里的包不会被同步回仓库',
+	!exists(VAULT, '.lsave/bundles/changes/fake.lsave'),
+	'目标目录下的 .lsave 整个都该跳过',
+);
+check('这一轮也不该有任何动作', outcome.plan.actions.length, 0);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

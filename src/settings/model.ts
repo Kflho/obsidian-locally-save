@@ -98,9 +98,9 @@ export interface PluginSettings {
 	showLastSyncInStatusBar: boolean;
 
 	// ------------------------------------------------------------ 同步包
-	/** 同步包放哪个文件夹（留空＝每次导出时再问） */
+	/** 同步包放哪儿；**留空＝放在同步目标文件夹的 `.lsave/bundles` 下** */
 	bundleDir: string;
-	/** 导出完整副本还是仅改动 */
+	/** 手动导出对话框里的默认类型 */
 	bundleMode: 'full' | 'changes';
 	/** 应用完整副本时，删掉本地多出来的文件 */
 	bundleDeleteMissing: boolean;
@@ -108,8 +108,10 @@ export interface PluginSettings {
 	bundleVerify: boolean;
 	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
 	rememberFingerprints: boolean;
-	/** 每次同步成功后，顺手把这次的改动导成一个包放到同步包文件夹里 */
-	autoExportBundle: boolean;
+	/** 每次同步成功后，把这一次的改动导成一个包（几乎不额外花时间） */
+	autoExportChanges: boolean;
+	/** 每次同步成功后，导一份完整包（每次都重写整个仓库，慢，默认关） */
+	autoExportFull: boolean;
 
 	// ------------------------------------------------------------ 界面
 	/** 在左侧栏放一个插件图标 */
@@ -142,8 +144,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	bundleDeleteMissing: false,
 	bundleVerify: true,
 	rememberFingerprints: true,
-	// 默认关：会往磁盘写文件的事，得用户自己点头
-	autoExportBundle: false,
+	// 会往磁盘写文件的事，默认都得用户自己点头
+	autoExportChanges: false,
+	autoExportFull: false,
 
 	ribbonIcon: true,
 	showStatusBar: true,
@@ -229,7 +232,8 @@ export function settingsFrom(data: unknown): PluginSettings {
 		bundleDeleteMissing: coerceBoolean(raw.bundleDeleteMissing, DEFAULT_SETTINGS.bundleDeleteMissing),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
-		autoExportBundle: coerceBoolean(raw.autoExportBundle, DEFAULT_SETTINGS.autoExportBundle),
+		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
+		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 
 		ribbonIcon: coerceBoolean(raw.ribbonIcon, DEFAULT_SETTINGS.ribbonIcon),
 		showStatusBar: coerceBoolean(raw.showStatusBar, DEFAULT_SETTINGS.showStatusBar),
