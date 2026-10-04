@@ -102,8 +102,6 @@ export interface PluginSettings {
 	bundleDir: string;
 	/** 手动导出对话框里的默认类型 */
 	bundleMode: 'full' | 'changes';
-	/** 应用完整副本时，删掉本地多出来的文件 */
-	bundleDeleteMissing: boolean;
 	/** 应用前校验包的完整性（读一遍全包算校验和，大包会慢一点） */
 	bundleVerify: boolean;
 	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
@@ -145,7 +143,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 
 	bundleDir: '',
 	bundleMode: 'full',
-	bundleDeleteMissing: false,
 	bundleVerify: true,
 	rememberFingerprints: true,
 	// 会往磁盘写文件的事，默认都得用户自己点头
@@ -235,7 +232,6 @@ export function settingsFrom(data: unknown): PluginSettings {
 
 		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
 		bundleMode: coerceBundleMode(raw.bundleMode),
-		bundleDeleteMissing: coerceBoolean(raw.bundleDeleteMissing, DEFAULT_SETTINGS.bundleDeleteMissing),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),

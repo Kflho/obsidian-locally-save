@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
-import type { ApplyOptions } from '../src/bundle/apply';
+import type { ApplyMode, ApplyOptions } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { readBundleInfo, verifyBundle } from '../src/bundle/format';
@@ -81,8 +81,18 @@ function exportOptions(root: string, stateFile: string, overrides: Partial<Plugi
 	};
 }
 
-function applyOptions(root: string, stateFile: string, file: string, overrides: Partial<PluginSettings> = {}): ApplyOptions {
-	return { settings: settings(overrides), log, vaultRoot: root, stateFile, file };
+/**
+ * 造一份应用参数。
+ * 第 4 个参数是**应用方式**（keep-all / delete-old / force），不是设置项 ——
+ * 这三种模式属于"这一次怎么应用"，不进 data.json。
+ */
+function applyOptions(
+	root: string,
+	stateFile: string,
+	file: string,
+	options: { mode?: ApplyMode; keepBackup?: boolean } = {},
+): ApplyOptions {
+	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
 }
 
 const STATE_A = path.join(ROOT, 'state-a.json');
@@ -191,7 +201,7 @@ try {
 }
 checkTrue('损坏的包在计划阶段就被拒绝', thrown.includes('校验失败'), `实际：${thrown}`);
 
-// 8. 完整包 + "删除多余文件"：只删比包旧的
+// 8. 完整包 + 「清老的」：只删比包旧的多余文件
 const C = path.join(ROOT, 'machineC');
 const STATE_C = path.join(ROOT, 'state-c.json');
 fs.mkdirSync(C, { recursive: true });
@@ -203,20 +213,79 @@ write(C, 'notes/a.md', 'AAA-V4'); // 内容与时间都跟包里不一样，但�
 write(C, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
 write(C, 'new-extra.md', 'NEW', fullInfo.header.created + 60_000);
 
-plan = await planBundleApply(applyOptions(C, STATE_C, full.file as string, { bundleDeleteMissing: true }));
+plan = await planBundleApply(applyOptions(C, STATE_C, full.file as string, { mode: 'delete-old' }));
+check('应用方式被记进报告', plan.report.applyMode, 'delete-old');
 check('完整包里的文件会新增', plan.report.adds > 0, true);
 check('本地多出来的旧文件会被删', plan.report.extraDeletes, 1);
-result = await executeBundlePlan(plan, applyOptions(C, STATE_C, full.file as string, { bundleDeleteMissing: true }));
+result = await executeBundlePlan(
+	plan,
+	applyOptions(C, STATE_C, full.file as string, { mode: 'delete-old' }),
+);
 check('比包旧的多余文件被删了', exists(C, 'old-extra.md'), false);
 check('比包新的文件不动（那是这边刚写的）', exists(C, 'new-extra.md'), true);
+check('删掉的进了回收目录（没直接消失）', fs.existsSync(path.join(C, '.trash', 'locally-save')), true);
 
-// 9. 没开"删除多余文件"时，一个都不删
+// 9. 默认「所有都保留」：一个多余文件都不删
 const D = path.join(ROOT, 'machineD');
 const STATE_D = path.join(ROOT, 'state-d.json');
 fs.mkdirSync(D, { recursive: true });
 write(D, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
 plan = await planBundleApply(applyOptions(D, STATE_D, full.file as string));
-check('没开删除时不多删文件', plan.report.extraDeletes, 0);
+check('默认应用方式是「所有都保留」', plan.report.applyMode, 'keep-all');
+check('默认一个多余文件都不删', plan.report.extraDeletes, 0);
+
+// 10. 强制应用：让仓库与包完全一致
+const F = path.join(ROOT, 'machineF');
+const STATE_F = path.join(ROOT, 'state-f.json');
+fs.mkdirSync(F, { recursive: true });
+write(F, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
+write(F, 'new-extra.md', 'NEW', fullInfo.header.created + 60_000);
+write(F, 'notes/a.md', '本地改过的内容', fullInfo.header.created + 120_000);
+
+plan = await planBundleApply(applyOptions(F, STATE_F, full.file as string, { mode: 'force' }));
+check('强制应用：多余文件全删（不管新旧）', plan.report.extraDeletes, 2);
+checkTrue(
+	'强制应用：本地改过的会被覆盖，且计入报告',
+	plan.report.forcedOverwrites >= 1,
+	`实际 ${plan.report.forcedOverwrites}`,
+);
+result = await executeBundlePlan(
+	plan,
+	applyOptions(F, STATE_F, full.file as string, { mode: 'force' }),
+);
+check('比包旧的多余文件没了', exists(F, 'old-extra.md'), false);
+check('比包新的也没了（这才是"强制一致"）', exists(F, 'new-extra.md'), false);
+check('本地改动被包的内容覆盖', read(F, 'notes/a.md'), 'AAA-V4');
+check('被覆盖的本地版本进了回收目录', fs.existsSync(path.join(F, '.trash', 'locally-save')), true);
+
+// 10b. 完整包 + 「所有都保留」：本地改过的（比包新的）留冲突副本，不静默覆盖
+const G = path.join(ROOT, 'machineG');
+const STATE_G = path.join(ROOT, 'state-g.json');
+fs.mkdirSync(G, { recursive: true });
+write(G, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
+write(G, 'notes/a.md', '本地改过的内容', fullInfo.header.created + 120_000);
+// 包里也有、但本地这份比包旧 → 那是旧副本，直接覆盖就行（不该判成冲突）
+write(G, 'only.md', '旧内容', fullInfo.header.created - 60_000);
+plan = await planBundleApply(applyOptions(G, STATE_G, full.file as string));
+check('比包新的本地改动 → 冲突（不是直接覆盖）', plan.report.conflicts, 1);
+check('包里也有、但本地是旧副本 → 正常覆盖', plan.report.overwrites, 1);
+
+// 11. 防呆：改动包不能配破坏性的应用方式
+let guardMessage = '';
+try {
+	await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES, { mode: 'force' }));
+} catch (error) {
+	guardMessage = error instanceof Error ? error.message : String(error);
+}
+checkTrue('改动包 + 强制应用 → 直接拒绝', guardMessage.includes('完整副本'), guardMessage);
+guardMessage = '';
+try {
+	await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES, { mode: 'delete-old' }));
+} catch (error) {
+	guardMessage = error instanceof Error ? error.message : String(error);
+}
+checkTrue('改动包 + 清老的 → 直接拒绝', guardMessage.includes('完整副本'), guardMessage);
+check('改动包 + 所有都保留 → 照常', (await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES))).report.applyMode, 'keep-all');
 
 // 10. 复用同步扫好的清单：传进去的清单就是准的（自动留包靠它省一次全库遍历）
 const E = path.join(ROOT, 'machineE');

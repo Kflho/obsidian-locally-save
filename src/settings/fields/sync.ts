@@ -153,13 +153,6 @@ export const SYNC_SECTION: FieldSection = {
 			heading: '同步包：应用',
 			fields: [
 				{
-					key: 'bundleDeleteMissing',
-					name: '应用时删除多余文件',
-					desc: '只对「完整副本」生效：本地有、包里没有、且比包更早的文件会被删掉（在导出那台机器上删过的文件，这边跟着删）。比包新的文件不动——那多半是这边刚写的',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleDeleteMissing),
-				},
-				{
 					key: 'bundleVerify',
 					name: '应用前校验完整性',
 					desc: '把整个包读一遍算校验和，确认传输（U 盘、网盘）没把文件弄坏。包很大时这一步会多花几秒',
@@ -170,8 +163,9 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '应用一个包',
-					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西），'
-						+ '确认无误再点应用。这一步只读，不碰你的文件',
+					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西）。'
+						+ '**应用方式在对话框里当场选**：所有都保留 / 清老的 / 强制应用 —— '
+						+ '后两种只对完整副本开放，而且真要删东西时会再确认一次。这一步只读，不碰你的文件',
 					button: '打开同步包并应用…',
 					cta: true,
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
