@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readJsonFile, writeJsonAtomic } from './disk';
+import type { LastSyncRecord } from './summary';
 import type { FileRecord } from './types';
 
 /**
@@ -90,6 +91,13 @@ export interface PluginState {
 	/** 同步目标路径 → 该目标的基准 */
 	targets: Record<string, TargetState>;
 	bundle: BundleBaseline | null;
+	/**
+	 * 上一次同步的结果。
+	 *
+	 * 存下来是为了**重启之后状态栏还能显示上次同步干了什么** ——
+	 * 以前这个只活在内存里，一重启就变回"尚未同步"。
+	 */
+	lastSync: LastSyncRecord | null;
 	/** 仓库相对路径 → 内容指纹（懒算，见 hash-cache.ts） */
 	hashes: Record<string, HashRecord>;
 }
@@ -104,6 +112,7 @@ export function emptyState(): PluginState {
 		lastExportedBundleId: null,
 		targets: {},
 		bundle: null,
+		lastSync: null,
 		hashes: {},
 	};
 }
@@ -129,6 +138,7 @@ export async function loadState(absPath: string): Promise<PluginState> {
 				history: raw.bundle.history ?? {},
 			}
 			: null,
+		lastSync: raw.lastSync ?? null,
 		hashes: raw.hashes ?? {},
 	};
 }

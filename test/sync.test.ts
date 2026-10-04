@@ -8,6 +8,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runSync, removeFromTarget } from '../src/sync/runner';
+import { loadState } from '../src/sync/state';
+import { describeChanges, describeRecord, statusBarText } from '../src/sync/summary';
+import type { LastSyncRecord } from '../src/sync/summary';
 import type { SyncHost, SyncOutcome } from '../src/sync/runner';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
@@ -217,6 +220,26 @@ checkTrue('进的是副本的回收目录', inTrash('notes/from-bundle.md'), '�
 outcome = await runSync(host({ propagateDeletions: false }));
 checkTrue('没有被还原回仓库（顺序错了就会复活）', !exists(VAULT, 'notes/from-bundle.md'), '删除传播关着时不该复活');
 check('这一轮不该有任何动作', outcome.plan.actions.length, 0);
+
+// 13. 上次同步的结果要落盘 —— 不然重启 Obsidian 状态栏又变回"尚未同步"
+const persisted = await loadState(STATE);
+checkTrue('状态文件里记了上次同步', persisted.lastSync !== null, '没记下来');
+checkTrue('记了时间', (persisted.lastSync?.at ?? 0) > 0, `实际 ${persisted.lastSync?.at}`);
+check(
+	'两次同步之间没有改动 → 记成"无改动"',
+	describeChanges(persisted.lastSync as LastSyncRecord),
+	'无改动',
+);
+checkTrue(
+	'状态栏文案点明了"上次同步"',
+	statusBarText(persisted.lastSync as LastSyncRecord).startsWith('上次同步'),
+	statusBarText(persisted.lastSync as LastSyncRecord),
+);
+checkTrue(
+	'一句话总结里能看到"未变的一致文件数"',
+	describeRecord(persisted.lastSync as LastSyncRecord).includes('都一致'),
+	describeRecord(persisted.lastSync as LastSyncRecord),
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

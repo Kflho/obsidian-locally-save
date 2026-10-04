@@ -4,7 +4,8 @@ import { LocallySaveSettingTab, settingsFrom } from './settings';
 import type { PluginSettings } from './settings';
 import { runSync as runSyncEngine } from './sync/runner';
 import type { SyncHost, SyncOutcome, SyncProgress, SyncRunOptions } from './sync/runner';
-import { STATE_FILE_NAME } from './sync/state';
+import { STATE_FILE_NAME, loadState } from './sync/state';
+import { statusBarText } from './sync/summary';
 import { applyBundleAction, exportBundleAction, syncNow } from './ui/actions';
 import { registerBundleDropTarget } from './ui/drop-watch';
 import { SyncStatusBar } from './ui/progress';
@@ -66,6 +67,8 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 			() => { applyBundleAction(this); },
 		);
 		this.refreshEntryPoints();
+		// 把"上次同步"从状态文件里读回来 —— 不然每次重启状态栏都变回"尚未同步"
+		await this.restoreLastSync();
 
 		registerCommands(this);
 		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
@@ -149,6 +152,22 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 	async loadSettings(): Promise<void> {
 		// 走 settingsFrom 而不是 Object.assign：data.json 里的脏值 / 缺失字段在这里一次性收敛
 		this.settings = settingsFrom(await this.loadData());
+	}
+
+	/**
+	 * 启动时把上次同步的结果读回来显示。
+	 *
+	 * 那份记录存在状态文件里（`sync-state.json` 的 `lastSync`），不随重启丢 ——
+	 * 以前只存在内存里，于是每次重启状态栏都显示"尚未同步"，看着像记录丢了。
+	 */
+	private async restoreLastSync(): Promise<void> {
+		try {
+			const state = await loadState(this.stateFile());
+			if (state.lastSync) this.statusBar.setSummary(statusBarText(state.lastSync));
+		} catch (error) {
+			// 读不到不影响用：状态栏继续显示"尚未同步"，下次同步会写新的
+			this.log.debug('读回上次同步记录失败', error);
+		}
 	}
 
 	async saveSettings(): Promise<void> {

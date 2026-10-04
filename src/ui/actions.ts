@@ -3,9 +3,9 @@ import { exportBundle } from '../bundle/export';
 import { bundleBaseDir } from '../bundle/paths';
 import type LocallySavePlugin from '../main';
 import type { SyncOutcome, SyncRunOptions } from '../sync/runner';
-import { formatTime } from '../utils/format';
+import { describeRecord, recordFromOutcome, statusBarText } from '../sync/summary';
 import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
-import { SyncPreviewModal, summarizeOutcome } from './sync-modal';
+import { SyncPreviewModal } from './sync-modal';
 
 /**
  * 命令背后的动作：统一处理"总开关、串行、报错、通知、状态栏"，
@@ -22,14 +22,14 @@ export async function syncNow(plugin: LocallySavePlugin, options: SyncRunOptions
 	try {
 		const outcome = await plugin.runSync(options);
 		if (!outcome) return;
-		const text = summarizeOutcome(outcome);
-		new Notice(`${label}完成：${text}`, 6000);
+		const record = recordFromOutcome(outcome);
+		new Notice(`${label}完成：${describeRecord(record)}`, 6000);
 
 		const bundleNote = await autoExportBundles(plugin, outcome);
 		if (plugin.settings.showLastSyncInStatusBar) {
-			plugin.statusBar.setSummary(`上次同步 ${formatTime(Date.now())}${bundleNote}`);
+			plugin.statusBar.setSummary(`${statusBarText(record)}${bundleNote}`);
 		}
-		plugin.log.debug(`${label}：${text}`);
+		plugin.log.debug(`${label}：${describeRecord(record)}`);
 	} catch (error) {
 		new Notice(`${label}失败：${describe(error)}`, 9000);
 		plugin.log.error(`${label}失败`, error);
