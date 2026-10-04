@@ -7,12 +7,66 @@
  * 继承自 js_02（note-tidy）的替身，按本插件用到的 API 裁剪过。
  */
 
+/**
+ * 测试跑在 Node 里，没有 window；插件用到的只有 setInterval（自动同步的节拍）。
+ * 这里有兜底，源码里就不用为了测试写 `typeof window` 判断。
+ */
+if (typeof globalThis.window === 'undefined') {
+	globalThis.window = { setInterval: () => 0, clearInterval: () => {} };
+}
+
 export class TAbstractFile {}
 export class TFile extends TAbstractFile {}
 export class TFolder extends TAbstractFile {}
-export class App {}
 export class Component {}
 export class MarkdownView {}
+
+/** 桌面端适配器替身：插件靠 instanceof 判断"是不是能拿到真实路径" */
+export class FileSystemAdapter {
+	constructor(basePath = '/vault') {
+		this.basePath = basePath;
+	}
+	getBasePath() {
+		return this.basePath;
+	}
+}
+
+export class Vault {
+	constructor() {
+		this.adapter = new FileSystemAdapter();
+		this.configDir = '.obsidian';
+		this.listeners = [];
+	}
+	on(name, callback) {
+		this.listeners.push({ name, callback });
+		return { name, callback };
+	}
+	getName() {
+		return 'test-vault';
+	}
+	/** 测试里手动触发事件（模拟"保存了笔记"） */
+	emit(name) {
+		for (const listener of this.listeners) {
+			if (listener.name === name) listener.callback();
+		}
+	}
+}
+
+export class Workspace {
+	constructor() {
+		this.readyCallbacks = [];
+	}
+	onLayoutReady(callback) {
+		this.readyCallbacks.push(callback);
+	}
+}
+
+export class App {
+	constructor() {
+		this.vault = new Vault();
+		this.workspace = new Workspace();
+	}
+}
 
 /** 弹窗替身：open() 后依次调用 onOpen()，与真实行为一致（便于测 onOpen 不炸） */
 export class Modal {

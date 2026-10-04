@@ -1,5 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { toNative, conflictName } from '../utils/paths';
-import { copyFilePreservingMtime, moveToTrash, removeFile } from './disk';
+import { copyFilePreservingMtime, ensureDir, moveToTrash, removeFile } from './disk';
 import type { SyncAction, SyncPlan } from './types';
 
 /**
@@ -27,12 +29,22 @@ export interface ExecuteResult {
 	deletedLocal: number;
 	deletedRemote: number;
 	conflicts: number;
+	moved: number;
 	bytesCopied: number;
 	failed: { path: string; error: string }[];
 }
 
 export function emptyResult(): ExecuteResult {
-	return { uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0, conflicts: 0, bytesCopied: 0, failed: [] };
+	return {
+		uploaded: 0,
+		downloaded: 0,
+		deletedLocal: 0,
+		deletedRemote: 0,
+		conflicts: 0,
+		moved: 0,
+		bytesCopied: 0,
+		failed: [],
+	};
 }
 
 export async function executePlan(plan: SyncPlan, options: ExecuteOptions): Promise<ExecuteResult> {
@@ -102,5 +114,39 @@ async function runAction(action: SyncAction, options: ExecuteOptions, result: Ex
 			result.conflicts++;
 			return;
 		}
+		case 'rename-remote': {
+			// 本地改名了：副本那边跟着改名。同盘 rename 是瞬时的，不重传内容
+			const from = toNative(targetRoot, requireFrom(action));
+			await ensureDir(path.dirname(there));
+			try {
+				await fs.promises.rename(from, there);
+			} catch {
+				// 跨盘 / 权限问题：退回"把本地那份拷过去，再删掉副本里的旧文件"
+				const record = await copyFilePreservingMtime(here, there);
+				result.bytesCopied += record.size;
+				await removeFile(from);
+			}
+			result.moved++;
+			return;
+		}
+		case 'rename-local': {
+			const from = toNative(vaultRoot, requireFrom(action));
+			await ensureDir(path.dirname(here));
+			try {
+				await fs.promises.rename(from, here);
+			} catch {
+				const record = await copyFilePreservingMtime(there, here);
+				result.bytesCopied += record.size;
+				await removeFile(from);
+			}
+			result.moved++;
+			return;
+		}
 	}
+}
+
+/** 移动动作必须有旧路径；没有就是引擎的 bug，宁可报错也别当成覆盖处理 */
+function requireFrom(action: SyncAction): string {
+	if (!action.from) throw new Error(`移动动作缺少旧路径：${action.path}`);
+	return action.from;
 }

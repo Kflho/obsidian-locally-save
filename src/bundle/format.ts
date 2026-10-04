@@ -8,9 +8,11 @@ import { ensureDir } from '../sync/disk';
  * 一个包 = 头部 JSON + 一段连续的负载 + 尾部校验：
  *
  * ```
- *   [MAGIC 12 字节][头长度 u32][头部 JSON][各文件的原始字节…][尾部标记 8][尾长度 u32][尾部 JSON]
+ *   [MAGIC 12 字节][头长度 u32][头部 JSON][各文件的原始字节…][尾部标记 8][尾部 JSON][尾长度 u32]
  * ```
  *
+ * 尾部把长度放在最后，是为了读取时**先看文件末尾 4 字节**就知道 JSON 有多长，
+ * 不用扫描整个文件（包可能几百 MB）。写的时候顺序必须一致。
  * 设计取舍：
  * - **不用 zip**：Node 没有内置 zip 写入，而 tar/gzip 要额外实现；负载本来就是
  *   一堆文件原样拼起来，自己定个格式反而更简单，也方便"只读某一个文件"（见 readEntry）；
@@ -206,11 +208,13 @@ export async function writeBundle(
 		const trailerBytes = Buffer.from(JSON.stringify(trailer), 'utf8');
 		const trailerLength = Buffer.alloc(4);
 		trailerLength.writeUInt32BE(trailerBytes.length, 0);
+		// 顺序必须是 [标记][JSON][长度]：读取时从**文件最后 4 字节**拿长度，
+		// 再按长度回退定位 JSON 与标记。写成 [标记][长度][JSON] 就对不上了。
 		await handle.write(BUNDLE_TRAILER_MAGIC, 0, BUNDLE_TRAILER_MAGIC.length, position);
 		position += BUNDLE_TRAILER_MAGIC.length;
-		await handle.write(trailerLength, 0, 4, position);
-		position += 4;
 		await handle.write(trailerBytes, 0, trailerBytes.length, position);
+		position += trailerBytes.length;
+		await handle.write(trailerLength, 0, 4, position);
 
 		return { header: fullHeader, trailer };
 	} catch (error) {

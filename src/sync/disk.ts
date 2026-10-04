@@ -91,7 +91,9 @@ export async function copyFilePreservingMtime(fromAbs: string, toAbs: string): P
 	const stat = await fs.promises.stat(fromAbs);
 	await ensureDir(path.dirname(toAbs));
 	await fs.promises.copyFile(fromAbs, toAbs);
-	await fs.promises.utimes(toAbs, stat.atime, stat.mtime);
+	// 用"秒 + 小数"传时间（Date 只有毫秒精度，会把亚毫秒的部分截掉，
+	// 两边就会差那么零点几毫秒 —— 虽然容差能兜住，但没必要留下这点偏差）
+	await fs.promises.utimes(toAbs, stat.atimeMs / 1000, stat.mtimeMs / 1000);
 	return { size: stat.size, mtime: stat.mtimeMs };
 }
 

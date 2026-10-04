@@ -47,6 +47,15 @@ export default defineConfig(
 		},
 	},
 	{
+		// 本插件是**桌面端专属**（manifest 里 isDesktopOnly: true）：
+		// 同步目标是仓库之外的文件夹，vault API 出不了库，只能用 Node 的 fs。
+		// 所以"移动端没有 Node API"这条建议在这里是刻意的取舍，不是疏漏。
+		files: ['src/**/*.ts'],
+		rules: {
+			'obsidianmd/no-nodejs-modules': 'off',
+		},
+	},
+	{
 		// 构建用的配置文件同理：它们只在 Node 下运行，不会进 main.js
 		files: ['eslint.config.mts', 'esbuild.config.mjs', 'deploy.mjs', 'version-bump.mjs'],
 		rules: {

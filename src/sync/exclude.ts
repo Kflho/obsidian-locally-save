@@ -38,8 +38,14 @@ function globToRegExp(pattern: string): RegExp {
 		const char = pattern.charAt(i);
 		if (char === '*') {
 			if (pattern[i + 1] === '*') {
-				source += '.*';
 				i++;
+				// `**/` 把斜杠一起吃进去：这样 `**/*.md` 也能匹配仓库根目录下的 c.md
+				if (pattern[i + 1] === '/') {
+					source += '(?:.*/)?';
+					i++;
+				} else {
+					source += '.*';
+				}
 			} else {
 				source += '[^/]*';
 			}
