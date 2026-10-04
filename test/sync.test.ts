@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runSync } from '../src/sync/runner';
+import { runSync, removeFromTarget } from '../src/sync/runner';
 import type { SyncHost, SyncOutcome } from '../src/sync/runner';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
@@ -200,6 +200,23 @@ checkTrue(
 	'目标目录下的 .lsave 整个都该跳过',
 );
 check('这一轮也不该有任何动作', outcome.plan.actions.length, 0);
+
+// 12. 「应用同步包之后顺便同步副本」的关键一步：
+//     包删掉的路径要先从副本里清掉并划掉基准，否则常规同步会把它还原回仓库
+write(VAULT, 'notes/from-bundle.md', 'FROM-BUNDLE');
+await runSync(host());
+check('先让它两边都有', read(TARGET, 'notes/from-bundle.md'), 'FROM-BUNDLE');
+
+fs.rmSync(abs(VAULT, 'notes/from-bundle.md')); // 模拟"包把它删了"
+const cleared = await removeFromTarget(host(), TARGET, ['notes/from-bundle.md'], true);
+check('副本里也清掉了', cleared, 1);
+check('副本里确实没了', exists(TARGET, 'notes/from-bundle.md'), false);
+checkTrue('进的是副本的回收目录', inTrash('notes/from-bundle.md'), '副本回收目录里应该有一份');
+
+// 关键：用「不传播删除」的设置同步 —— 要是基准没划掉，这里会把文件还原回仓库
+outcome = await runSync(host({ propagateDeletions: false }));
+checkTrue('没有被还原回仓库（顺序错了就会复活）', !exists(VAULT, 'notes/from-bundle.md'), '删除传播关着时不该复活');
+check('这一轮不该有任何动作', outcome.plan.actions.length, 0);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
