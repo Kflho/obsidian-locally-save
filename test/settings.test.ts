@@ -15,7 +15,7 @@
  *   7. 面板结构：按功能分页、页内分组有标题且不重名
  */
 import type { App } from "obsidian";
-import { DEFAULT_SETTINGS, LOG_LEVELS, LocallySaveSettingTab, settingsFrom } from "../src/settings";
+import { DEFAULT_SETTINGS, ALL_ACTIONS, LOG_LEVELS, LocallySaveSettingTab, settingsFrom } from "../src/settings";
 import type { PluginSettings } from "../src/settings";
 import type LocallySavePlugin from "../src/main";
 
@@ -83,7 +83,9 @@ function byKey(defs: AnyDefinition[], key: string): AnyDefinition | undefined {
 
 // -------------------------------------------------------------------- 用例
 const { tab, settings } = createTab();
-const definitions = defsOf(tab);
+// 叶子结点里既有设置项也有动作行（按钮）；动作没有 control，字段覆盖只数设置项
+const leaves = defsOf(tab);
+const definitions = leaves.filter(def => def.control);
 const keys = definitions.map(def => def.control?.key);
 
 // 1. 字段覆盖：不多不少
@@ -95,7 +97,7 @@ check("声明式设置没有多余字段", unknown, []);
 check("每个字段只有一条定义", keys.length, new Set(keys).size === keys.length ? keys.length : -1);
 
 // 2. 名字与下拉框选项
-check("每条定义都有名字", definitions.filter(def => !def.name).length, 0);
+check("每条定义都有名字（含动作行）", leaves.filter(def => !def.name).length, 0);
 
 for (const def of definitions) {
 	const control = def.control;
@@ -162,6 +164,31 @@ for (const page of pages) {
 	check(`「${page.name}」页里没有重名的分组`, headings.filter((h, i) => headings.indexOf(h) !== i), []);
 	check(`「${page.name}」页里每个分组都有标题`, headings.filter(h => !h), []);
 	check(`「${page.name}」页里的分组都标成 group`, (page.items ?? []).filter(item => item.type !== 'group').length, 0);
+}
+
+// 8. 动作按钮：字段表里声明的每一条，两条渲染路径都得画得出来
+checkTrue("字段表里有动作（按钮）", ALL_ACTIONS.length > 0, "一条动作都没有");
+for (const action of ALL_ACTIONS) {
+	checkTrue(`动作「${action.name}」有标题`, typeof action.name === "string" && action.name !== "", "");
+	checkTrue(`动作「${action.name}」有按钮文字`, typeof action.button === "string" && action.button !== "", "");
+	checkTrue(`动作「${action.name}」有 run`, typeof action.run === "function", "");
+}
+
+// 声明式那边：动作是带 render 的行，数量与名字都要对得上
+const renderRows = leaves.filter(def => typeof (def as { render?: unknown }).render === "function");
+check("声明式里的动作行数量与字段表一致", renderRows.length, ALL_ACTIONS.length);
+check(
+	"声明式里的动作行名字对得上",
+	renderRows.map(row => row.name).sort(),
+	ALL_ACTIONS.map(action => action.name).sort(),
+);
+
+// 旧版 DOM 那条路：整块画一遍不能炸（替身里的按钮回调会真的跑）
+try {
+	createTab().tab.display();
+	checkTrue("旧版 DOM 路径能画出按钮", true, "");
+} catch (error) {
+	checkTrue("旧版 DOM 路径能画出按钮", false, String(error));
 }
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);

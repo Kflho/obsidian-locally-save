@@ -2,7 +2,7 @@ import { AUTO_SECTION } from './auto';
 import { GENERAL_SECTION } from './general';
 import { INTERFACE_SECTION } from './interface';
 import { SYNC_SECTION } from './sync';
-import type { FieldSection, FieldSpec } from './types';
+import type { ActionSpec, FieldSection, FieldSpec } from './types';
 
 /**
  * 设置面板的完整结构：顺序 = 面板上从上到下的顺序。
@@ -42,4 +42,11 @@ export const FIELD_INDEX: Map<string, FieldSpec> = (() => {
  */
 export const ALL_FIELDS: FieldSpec[] = [...FIELD_INDEX.values()];
 
-export type { FieldGroup, FieldSection, FieldSpec, ControlSpec } from './types';
+/**
+ * 平面化的动作清单（那些按钮）。
+ * 动作没有 key、不进 data.json，所以单独一份，测试用它核对标题与按钮文字齐不齐。
+ */
+export const ALL_ACTIONS: ActionSpec[] = SETTINGS_SECTIONS.flatMap(section =>
+	(section.groups ?? []).flatMap(group => group.actions ?? []));
+
+export type { ActionSpec, ControlSpec, FieldGroup, FieldSection, FieldSpec } from './types';

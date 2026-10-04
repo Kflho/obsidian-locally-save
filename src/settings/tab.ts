@@ -4,7 +4,7 @@ import type LocallySavePlugin from '../main';
 import { DEFAULT_SETTINGS } from './model';
 import type { PluginSettings } from './model';
 import { FIELD_INDEX, SETTINGS_SECTIONS } from './fields';
-import type { FieldSpec } from './fields';
+import type { ActionSpec, FieldSpec } from './fields';
 
 /**
  * 设置面板。
@@ -67,8 +67,29 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 				for (const field of group.fields) {
 					this.renderField(containerEl, field, settings);
 				}
+				// 按钮排在设置项后面：先让用户看完这一组的设置，再动手
+				for (const action of group.actions ?? []) {
+					this.renderAction(containerEl, action, settings);
+				}
 			}
 		}
+	}
+
+	/**
+	 * 画一行按钮（导出同步包、打开包、看说明这类）。
+	 *
+	 * 声明式那边走 `render`，拿到的同样是一个 Setting —— 两条路画出来一模一样，
+	 * 不会出现"新版 Obsidian 上按钮不见了"。
+	 */
+	private renderAction(containerEl: HTMLElement, action: ActionSpec, settings: PluginSettings): void {
+		const setting = new Setting(containerEl).setName(action.name);
+		if (action.desc) setting.setDesc(action.desc);
+		const disabled = action.disabled?.(settings) === true;
+		setting.addButton(button => {
+			button.setButtonText(action.button).onClick(() => action.run(this.plugin));
+			if (action.cta) button.setCta();
+			if (disabled) button.setDisabled(true);
+		});
 	}
 
 	/** 画一条设置项 */
@@ -137,7 +158,10 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 				items: (section.groups ?? []).map(group => ({
 					type: 'group',
 					heading: group.heading,
-					items: group.fields.map(field => this.buildDefinition(field)),
+					items: [
+						...group.fields.map(field => this.buildDefinition(field)),
+						...(group.actions ?? []).map(action => this.buildAction(action)),
+					],
 				})),
 			} as SettingDefinitionItem
 		);
@@ -166,6 +190,29 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			...(field.desc ? { desc: field.desc } : {}),
 			...(field.visible ? { visible: () => field.visible?.(settings()) === true } : {}),
 			control,
+		};
+		return definition as unknown as SettingDefinitionItem;
+	}
+
+	/**
+	 * 把一条动作组装成声明式定义。
+	 *
+	 * 用 `render` 而不是 `action`：声明式的 action 行是固定样式的"整行可点"，
+	 * 而我们要的是明确写着「导出同步包…」的按钮 —— render 拿到的 `Setting`
+	 * 跟旧版 DOM 那条路用的是同一个类，两边画出来一模一样。
+	 */
+	private buildAction(action: ActionSpec): SettingDefinitionItem {
+		const settings = () => this.plugin.settings;
+		const definition = {
+			name: action.name,
+			...(action.desc ? { desc: action.desc } : {}),
+			render: (setting: Setting) => {
+				setting.addButton(button => {
+					button.setButtonText(action.button).onClick(() => action.run(this.plugin));
+					if (action.cta) button.setCta();
+					if (action.disabled?.(settings()) === true) button.setDisabled(true);
+				});
+			},
 		};
 		return definition as unknown as SettingDefinitionItem;
 	}

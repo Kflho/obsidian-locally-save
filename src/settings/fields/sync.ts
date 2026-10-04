@@ -9,6 +9,9 @@ import {
 	coerceDirection,
 	coerceText,
 } from '../model';
+import type { PluginSettings } from '../model';
+import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
+import { BundleHelpModal } from '../../ui/help-modal';
 import type { FieldSection } from './types';
 
 /**
@@ -135,6 +138,16 @@ export const SYNC_SECTION: FieldSection = {
 					coerce: value => coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode),
 				},
 			],
+			actions: [
+				{
+					name: '导出到文件',
+					desc: '把仓库或只把改动打包成一个 .lsave 文件，拷到别的机器上用下面的按钮应用',
+					button: '导出同步包…',
+					cta: true,
+					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
+					disabled: settings => !hasBundleTarget(settings),
+				},
+			],
 		},
 		{
 			heading: '同步包：应用',
@@ -154,6 +167,28 @@ export const SYNC_SECTION: FieldSection = {
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
 				},
 			],
+			actions: [
+				{
+					name: '应用一个包',
+					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西），'
+						+ '确认无误再点应用。这一步只读，不碰你的文件',
+					button: '打开同步包并应用…',
+					cta: true,
+					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
+					disabled: settings => !hasBundleTarget(settings),
+				},
+				{
+					name: '不知道怎么用？',
+					desc: '跨机器搬运的完整流程、两种包该用哪个、会不会弄丢东西',
+					button: '看说明',
+					run: plugin => { new BundleHelpModal(plugin.app).open(); },
+				},
+			],
 		},
 	],
 };
+
+/** 两个目录都空着时没地方放包、也没地方找包 —— 按钮就该是灰的 */
+function hasBundleTarget(settings: PluginSettings): boolean {
+	return settings.targetDir.trim() !== '' || settings.bundleDir.trim() !== '';
+}
