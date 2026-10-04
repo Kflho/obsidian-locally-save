@@ -163,6 +163,11 @@ export interface ApplyReport {
 	localDirCount: number;
 	/** 两边都有的文件夹数（＝ 已经一致的） */
 	foldersInSync: number;
+	/**
+	 * 这个包是**旧版本**导的（头部没记空文件夹）：这次目录只建不删。
+	 * 理由：它没法表达"我这边有哪些空文件夹"，反推"本地多出来的都该删"会删错。
+	 */
+	bundleDirsUnknown: boolean;
 }
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
@@ -451,10 +456,18 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// - `normal`：与 `bundle-wins` 同，但还要看「同步删除」开关。
 	// 执行时只走 `rmdir`（非空必然失败），所以判断错了也只会"没删掉"，不会连带删掉有内容的目录。
 	const bundleDirs = dirsInBundle(header);
+	/**
+	 * 这个包**记没记**空文件夹。
+	 *
+	 * 早期版本导的包头部没有 `emptyDirs` 这个字段 —— 它没能力表达"我有这些空文件夹"，
+	 * 所以**不能**拿它反推"本地多出来的目录都是对方没有的"：那样"强制应用"会把本机
+	 * 和对方都有的空文件夹也删掉。这种情况下目录只建不删，并在报告里说明白。
+	 */
+	const bundleRecordsDirs = Array.isArray(header.emptyDirs);
 	const foldersToRemove: string[] = [];
 	/** 想删却删不掉的：清单里看着是空的，磁盘上还有东西（被排除规则挡住的文件） */
 	const foldersKept: string[] = [];
-	{
+	if (bundleRecordsDirs) {
 		const baseDirs = new Set(state.bundle?.dirs ?? []);
 		const filled = dirsContainingFiles(local);
 		const candidates: string[] = [];
@@ -522,6 +535,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		bundleDirCount: bundleDirs.size,
 		localDirCount: local.dirs.size,
 		foldersInSync: [...bundleDirs].filter(dir => local.dirs.has(dir)).length,
+		bundleDirsUnknown: !bundleRecordsDirs,
 	};
 
 	return { info, report, actions, foldersToRemove, options: { conflictStrategy, propagateDeletions, keepBackup } };

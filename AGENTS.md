@@ -113,7 +113,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 500 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 505 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
