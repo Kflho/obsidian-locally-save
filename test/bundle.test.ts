@@ -217,6 +217,23 @@ write(D, 'old-extra.md', 'OLD', fullInfo.header.created - 86_400_000);
 plan = await planBundleApply(applyOptions(D, STATE_D, full.file as string));
 check('没开删除时不多删文件', plan.report.extraDeletes, 0);
 
+// 10. 复用同步扫好的清单：传进去的清单就是准的（自动留包靠它省一次全库遍历）
+const E = path.join(ROOT, 'machineE');
+const STATE_E = path.join(ROOT, 'state-e.json');
+fs.mkdirSync(E, { recursive: true });
+write(E, 'notes/a.md', 'AAA');
+write(E, 'notes/invisible.md', 'SKIP');
+const reused = await exportBundle({
+	...exportOptions(E, STATE_E),
+	// 故意造一份"没看见 invisible.md"的清单：如果导出真的复用了它，那个文件就不该进包
+	inventory: {
+		files: new Map([['notes/a.md', { size: 3, mtime: fs.statSync(abs(E, 'notes/a.md')).mtimeMs }]]),
+	},
+});
+check('复用传入的清单：不在清单里的文件不进包', reused.entryCount, 1);
+const reusedInfo = await readBundleInfo(reused.file as string);
+check('包里只有清单里那一个', reusedInfo.header.entries.map(entry => entry.path), ['notes/a.md']);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

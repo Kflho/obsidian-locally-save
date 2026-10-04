@@ -39,10 +39,10 @@ check('manifest.json 能被 JSON.parse 解析', parseError, '');
 
 // 2. 必填字段（照着官方校验规则来）
 for (const field of ['id', 'name', 'version', 'minAppVersion', 'description', 'author']) {
-	checkTrue(`manifest 有 ${field}`, typeof manifest[field] === 'string' && manifest[field] !== '', `实际：${manifest[field]}`);
+	checkTrue(`manifest 有 ${field}`, typeof manifest[field] === 'string' && manifest[field] !== '', `实际：${String(manifest[field])}`);
 }
 checkTrue('manifest 的 isDesktopOnly 是布尔值', typeof manifest['isDesktopOnly'] === 'boolean', `实际：${typeof manifest['isDesktopOnly']}`);
-checkTrue('版本号是 x.y.z', /^\d+\.\d+\.\d+$/.test(String(manifest['version'])), `实际：${manifest['version']}`);
+checkTrue('版本号是 x.y.z', /^\d+\.\d+\.\d+$/.test(String(manifest['version'])), `实际：${String(manifest['version'])}`);
 
 // 3. id 与仓库名对齐（Obsidian 社区插件要求仓库名是 `obsidian-<id>`）
 check('插件 id', manifest['id'], 'locally-save');
@@ -60,7 +60,7 @@ const versions = JSON.parse(fs.readFileSync('versions.json', 'utf8')) as Record<
 checkTrue(
 	'versions.json 记了当前版本',
 	Object.prototype.hasOwnProperty.call(versions, String(manifest['version'])),
-	`versions.json 里没有 ${manifest['version']}`,
+	`versions.json 里没有 ${String(manifest['version'])}`,
 );
 check('versions.json 里的最低版本与 manifest 一致', versions[String(manifest['version'])], manifest['minAppVersion']);
 

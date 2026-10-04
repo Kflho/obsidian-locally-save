@@ -177,6 +177,18 @@ check('被默认规则排除的配置目录不参与同步', exists(TARGET, '.ob
 checkTrue('.tmp 被自定义规则排除了', !exists(TARGET, 'notes/temp.tmp'), '被排除的文件不该被传上去');
 checkTrue('笔记还是正常同步的', exists(TARGET, 'notes/a.md'), '排除规则不能误伤笔记');
 
+// 10. 收工后要把"仓库清单 + 改动数"带出来（「同步后自动留改动包」靠它省一次全库遍历）
+write(VAULT, 'notes/for-bundle.md', 'BUNDLE');
+outcome = await runSync(host());
+checkTrue('改动数被带出来', outcome.changed > 0, `实际 ${outcome.changed}`);
+checkTrue(
+	'收工后的仓库清单也一并带出来',
+	outcome.localInventory.files.has('notes/for-bundle.md'),
+	'清单里应该有刚同步的文件',
+);
+outcome = await runSync(host());
+check('两边一致时改动数为 0', outcome.changed, 0);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

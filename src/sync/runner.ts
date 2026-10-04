@@ -8,7 +8,7 @@ import { parsePatterns } from './exclude';
 import { executePlan } from './execute';
 import type { ExecuteResult } from './execute';
 import { loadState, saveState, setTargetBaseline, targetBaseline } from './state';
-import type { SyncDirection, SyncPlan } from './types';
+import type { Inventory, SyncDirection, SyncPlan } from './types';
 
 /**
  * 同步的总调度：扫描 → 比对 → 执行 → 重建基准。
@@ -55,6 +55,14 @@ export interface SyncOutcome {
 	scannedRemote: number;
 	durationMs: number;
 	dryRun: boolean;
+	/** 这一轮真正动过的文件数（0 ＝ 两边本来就一致） */
+	changed: number;
+	/**
+	 * 收工后仓库的样子。
+	 * 「同步后自动留改动包」直接复用它，省掉一次全库遍历 —— 那次遍历本来就要做，
+	 * 白扔了可惜。
+	 */
+	localInventory: Inventory;
 }
 
 /** 仓库里的回收目录（Obsidian 的本地回收站位置） */
@@ -132,6 +140,8 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 			scannedRemote: remote.files.size,
 			durationMs: Date.now() - started,
 			dryRun: true,
+			changed: 0,
+			localInventory: local,
 		};
 	}
 
@@ -171,5 +181,13 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		scannedRemote: remote.files.size,
 		durationMs: Date.now() - started,
 		dryRun: false,
+		changed: result ? countTouched(result) : 0,
+		localInventory: localAfter,
 	};
+}
+
+/** 这一轮动过几个文件（同步结果 → 一个数） */
+function countTouched(result: ExecuteResult): number {
+	return result.uploaded + result.downloaded + result.deletedLocal
+		+ result.deletedRemote + result.conflicts + result.moved;
 }
