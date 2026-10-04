@@ -591,6 +591,11 @@ export class ApplyBundleModal extends Modal {
 					+ '所以永远只需要应用最新的这一个 —— 跳过中间几个也不会少内容、不会留下冲突副本。',
 				cls: 'locally-save-hint',
 			});
+			this.reportEl.createEl('p', {
+				text: '还有一条要紧的：包里**没提到**的文件一律不动 —— 更新包只装变过的文件，'
+					+ '「没提到」什么也不代表，绝不会因此被删掉（只有它**点名要删**的那些才删）。',
+				cls: 'locally-save-hint',
+			});
 		}
 
 		// 旧版本导的包：它没记空文件夹，所以这次目录只建不删（否则会删错）

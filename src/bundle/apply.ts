@@ -371,6 +371,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				break;
 			}
 			case 'delete-local': {
+				// ⚠ **更新包里"没提到"不等于"被删了"**：它只装自完整副本以来变过的文件，
+				// 其余文件在包里根本不出现。要是照着三方比对的结果删，接收方仓库里
+				// 每个没被提到的文件都会被判成"对方删过它" —— 一个 1 万文件的仓库、
+				// 一个只改了 1 个文件的更新包，会算出"删除 10203 个"（用户报过的 bug）。
+				//
+				// 所以：更新包只按它**点名**的删除清单（`header.deleted`）删；
+				// 只有完整包才是"完整清单"，那时"基准里有、包里没有"确实是对方删过它。
+				if (header.mode !== 'full' && !localDeleted.has(action.path)) break;
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
