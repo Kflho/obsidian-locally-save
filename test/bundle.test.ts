@@ -492,6 +492,65 @@ check('完整包落在 full 子目录', FILE_FULL.replace(/\\/g, '/').includes('
 check('改动包落在 changes 子目录', FILE_CHANGES.replace(/\\/g, '/').includes('/changes/'), true);
 checkTrue('包文件名带上了包 ID 前几位', path.basename(FILE_FULL).endsWith('.lsave'), FILE_FULL);
 
+// 14. 边界：本地同路径是个**文件夹**，包里是个文件
+const M = path.join(ROOT, 'machineM');
+const STATE_M = path.join(ROOT, 'state-m.json');
+fs.mkdirSync(M, { recursive: true });
+const clash = 'brand-new.md';
+fs.mkdirSync(abs(M, clash), { recursive: true });
+fs.writeFileSync(path.join(abs(M, clash), 'inside.txt'), 'x');
+
+const clashNormal = await planBundleApply(applyOptions(M, STATE_M, noNew.file as string));
+const clashNormalResult = await executeBundlePlan(clashNormal, applyOptions(M, STATE_M, noNew.file as string));
+checkTrue('默认档：目录挡路 → 记成失败而不是静默', clashNormalResult.failed.length >= 1, '没记失败');
+checkTrue(
+	'默认档：失败原因说得清',
+	(clashNormalResult.failed[0]?.error ?? '').includes('文件夹'),
+	clashNormalResult.failed[0]?.error ?? '',
+);
+checkTrue(
+	'默认档：不会去动别人的文件夹',
+	fs.existsSync(path.join(abs(M, clash), 'inside.txt')),
+	'文件夹被动了',
+);
+
+const clashForce = await planBundleApply(applyOptions(M, STATE_M, noNew.file as string, { strictness: 'bundle-wins' }));
+const clashForceResult = await executeBundlePlan(
+	clashForce,
+	applyOptions(M, STATE_M, noNew.file as string, { strictness: 'bundle-wins' }),
+);
+check('强制档：没有失败', clashForceResult.failed.length, 0);
+checkTrue('强制档：文件就位（原来的文件夹被挪走了）', !fs.statSync(abs(M, clash)).isDirectory(), '还是目录');
+
+// 15. 强制档必然先备份 —— 不给"不可恢复的批量删除"留口子
+const N = path.join(ROOT, 'machineN');
+const STATE_N = path.join(ROOT, 'state-n.json');
+fs.mkdirSync(N, { recursive: true });
+write(N, 'mine-keep.md', 'MINE');
+const strictPlan = await planBundleApply(applyOptions(N, STATE_N, noNew.file as string, {
+	strictness: 'mirror',
+	keepBackup: false, // 用户想把回收目录关掉
+}));
+check('强制档下回收目录强制开', strictPlan.options.keepBackup, true);
+check('默认档下照样听用户的', (await planBundleApply(applyOptions(N, STATE_N, noNew.file as string, {
+	keepBackup: false,
+}))).options.keepBackup, false);
+
+// 16. 并发应用会被拦住（同步那边有串行锁，这边以前没有）
+const P = path.join(ROOT, 'machineP');
+const STATE_P = path.join(ROOT, 'state-p.json');
+fs.mkdirSync(P, { recursive: true });
+const concurrentPlan = await planBundleApply(applyOptions(P, STATE_P, noNew.file as string));
+const running = executeBundlePlan(concurrentPlan, applyOptions(P, STATE_P, noNew.file as string));
+let lockError = '';
+try {
+	await executeBundlePlan(concurrentPlan, applyOptions(P, STATE_P, noNew.file as string));
+} catch (error) {
+	lockError = error instanceof Error ? error.message : String(error);
+}
+await running;
+checkTrue('第二次应用被拦住', lockError.includes('还在进行中'), lockError || '（没拦住）');
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

@@ -229,6 +229,7 @@ export class ApplyBundleModal extends Modal {
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
+	private backupToggle: { setDisabled(disabled: boolean): unknown } | null = null;
 	private listEl!: HTMLElement;
 	private reportEl!: HTMLElement;
 	private applyButton: { setDisabled(disabled: boolean): unknown } | null = null;
@@ -310,13 +311,17 @@ export class ApplyBundleModal extends Modal {
 		new Setting(contentEl)
 			.setName('覆盖 / 删掉的先进回收目录')
 			.setDesc('强制应用与清老的会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
-				+ '仍然捞得回来。关掉就是直接覆盖 / 删除')
-			.addToggle(toggle => toggle
-				.setValue(this.keepBackup)
-				.onChange(value => {
-					this.keepBackup = value;
-					void this.replan();
-				}));
+				+ '仍然捞得回来。**强制两档必须开着**（关掉回收 + 强制 = 不可恢复的批量删除）')
+			.addToggle(toggle => {
+				this.backupToggle = toggle;
+				toggle
+					.setValue(this.keepBackup)
+					.setDisabled(this.strictness !== 'normal')
+					.onChange(value => {
+						this.keepBackup = value;
+						void this.replan();
+					});
+			});
 
 		// 应用完顺手带上本地副本：不然后备会在应用包之后悄悄落后一截
 		const target = this.plugin.settings.targetDir.trim();
@@ -504,6 +509,8 @@ export class ApplyBundleModal extends Modal {
 				keepBackup: this.keepBackup,
 			});
 			this.plan = plan;
+			// 强制两档下回收目录是强制开的（界面上灰掉，别让人以为能关）
+			this.backupToggle?.setDisabled(this.strictness !== 'normal');
 			this.renderReport(plan);
 			this.applyButton?.setDisabled(false);
 		} catch (error) {
@@ -646,7 +653,13 @@ export class ApplyBundleModal extends Modal {
 			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
 			if (result.deleted > 0) parts.push(`删除 ${result.deleted}`);
-			if (result.failed.length > 0) parts.push(`失败 ${result.failed.length}`);
+			if (result.moved > 0) parts.push(`改名 ${result.moved}`);
+			if (result.failed.length > 0) {
+				// 失败的要**列出来**，只说"失败 N 个"等于没说
+				const shown = result.failed.slice(0, 5).map(item => `${item.path}（${item.error}）`);
+				const more = result.failed.length > shown.length ? ` …… 等 ${result.failed.length} 个` : '';
+				parts.push(`失败 ${result.failed.length}：${shown.join('；')}${more}`);
+			}
 
 			const copyNote = await this.syncCopyIfWanted(plan);
 			if (copyNote) parts.push(copyNote);

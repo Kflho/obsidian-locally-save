@@ -3,7 +3,7 @@ import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
 import { DEFAULT_MTIME_TOLERANCE_MS, planSync } from '../sync/diff';
-import { CONFLICT_TRASH_DIR, ensureDir, moveToTrash, scanTree, statFile } from '../sync/disk';
+import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
 import { formatStamp } from '../utils/format';
@@ -203,7 +203,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const propagateDeletions = strictness === 'normal'
 		? (options.propagateDeletions ?? settings.propagateDeletions)
 		: true;
-	const keepBackup = options.keepBackup ?? settings.deletedToTrash;
+	const keepBackup = strictness === 'normal'
+		? (options.keepBackup ?? settings.deletedToTrash)
+		// 强制档必然要删东西（可能一次删很多），**强制先备份**：
+		// 关掉回收目录 + 强制 = 不可恢复的批量删除，这个组合不给走
+		: true;
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
@@ -444,7 +448,25 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 }
 
 /** 真正落盘 */
+/**
+ * 同一时间只允许跑一次应用。
+ *
+ * 同步那边有 plugin 层的串行锁，应用这边以前没有 —— 两个对话框一起点、或者
+ * "应用完顺便同步副本"还没跑完又点一次，两份计划会互相踩着写同一批文件。
+ */
+let applying = false;
+
 export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyResult> {
+	if (applying) throw new Error('另一次应用还在进行中：等它跑完再点');
+	applying = true;
+	try {
+		return await runPlan(plan, options);
+	} finally {
+		applying = false;
+	}
+}
+
+async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyResult> {
 	const started = Date.now();
 	const stamp = formatStamp(Date.now());
 	const trashRoot = `${options.vaultRoot}/.trash/locally-save`;
@@ -473,6 +495,14 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 
 			switch (action.kind) {
 				case 'write': {
+					// 本地这里是个**文件夹**、包里是个文件（或反过来）：默认档不去动别人的目录，
+					// 报成明确失败；强制两档才把目录挪进回收目录腾位置
+					if (await dirExists(target)) {
+						if (!plan.report.forced) {
+							throw new Error('本地这里是同名的文件夹，包里是一个文件：换个位置或先把文件夹挪走（“以包为准/完全镜像”档会自动把它挪进回收目录）');
+						}
+						await moveToTrash(target, toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`), action.path, stamp);
+					}
 					// 强制模式下覆盖本地改动前，先把本地那份挪进回收目录
 					if (action.backup) {
 						await moveToTrash(
