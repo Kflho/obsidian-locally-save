@@ -299,7 +299,64 @@ outcome = await runSync(host());
 check('仓库里还剩个空目录 → 副本把它补回来', exists(TARGET, '一次性的'), true);
 check('再一轮就稳定：没有任何动作', (await runSync(host())).plan.actions.length, 0);
 
-// 20. 上次同步的结果要落盘 —— 不然重启 Obsidian 状态栏又变回"尚未同步"
+// 20. 空文件夹的**删除**也要传过去，而且不能反弹
+// （只建不删的话：你在仓库里把空文件夹删了，下一轮它会被副本重新建回来）
+fs.mkdirSync(abs(VAULT, '临时空目录'), { recursive: true });
+await runSync(host());
+check('先把它传过去（同时进目录基准）', exists(TARGET, '临时空目录'), true);
+fs.rmdirSync(abs(VAULT, '临时空目录'));
+outcome = await runSync(host());
+check('计划里是"删副本的目录"', outcome.plan.removedFolders, [{ path: '临时空目录', side: 'remote' }]);
+check('副本里删掉了', exists(TARGET, '临时空目录'), false);
+check('结果里记了清理几个目录', outcome.result?.foldersRemoved, 1);
+const afterRemove = await loadState(STATE);
+check(
+	'状态栏说出来干了什么',
+	describeChanges(afterRemove.lastSync as LastSyncRecord),
+	'清理空文件夹 1',
+);
+outcome = await runSync(host());
+check(
+	'不会反弹：第二轮啥都不用干',
+	outcome.plan.actions.length + outcome.plan.folders.length + outcome.plan.removedFolders.length,
+	0,
+);
+
+// 21. 反向：在副本里删掉空文件夹 → 仓库里也跟着删
+fs.mkdirSync(abs(TARGET, '副本里新建的空目录'), { recursive: true });
+await runSync(host());
+check('先建到仓库里', exists(VAULT, '副本里新建的空目录'), true);
+fs.rmdirSync(abs(TARGET, '副本里新建的空目录'));
+outcome = await runSync(host());
+check('计划里是"删本地的目录"', outcome.plan.removedFolders, [{ path: '副本里新建的空目录', side: 'local' }]);
+check('仓库里也删掉了', exists(VAULT, '副本里新建的空目录'), false);
+
+// 22. 「仅上传」不会因为副本少了目录就来删仓库的（与文件删除同一条线）
+fs.mkdirSync(abs(VAULT, '仅上传别删我'), { recursive: true });
+await runSync(host());
+fs.rmdirSync(abs(TARGET, '仅上传别删我'));
+outcome = await runSync(host({ syncDirection: 'upload' }));
+check('仅上传：不删仓库里的目录', exists(VAULT, '仅上传别删我'), true);
+check('仅上传：也不把空目录重新推回副本（与文件规则一致）', exists(TARGET, '仅上传别删我'), false);
+
+// 23. 目录里有东西时，目录规则不许插手 —— 结果由文件规则决定（rmdir 也不会碰非空目录）
+fs.mkdirSync(abs(VAULT, '有内容的目录'), { recursive: true });
+write(VAULT, '有内容的目录/x.md', 'X');
+await runSync(host());
+fs.rmSync(abs(TARGET, '有内容的目录'), { recursive: true }); // 副本那边整个没了
+outcome = await runSync(host());
+check('计划里没有"删目录"（里面有文件）', outcome.plan.removedFolders, []);
+check('文件规则说了算：副本删了它 → 本地也跟着删', kinds(outcome), ['delete-local:有内容的目录/x.md']);
+check('删空之后，空掉的目录顺手收拾掉', exists(VAULT, '有内容的目录'), false);
+
+// 24. 上次同步的结果要落盘 —— 不然重启 Obsidian 状态栏又变回"尚未同步"
+// 先跑一轮"无事可做"的同步：这一段要验的是**记录本身**，别让上一段的改动混进来
+outcome = await runSync(host());
+check(
+	'这一轮确实无事可做',
+	outcome.plan.actions.length + outcome.plan.folders.length + outcome.plan.removedFolders.length,
+	0,
+);
 const persisted = await loadState(STATE);
 checkTrue('状态文件里记了上次同步', persisted.lastSync !== null, '没记下来');
 checkTrue('记了时间', (persisted.lastSync?.at ?? 0) > 0, `实际 ${persisted.lastSync?.at}`);

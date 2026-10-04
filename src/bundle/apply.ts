@@ -2,13 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
-import { DEFAULT_MTIME_TOLERANCE_MS, planSync } from '../sync/diff';
-import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pruneEmptyDirs, scanTree, statFile } from '../sync/disk';
+import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync } from '../sync/diff';
+import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
-import { toNative } from '../utils/paths';
+import { dirnameRel, toNative } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
 import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../sync/types';
 
@@ -147,6 +147,8 @@ export interface ApplyReport {
 	moves: number;
 	/** 这次要在仓库里补建几个文件夹（空文件夹；已有的不算） */
 	foldersToCreate: number;
+	/** 这次要删掉几个本地空文件夹（包里没有它） */
+	foldersToRemove: number;
 }
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
@@ -164,6 +166,8 @@ export interface ApplyPlan {
 	info: BundleInfo;
 	report: ApplyReport;
 	actions: ApplyAction[];
+	/** 要删掉的本地空文件夹（包里没有它；`mirror` 档会连"本机新建的"一起删） */
+	foldersToRemove: string[];
 	/** 执行阶段照着做的策略 */
 	options: { conflictStrategy: ConflictStrategy; propagateDeletions: boolean; keepBackup: boolean };
 }
@@ -260,7 +264,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		})
 		// 强制档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
 		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
-		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [] };
+		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [], removedFolders: [] };
 
 	// ------------------------------------------------- 比对结果 → 落地动作
 	const actions: ApplyAction[] = [];
@@ -417,6 +421,35 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	const total = header.entries.length;
+
+	// ------------------------------------------------- 目录（空文件夹）
+	//
+	// 包里的目录 = `emptyDirs` ＋ 所有条目的上级目录（后者随文件写入顺带建出来）。
+	// 本地有、包里没有的**空**目录要不要删，三档不同：
+	// - `mirror`（强制一致）：删 —— 这一档的承诺就是"仓库和包完全一样"（文件如此，目录也该如此）；
+	// - `bundle-wins`：只删**基准里记过**的（＝对方删过它），本机新建的留着 ——
+	//   和它处理文件的那条规矩一模一样（`seenBefore`）；
+	// - `normal`：与 `bundle-wins` 同，但还要看「同步删除」开关。
+	// 执行时只走 `rmdir`（非空必然失败），所以判断错了也只会"没删掉"，不会连带删掉有内容的目录。
+	const bundleDirs = dirsInBundle(header);
+	const foldersToRemove: string[] = [];
+	{
+		const baseDirs = new Set(state.bundle?.dirs ?? []);
+		const filled = dirsContainingFiles(local);
+		for (const dir of local.dirs) {
+			if (bundleDirs.has(dir)) continue;
+			if (filled.has(dir)) continue; // 里面有文件：交给文件规则，别在这里抢着删
+			if (strictness === 'mirror') {
+				foldersToRemove.push(dir);
+				continue;
+			}
+			if (!baseDirs.has(dir)) continue;
+			if (strictness === 'normal' && !propagateDeletions) continue;
+			foldersToRemove.push(dir);
+		}
+		foldersToRemove.sort();
+	}
+
 	const report: ApplyReport = {
 		mode: fastPath ? 'fast' : 'merge',
 		sameLineage,
@@ -454,9 +487,29 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		moves,
 		// 本地还没有的才算"要补建"：包会把空文件夹全带一遍，建已有的目录是空操作
 		foldersToCreate: (header.emptyDirs ?? []).filter(dir => !local.dirs.has(dir)).length,
+		foldersToRemove: foldersToRemove.length,
 	};
 
-	return { info, report, actions, options: { conflictStrategy, propagateDeletions, keepBackup } };
+	return { info, report, actions, foldersToRemove, options: { conflictStrategy, propagateDeletions, keepBackup } };
+}
+
+/**
+ * 包里"有哪些目录"：记着的空文件夹 ＋ 每个条目的上级目录。
+ *
+ * 后者不必逐个记 —— 它们会随着文件写入被 `ensureDir` 顺带建出来，
+ * 但判断"本地这个空目录是不是包里没有"时得能算出来。
+ */
+function dirsInBundle(header: BundleInfo['header']): Set<string> {
+	const dirs = new Set<string>(header.emptyDirs ?? []);
+	for (const entry of header.entries) {
+		let dir = dirnameRel(entry.path);
+		while (dir) {
+			if (dirs.has(dir)) break;
+			dirs.add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+	return dirs;
 }
 
 /** 真正落盘 */
@@ -603,6 +656,13 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		...plan.actions.flatMap(action => (action.kind === 'rename' && action.from ? [action.from] : [])),
 	]);
 
+	// 包里没有的本地空目录（强制档全删、默认档只删"对方删过的"）。
+	// 放在文件动作之后：被文件删除腾空的目录这时候才可能真的空。
+	// 仍然只走 rmdir —— 非空目录删不动，所以这一批不会碰到有内容的目录。
+	for (const dir of plan.foldersToRemove ?? []) {
+		if (await removeEmptyDir(toNative(options.vaultRoot, dir))) result.foldersRemoved++;
+	}
+
 	// 认祖归宗 + 世代对齐
 	const state = await loadState(options.stateFile);
 	state.lineage = plan.info.header.lineage;
@@ -631,6 +691,12 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
 	// 所以中间版本记录重置；应用更新包则保留
 	const isFull = plan.info.header.mode === 'full';
+	// 目录基准同理：只记**两边都见过**的目录（包里点了名的，且这次真的在本地）
+	const keepDirs: string[] = [];
+	for (const dir of dirsInBundle(plan.info.header)) {
+		if (await dirExists(toNative(options.vaultRoot, dir))) keepDirs.push(dir);
+	}
+	keepDirs.sort();
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
 		files: baseline,
@@ -639,6 +705,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			? plan.info.header.targetGeneration
 			: (state.bundle?.fullGeneration ?? null),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
+		dirs: keepDirs,
 	};
 	await saveState(options.stateFile, state);
 

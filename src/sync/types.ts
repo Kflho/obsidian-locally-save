@@ -53,6 +53,14 @@ export interface DiffOptions {
 	 * 默认 2000：FAT/exFAT 这类文件系统只精确到 2 秒，U 盘来回拷会被误判成"改过"。
 	 */
 	mtimeToleranceMs?: number;
+	/**
+	 * 基准里记过的目录（上次同步时两边都有的）。
+	 *
+	 * 只用来判断"目录是被删了还是新出现的"：在基准里 ＋ 一侧没了 ＝ 删掉了 → 跟着删；
+	 * 不在基准里 ＝ 新出现的 → 只建。老状态文件里没有这个字段，
+	 * 于是升级后的第一轮谁都不删（等于旧行为），第二轮起才正常传播删除。
+	 */
+	baseDirs?: Set<string>;
 }
 
 export type SyncActionKind =
@@ -101,6 +109,15 @@ export interface SyncPlan {
 	 * 一个空文件夹永远传不过去（它里面没有文件可复制）。
 	 */
 	folders: { path: string; side: 'local' | 'remote' }[];
+	/**
+	 * 要删掉的空目录（`side` ＝ 删哪一侧）。
+	 *
+	 * 与文件同一套规矩：**只有基准里记过的目录才敢删** ——
+	 * 基准里有它 ＋ 一侧没了 ＝ 那一侧把它删掉了，才值得跟着删；
+	 * 基准里没有 ＋ 一侧没有 ＝ 新出现的目录，只建不删。
+	 * 执行时只走 `rmdir`（非空必然失败），所以判断错了也只会"没删掉"。
+	 */
+	removedFolders: { path: string; side: 'local' | 'remote' }[];
 }
 
 /** 动作类型的中文名，通知与预览窗口共用 */

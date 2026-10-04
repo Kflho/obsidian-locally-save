@@ -69,13 +69,29 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 }
 
 /**
+ * 删掉一个**空**目录；非空 / 不存在都返回 false。
+ *
+ * 这是目录删除的唯一入口：用的是 `rmdir`，**非空目录必然失败** ——
+ * 所以哪怕上游判断错了（比如某个文件被排除规则挡在清单外），
+ * 最坏结果也只是"没删掉"，绝不会删掉还有内容的目录。
+ */
+export async function removeEmptyDir(absPath: string): Promise<boolean> {
+	try {
+		await fs.promises.rmdir(absPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * 把一批路径**删空之后剩下的空目录**收拾掉。
  *
  * 传进来的是刚被删掉 / 挪走的路径：顺着它们的父目录往上走，能删就删
  * （`rmdir` 对非空目录会失败，所以只会删真空的，绝不会碰有内容的目录），
- * 到根为止。返回删掉几个目录。
+ * 到根为止。返回**真的删掉了哪些目录**（相对路径）。
  */
-export async function pruneEmptyDirs(root: string, removedPaths: string[]): Promise<number> {
+export async function pruneEmptyDirsDetailed(root: string, removedPaths: string[]): Promise<string[]> {
 	const candidates = new Set<string>();
 	for (const rel of removedPaths) {
 		let dir = dirnameRel(rel);
@@ -87,16 +103,16 @@ export async function pruneEmptyDirs(root: string, removedPaths: string[]): Prom
 
 	// 深的先删：父子都在名单里时，先删子目录，父目录才可能变空
 	const ordered = [...candidates].sort((a, b) => b.split('/').length - a.split('/').length);
-	let removed = 0;
+	const removed: string[] = [];
 	for (const dir of ordered) {
-		try {
-			await fs.promises.rmdir(toNative(root, dir));
-			removed++;
-		} catch {
-			// 非空 / 不存在 / 没权限：都当成"不用删"
-		}
+		if (await removeEmptyDir(toNative(root, dir))) removed.push(dir);
 	}
 	return removed;
+}
+
+/** 同上，只要个数（调用方不关心是哪些） */
+export async function pruneEmptyDirs(root: string, removedPaths: string[]): Promise<number> {
+	return (await pruneEmptyDirsDetailed(root, removedPaths)).length;
 }
 
 /** 取一个文件的大小与修改时间；不存在 / 读不到返回 null */

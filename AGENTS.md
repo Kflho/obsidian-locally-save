@@ -51,15 +51,20 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   - `mirror` 会删掉"本机新建的文件"，所以界面上必须额外确认，且它是唯一会这么干的一档。
 - **应用有模块级串行锁**（`bundle/apply.ts` 里的 `applying`）：同步那边有 plugin 层锁，应用这边以前没有，
   两个对话框一起点会互相踩着写同一批文件。
-- **目录（含空文件夹）只建不删**：`scanTree` 除了文件还要收 `dirs`，`planSync` 把"对面没有的目录"
-  放进 `plan.folders`（带 `side`，跟着方向过滤），执行时 `ensureDir` 补建（`foldersCreated`）。
-  **永远不要因为"对面没这个目录"去删它** —— 空目录留着不碍事，删错一次是整片内容消失，
-  而且目录没有"大小 + 修改时间"能做 base 检查，三方比对那套保护在目录上不成立。
-  真正**被删空 / 挪空**的目录由 `pruneEmptyDirs` 顺手收拾（`rmdir` 只删真空的，非空一律不碰）。
+- **目录（含空文件夹）要建，也要删 —— 但删必须过基准检查**：`scanTree` 除了文件还要收 `dirs`；
+  `planSync` 出 `folders`（对面没有、基准里也没有 → 建；按 `allowsUpload/allowsDownload` 过滤）与
+  `removedFolders`（对面没有、**基准里有** → 那一侧把它删了 → 跟着删；还要看「同步删除」开关）。
+  基准是 `TargetState.dirs`（`rebuildDirs` 只记**两边都有**的目录，与文件同一条规矩），
+  老状态文件没有这一项 → 升级后第一轮谁都不删。
+  **目录的删除只能走 `removeEmptyDir`（`rmdir`）**：非空必然失败，所以清单漏看了文件
+  （被排除规则挡住的那种）也只会"没删掉"。里面有文件的目录一律不归目录规则管（`dirsContainingFiles`），
+  交给文件规则；被文件删除腾空的目录由 `pruneEmptyDirsDetailed` 顺手收拾。
   已经要写文件的目录会被 `copyFilePreservingMtime` 里的 `ensureDir` 顺带建出来，
-  所以 `plan.folders` 要跳过这些（`receivingSide()` + `implied` 集合），否则界面上会重复报数。
-  同步包那头对应 `header.emptyDirs`（导出时用"有文件覆盖到的目录"反推），应用时补建并计入
-  `ApplyResult.foldersCreated`、报告里给 `foldersToCreate`。目录位置杵着同名文件时**报失败不硬来**。
+  所以 `folders` 要跳过这些（`receivingSide()` + `implied`），否则界面上会重复报数。
+  同步包那头：包里的目录集 = `header.emptyDirs` ＋ 条目的上级目录（`dirsInBundle`）；
+  `mirror` 删掉本地所有"包里没有"的空目录（它的承诺就是完全一致）、
+  `bundle-wins` / `normal` 只删 `state.bundle.dirs` 里记过的（＝对方删过它，`normal` 还要看开关）。
+  应用/导出后 `state.bundle.dirs` 只记**两边都见过**的目录。目录位置杵着同名文件时**报失败不硬来**。
 - **目录 / 文件冲突**（本地同路径是文件夹、包里是文件）：`normal` 档报成明确失败、**不动那个文件夹**；
   强制两档才把它挪进回收目录腾位置。
 - **上一次应用的结果必须落盘**：`state.bundle.files` 只记**两边都见过、且这次真的写成了一致**的路径 ——
@@ -96,7 +101,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 422 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 464 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

@@ -15,7 +15,7 @@ import { readBundleInfo, verifyBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
-import { loadState } from '../src/sync/state';
+import { loadState, saveState } from '../src/sync/state';
 import { createLogger } from '../src/utils/log';
 
 // -------------------------------------------------------------------- 断言
@@ -598,6 +598,90 @@ checkTrue(
 );
 check('那个文件原样还在', read(S, '空目录'), 'I AM A FILE');
 check('能建的目录照样建', exists(S, 'notes/子目录'), true);
+
+// 19. 强制应用能不能让**文件夹**也完全一致？
+// 造一台机器：先应用一次包拿到基准，再故意多出两个本地空目录 ——
+// 一个"本机新建的"（基准里没有），一个"上一版包里有过、对方删了"（基准里有）。
+const T2 = path.join(ROOT, 'machineT');
+const STATE_T2 = path.join(ROOT, 'state-t.json');
+fs.mkdirSync(T2, { recursive: true });
+const t2First = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE));
+await executeBundlePlan(t2First, applyOptions(T2, STATE_T2, R_FILE));
+fs.mkdirSync(abs(T2, '本机新建的'), { recursive: true });
+
+const seeded = await loadState(STATE_T2);
+seeded.bundle = {
+	...seeded.bundle!,
+	dirs: [...(seeded.bundle?.dirs ?? []), '对方删过的目录'],
+};
+await saveState(STATE_T2, seeded);
+fs.mkdirSync(abs(T2, '对方删过的目录'), { recursive: true });
+
+/** 仓库里的目录清单（跳过 .trash 这类点开头的） */
+function listDirs(root: string): string[] {
+	const found: string[] = [];
+	const walk = (rel: string) => {
+		for (const entry of fs.readdirSync(abs(root, rel), { withFileTypes: true })) {
+			if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+			const next = rel ? `${rel}/${entry.name}` : entry.name;
+			found.push(next);
+			walk(next);
+		}
+	};
+	walk('');
+	return found.sort();
+}
+
+const bundleDirs = new Set<string>(qInfo.header.emptyDirs ?? []);
+for (const entry of qInfo.header.entries) {
+	const parts = entry.path.split('/');
+	for (let i = 1; i < parts.length; i++) bundleDirs.add(parts.slice(0, i).join('/'));
+}
+
+// 默认档：只删"对方删过的"（基准里有、包里没有），本机新建的一律留着
+const t2Normal = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE));
+check('默认档：只删基准里记过的那个', t2Normal.foldersToRemove, ['对方删过的目录']);
+check('默认档：报告里也写了要删几个', t2Normal.report.foldersToRemove, 1);
+const t2NormalResult = await executeBundlePlan(t2Normal, applyOptions(T2, STATE_T2, R_FILE));
+check('默认档：删掉了', exists(T2, '对方删过的目录'), false);
+check('默认档：本机新建的留着', exists(T2, '本机新建的'), true);
+check('默认档：结果里记了清理数', t2NormalResult.foldersRemoved, 1);
+
+// 关掉「同步删除」：目录也一个都不删（开关不能只管文件）
+fs.mkdirSync(abs(T2, '对方删过的目录'), { recursive: true });
+const t2NoDelete = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE, { propagateDeletions: false }));
+check('关掉同步删除 → 目录也不删', t2NoDelete.foldersToRemove, []);
+
+// 强制一致：本机新建的也删 —— 这一档的承诺就是"仓库和包完全一样"
+const t2Mirror = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE, { strictness: 'mirror' }));
+check('强制一致：本机新建的也删', t2Mirror.foldersToRemove, ['对方删过的目录', '本机新建的']);
+const t2MirrorResult = await executeBundlePlan(t2Mirror, applyOptions(T2, STATE_T2, R_FILE, { strictness: 'mirror' }));
+check('强制一致：两个都删掉了', [exists(T2, '本机新建的'), exists(T2, '对方删过的目录')], [false, false]);
+check('强制一致：结果里记了清理数', t2MirrorResult.foldersRemoved, 2);
+check(
+	'强制一致之后：仓库里没有"包里没有的目录"了（文件与文件夹都对齐）',
+	listDirs(T2).filter(dir => !bundleDirs.has(dir)),
+	[],
+);
+check(
+	'包里有的空文件夹一个不缺',
+	listDirs(T2).every(dir => bundleDirs.has(dir)),
+	true,
+);
+
+// 20. 目录里还有文件时，目录规则不插手；非空的目录 rmdir 也删不动
+const U = path.join(ROOT, 'machineU');
+const STATE_U = path.join(ROOT, 'state-u.json');
+fs.mkdirSync(U, { recursive: true });
+write(U, 'notes/keep.md', 'KEEP');
+fs.mkdirSync(abs(U, '自己的一摊'), { recursive: true });
+write(U, '自己的一摊/mine.md', 'MINE');
+const uMirror = await planBundleApply(applyOptions(U, STATE_U, R_FILE, { strictness: 'mirror' }));
+check('里面有文件的目录不归目录规则管', uMirror.foldersToRemove, []);
+const uResult = await executeBundlePlan(uMirror, applyOptions(U, STATE_U, R_FILE, { strictness: 'mirror' }));
+check('强制一致：多余的文件被删掉', exists(U, '自己的一摊/mine.md'), false);
+check('腾空的目录跟着收拾掉（不是靠目录规则删的）', exists(U, '自己的一摊'), false);
+check('结果里也算进了清理数', uResult.foldersRemoved, 1);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

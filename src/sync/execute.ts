@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { toNative } from '../utils/paths';
-import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, pruneEmptyDirs, removeFile, statFile } from './disk';
+import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, pruneEmptyDirs, removeEmptyDir, removeFile, statFile } from './disk';
 import type { SyncAction, SyncPlan } from './types';
 
 /**
@@ -98,6 +98,13 @@ export async function executePlan(plan: SyncPlan, options: ExecuteOptions): Prom
 	});
 	result.foldersRemoved += await pruneEmptyDirs(options.vaultRoot, vacated(['delete-local', 'rename-local']));
 	result.foldersRemoved += await pruneEmptyDirs(options.targetRoot, vacated(['delete-remote', 'rename-remote']));
+
+	// 对面把空目录删了 → 这边跟着删。只走 rmdir：目录里但凡有东西就删不动，
+	// 所以这里不需要 base 之外的第二道保护（清单漏看的文件也伤不到）
+	for (const folder of plan.removedFolders ?? []) {
+		const root = folder.side === 'remote' ? options.targetRoot : options.vaultRoot;
+		if (await removeEmptyDir(toNative(root, folder.path))) result.foldersRemoved++;
+	}
 
 	options.onProgress?.(done, total, '');
 	return result;

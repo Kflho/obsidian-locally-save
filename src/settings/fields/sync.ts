@@ -64,7 +64,7 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'propagateDeletions',
 					name: '同步删除',
-					desc: '本地删掉的文件，副本里也删掉；副本里删掉的，本地也删。关掉的话删除不会传播——被删的文件会从另一边重新长回来（只在两边都没再动过它的情况下才判定为删除，没同步过的新文件永远不会被删）',
+					desc: '本地删掉的文件，副本里也删掉；副本里删掉的，本地也删。关掉的话删除不会传播——被删的文件会从另一边重新长回来（只在两边都没再动过它的情况下才判定为删除，没同步过的新文件永远不会被删）。空文件夹同样跟着这条走：删掉的空文件夹对面也会删，但只删空的，里面有东西就删不动',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.propagateDeletions),
 					rerenderOnChange: true,
