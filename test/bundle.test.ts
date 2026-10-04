@@ -13,6 +13,7 @@ import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
+import { advanceWarnThreshold, parseSizeLimit, shouldOfferReset, warnThreshold } from '../src/bundle/size-warn';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
 import { loadState, saveState } from '../src/sync/state';
@@ -157,20 +158,24 @@ fs.rmSync(abs(A, 'notes/b.md'));
 const changed = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('增量包导出成功', changed.file !== null, changed.reason ?? '没有导出文件');
 const FILE_CHANGES = changed.file as string;
+// 留一份**稳定副本**：后面每导一个新更新包，都会把被它取代的旧包清掉（功能本身如此），
+// 这些用例要用的是"那一份包"，不是"那个路径上现在还剩什么"
+const KEPT_CHANGES = path.join(OUT, 'kept-changes.lsave');
+fs.copyFileSync(FILE_CHANGES, KEPT_CHANGES);
 check('增量包只装改动过的文件', changed.entryCount, 1);
 check('增量包带上删除清单', changed.deletedCount, 1);
 check('增量包记了基准世代', changed.header?.baseGeneration, 1);
 check('增量包指向第 2 代', changed.header?.targetGeneration, 2);
 
-const changesInfo = await readBundleInfo(FILE_CHANGES);
+const changesInfo = await readBundleInfo(KEPT_CHANGES);
 check('增量包的文件带了 base（供接收方三方比对）', typeof changesInfo.header.entries[0]?.baseSize, 'number');
 check('删除项也带了 base', typeof changesInfo.header.deleted[0]?.baseSize, 'number');
 
 // 4. B 应用增量包：世代对得上 → 快速通道
-plan = await planBundleApply(applyOptions(B, STATE_B, FILE_CHANGES));
+plan = await planBundleApply(applyOptions(B, STATE_B, KEPT_CHANGES));
 check('血脉世代一致 → 快速通道', plan.report.mode, 'fast');
 check('会覆盖 1 个、删除 1 个', [plan.report.overwrites, plan.report.deletes], [1, 1]);
-result = await executeBundlePlan(plan, applyOptions(B, STATE_B, FILE_CHANGES));
+result = await executeBundlePlan(plan, applyOptions(B, STATE_B, KEPT_CHANGES));
 check('B 的内容更新', read(B, 'notes/a.md'), 'AAA-CHANGED');
 check('B 的删除也跟上了', exists(B, 'notes/b.md'), false);
 check('删除进了回收目录', fs.existsSync(path.join(B, '.trash', 'locally-save')), true);
@@ -257,7 +262,7 @@ checkTrue('没导过完整包 → 拒绝导更新包', noAnchor.includes('完整
 
 // 7. 损坏的包会被拒绝（U 盘 / 网盘传坏的典型情况）
 const broken = path.join(OUT, 'broken.lsave');
-fs.copyFileSync(FILE_CHANGES, broken);
+fs.copyFileSync(KEPT_CHANGES, broken);
 const brokenInfo = await readBundleInfo(broken);
 const handle = fs.openSync(broken, 'r+');
 const byte = Buffer.alloc(1);
@@ -693,7 +698,7 @@ const V = path.join(ROOT, 'machineV');
 const STATE_V = path.join(ROOT, 'state-v.json');
 fs.mkdirSync(V, { recursive: true });
 write(V, 'notes/keep.md', 'KEEP'); // 更新包里没有它
-const vPlan = await planBundleApply(applyOptions(V, STATE_V, FILE_CHANGES, { strictness: 'mirror' }));
+const vPlan = await planBundleApply(applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
 check('更新包用强制档 → 降级成默认档', vPlan.report.strictness, 'normal');
 check('报告里标出"被降级了"（界面要说明白）', vPlan.report.strictnessDowngraded, true);
 check('报告里 forced 也不再成立', vPlan.report.forced, false);
@@ -702,7 +707,7 @@ check(
 	vPlan.actions.filter(action => action.kind === 'delete').map(action => action.path),
 	[],
 );
-await executeBundlePlan(vPlan, applyOptions(V, STATE_V, FILE_CHANGES, { strictness: 'mirror' }));
+await executeBundlePlan(vPlan, applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
 check('仓库里那个文件还在（没被清空）', read(V, 'notes/keep.md'), 'KEEP');
 check(
 	'完整包不受影响：强制档照旧生效',
@@ -793,7 +798,7 @@ const yFull = await planBundleApply(applyOptions(Y, STATE_Y, R_FILE));
 await executeBundlePlan(yFull, applyOptions(Y, STATE_Y, R_FILE));
 check('先应用完整包：文件进基准', read(Y, 'notes/keep.md'), 'KEEP');
 
-const yChanges = await planBundleApply(applyOptions(Y, STATE_Y, FILE_CHANGES));
+const yChanges = await planBundleApply(applyOptions(Y, STATE_Y, KEPT_CHANGES));
 check(
 	'更新包：没提到的文件不许当成"被删了"',
 	yChanges.actions.filter(action => action.kind === 'delete').map(action => action.path),
@@ -801,7 +806,7 @@ check(
 );
 check('报告里的删除数也是 0', yChanges.report.deletes, 0);
 check('"对方删过的"这个数同样是 0', yChanges.report.extraDeletes, 0);
-await executeBundlePlan(yChanges, applyOptions(Y, STATE_Y, FILE_CHANGES));
+await executeBundlePlan(yChanges, applyOptions(Y, STATE_Y, KEPT_CHANGES));
 check('应用之后那个文件还在（更新包只动它提到的东西）', read(Y, 'notes/keep.md'), 'KEEP');
 check('包里点名删的、本地没有的：什么都不用做', yChanges.report.keptDeletes, 0);
 
@@ -817,6 +822,79 @@ check(
 );
 await executeBundlePlan(yFull2, applyOptions(Y, STATE_Y, qFull2.file as string));
 check('删掉了', exists(Y, 'notes/keep.md'), false);
+
+// 26. 「更新包攒大了提醒换基准」那套判断（纯逻辑，先钉死）
+check('留空 → 默认 200MB', parseSizeLimit(''), 200 * 1024 * 1024);
+check('写 500KB', parseSizeLimit('500KB'), 500 * 1024);
+check('写 1.5GB', parseSizeLimit('1.5 GB'), Math.floor(1.5 * 1024 * 1024 * 1024));
+check('不带单位按 MB 算', parseSizeLimit('300'), 300 * 1024 * 1024);
+check('大小写都认', parseSizeLimit('200mb'), 200 * 1024 * 1024);
+check('填 0 → 关掉提醒（Infinity）', parseSizeLimit('0'), Number.POSITIVE_INFINITY);
+check('乱填 → 回到默认（宁可提醒）', parseSizeLimit('随便写点什么'), 200 * 1024 * 1024);
+const limit200 = 200 * 1024 * 1024;
+check('没到线上 → 不弹', shouldOfferReset(limit200, 100 * 1024 * 1024), false);
+check('到线了 → 弹', shouldOfferReset(limit200, 200 * 1024 * 1024), true);
+check('关掉提醒（Infinity）→ 永不弹', shouldOfferReset(Number.POSITIVE_INFINITY, 10 ** 12), false);
+check(
+	'跳过一次之后：提醒线抬到 400MB，350MB 不再弹',
+	[
+		shouldOfferReset(limit200, 350 * 1024 * 1024, advanceWarnThreshold(limit200, null)),
+		advanceWarnThreshold(limit200, null),
+	],
+	[false, 400 * 1024 * 1024],
+);
+check(
+	'再跳一次：600MB（按原上限整数倍累进，不是按百分比）',
+	advanceWarnThreshold(limit200, advanceWarnThreshold(limit200, null)),
+	600 * 1024 * 1024,
+);
+check('到 400MB 了 → 再弹一次', shouldOfferReset(limit200, 400 * 1024 * 1024, advanceWarnThreshold(limit200, null)), true);
+check('换过基准（提醒线清零）→ 回到 1 倍上限', warnThreshold(limit200, null), limit200);
+
+// 27. 完整包会取代**所有**更早的更新包（换基准之后就它们没用了）
+// 用一台新机器 + 一个新目录，免得干扰前面那些依赖具体包文件的用例
+const OUT2 = path.join(ROOT, 'transfer2');
+const AA = path.join(ROOT, 'machineAA');
+const STATE_AA = path.join(ROOT, 'state-aa.json');
+fs.mkdirSync(OUT2, { recursive: true });
+fs.mkdirSync(AA, { recursive: true });
+write(AA, 'a.md', 'A1');
+const aaFull = await exportBundle({ ...exportOptions(AA, STATE_AA), outDir: OUT2 });
+write(AA, 'b.md', 'B1');
+const aaC1 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
+write(AA, 'c.md', 'C1');
+const aaC2 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
+const changesDir = path.join(OUT2, 'changes');
+check('导第二个更新包：旧的被它取代、只剩新的那个', fs.readdirSync(changesDir), [path.basename(aaC2.file as string)]);
+check('清掉的名单也带出来', aaC2.superseded, [path.basename(aaC1.file as string)]);
+check('完整包留着（还原点）', fs.existsSync(aaFull.file as string), true);
+
+// 两个一起导：完整包不该把**同一次**刚导出的更新包也清掉
+write(AA, 'd.md', 'D1');
+const aaC3 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
+const aaF2 = await exportBundle({
+	...exportOptions(AA, STATE_AA),
+	outDir: OUT2,
+	keepPaths: [aaC3.file as string],
+});
+check('同一次导出的更新包不会被完整包清掉', fs.existsSync(aaC3.file as string), true);
+check('但更早的更新包被完整包取代了', aaC3.superseded, [path.basename(aaC2.file as string)]);
+check('这次完整包没删东西（该删的上一轮已删）', aaF2.superseded, []);
+
+// 换基准之后再导更新包：之前的那些（属于老基准）也不留 —— changes 里永远只有一个
+write(AA, 'e.md', 'E1');
+const aaC4 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
+check('新基准下的更新包只剩它一个', fs.readdirSync(changesDir), [path.basename(aaC4.file as string)]);
+
+// 关掉开关就一个都不清
+write(AA, 'f.md', 'F1');
+const aaC5 = await exportBundle({
+	...exportOptions(AA, STATE_AA, 'changes'),
+	outDir: OUT2,
+	settings: settings({ pruneSupersededBundles: false }),
+});
+check('关掉开关 → 不清理', aaC5.superseded, []);
+check('于是 changes 里有两个', fs.readdirSync(changesDir).length, 2);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

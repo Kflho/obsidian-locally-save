@@ -1,10 +1,12 @@
 import { Notice } from 'obsidian';
 import { exportBundle } from '../bundle/export';
+import type { ExportOutcome } from '../bundle/export';
 import { bundleBaseDir } from '../bundle/paths';
 import type LocallySavePlugin from '../main';
 import type { SyncOutcome, SyncRunOptions } from '../sync/runner';
 import { describeRecord, recordFromOutcome, statusBarText } from '../sync/summary';
 import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
+import { offerBaselineReset } from './reset-baseline-modal';
 import { SyncPreviewModal } from './sync-modal';
 
 /**
@@ -57,18 +59,29 @@ async function autoExportBundles(plugin: LocallySavePlugin, outcome: SyncOutcome
 	if (!base) return '';
 
 	const notes: string[] = [];
-	if (autoExportChanges && await writeBundleFile(plugin, outcome, base, 'changes')) notes.push('已留改动包');
-	if (autoExportFull && await writeBundleFile(plugin, outcome, base, 'full')) notes.push('已留完整包');
+	/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
+	const written: string[] = [];
+	if (autoExportChanges) {
+		const changes = await writeBundleFile(plugin, outcome, base, 'changes', written);
+		if (changes) {
+			notes.push('已留改动包');
+			// 攒大了就弹窗问"要不要换基准"（用户点过跳过后，提醒线会抬高一倍原上限）
+			await offerBaselineReset(plugin, changes);
+		}
+	}
+	if (autoExportFull
+		&& await writeBundleFile(plugin, outcome, base, 'full', written)) notes.push('已留完整包');
 	return notes.length > 0 ? ` · ${notes.join('、')}` : '';
 }
 
-/** 导一个包出去；返回是否真的写了文件（没改动时不写） */
+/** 导一个包出去；写了文件就把结果返回（没改动时返回 null） */
 async function writeBundleFile(
 	plugin: LocallySavePlugin,
 	outcome: SyncOutcome,
 	base: string,
 	mode: 'full' | 'changes',
-): Promise<boolean> {
+	written: string[],
+): Promise<ExportOutcome | null> {
 	const label = mode === 'full' ? '完整包' : '改动包';
 	try {
 		const result = await exportBundle({
@@ -81,15 +94,17 @@ async function writeBundleFile(
 			outDir: base,
 			configDir: plugin.configDir(),
 			inventory: outcome.localInventory,
+			keepPaths: [...written],
 		});
-		if (!result.file) return false;
+		if (!result.file) return null;
+		written.push(result.file);
 		plugin.log.debug(`${label}已留下：${result.file}`);
-		return true;
+		return result;
 	} catch (error) {
 		// 留包失败不该让"同步成功"这件事看起来失败了
 		new Notice(`同步完成，但${label}导出失败：${describe(error)}`, 9000);
 		plugin.log.error(`${label}导出失败`, error);
-		return false;
+		return null;
 	}
 }
 

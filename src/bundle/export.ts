@@ -1,10 +1,10 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, writeBundle } from './format';
+import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
 import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
-import { scanTree } from '../sync/disk';
+import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { excludePatterns } from '../sync/runner';
 import { fingerprint } from '../sync/hash-cache';
 import { VAULT_TRASH_DIR } from '../sync/runner';
@@ -49,6 +49,13 @@ export interface ExportOptions {
 	 * 同步刚扫完的话直接传进来复用 —— 少一次全库遍历，自动留包就几乎不花时间。
 	 */
 	inventory?: Inventory;
+	/**
+	 * 一次导出多个包时，把**先导出来的那些**填进来（"先更新包、后完整包"的调用方用）。
+	 *
+	 * 完整包会清掉被它取代的旧更新包；不排除同一次刚导出的那个的话，
+	 * 用户明明两个都勾了，最后只剩完整包一个。
+	 */
+	keepPaths?: string[];
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
@@ -67,8 +74,12 @@ export interface ExportOutcome {
 	header: BundleHeader | null;
 	/** 上一个包的 ID：界面上用来提示"对方该接的是这个" */
 	parentBundleId: string | null;
+	/** 实际写到磁盘上的文件大小（弹"该换基准了"看的是它） */
+	fileBytes: number;
 	/** 是不是"以完整包为基准累积"的更新包 */
 	cumulative: boolean;
+	/** 这次顺手删掉了哪些被取代的旧更新包（文件名，已排序） */
+	superseded: string[];
 }
 
 /** 文件名里不能有的字符换成下划线（仓库名可能含 : / 之类） */
@@ -141,6 +152,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			header: null,
 			parentBundleId: state.lastExportedBundleId,
 			cumulative: true,
+			fileBytes: 0,
+			superseded: [],
 		};
 	}
 
@@ -242,14 +255,22 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	pruneHashes(state, new Set(inventory.files.keys()));
 	await saveState(options.stateFile, state);
 
+	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
+	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩
+	const superseded = settings.pruneSupersededBundles
+		? await removeSupersededChanges(options, header, file)
+		: [];
+
 	options.log.debug(
-		`导出${mode === 'full' ? '完整' : '累积更新'}包：${file}（${sources.length} 个文件，${header.payloadBytes} 字节）`,
+		`导出${mode === 'full' ? '完整' : '累积更新'}包：${file}（${sources.length} 个文件，${header.payloadBytes} 字节）`
+		+ (superseded.length > 0 ? `；顺手清掉 ${superseded.length} 个被它取代的旧更新包` : ''),
 	);
 
 	return {
 		file,
 		entryCount: sources.length,
 		deletedCount: deleted.length,
+		fileBytes: (await statFile(file))?.size ?? header.payloadBytes,
 		// 包里的目录 = 记着的空文件夹 ＋ 有文件那些目录（它们由文件写入顺带建出来）
 		dirCount: covered.size + emptyDirs.length,
 		emptyDirCount: emptyDirs.length,
@@ -258,5 +279,55 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		header,
 		parentBundleId: state.lastExportedBundleId,
 		cumulative: mode === 'changes',
+		superseded,
 	};
+}
+
+/**
+ * 删掉被新包**完全取代**的旧更新包 —— 让 `changes/` 里最多只留**最新那一个**。
+ *
+ * 为什么可以这么干脆：更新包是"自完整副本累积"的，任何更新的更新包、
+ * 或一份更新的完整副本，都包含旧更新包的全部内容（所以文档里才敢说
+ * "永远只需要应用最新的一个"）。留着它们只有两个后果：占地方，
+ * 以及让人以为"包越攒越多、是不是漏应用了什么"（用户报过这个疑问）。
+ *
+ * 只删**确定**能删的，条件缺一不可：
+ * - 同一个 `changes` 目录里的 `.lsave`（别的目录不碰）；
+ * - 是**更新包**（完整包不碰：那是你的还原点）；
+ * - 同一条血脉（`lineage` 一致）—— 别的机器导的包不动；
+ * - 世代**严格更小**；而且不是刚写出来的那个。
+ *
+ * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导更新包、再导完整包，
+ * 不排除它的话，用户明明要了两个，最后只剩完整包一个。
+ *
+ * 内容安全性：新包（或与它同代的那份完整包）含有旧包的全部内容，删掉不丢东西；
+ * 读不出头部、或者任何一条对不上的，一律留着（宁可多留，不可误删）。
+ */
+async function removeSupersededChanges(
+	options: ExportOptions,
+	header: BundleHeader,
+	keep: string,
+): Promise<string[]> {
+	const dir = bundleDirForMode(options.outDir, 'changes');
+	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
+	keepPaths.add(path.resolve(keep));
+	const removed: string[] = [];
+	for (const item of await listFiles(dir)) {
+		if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
+		const candidate = path.join(dir, item.name);
+		if (keepPaths.has(path.resolve(candidate))) continue;
+		let other: BundleHeader;
+		try {
+			other = (await readBundleInfo(candidate)).header;
+		} catch {
+			continue; // 读不出头部（不是我们的包 / 传坏了）：不动它
+		}
+		if (other.mode !== 'changes') continue;
+		if (other.lineage !== header.lineage) continue;
+		if (other.targetGeneration >= header.targetGeneration) continue;
+		await removeFile(candidate);
+		removed.push(item.name);
+	}
+	removed.sort();
+	return removed;
 }

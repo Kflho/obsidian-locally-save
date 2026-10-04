@@ -10,6 +10,7 @@ import {
 	coerceText,
 } from '../model';
 import type { PluginSettings } from '../model';
+import { DEFAULT_SIZE_LIMIT } from '../../bundle/size-warn';
 import { bundleBaseDir } from '../../bundle/paths';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
@@ -108,6 +109,26 @@ export const SYNC_SECTION: FieldSection = {
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
 				},
 				{
+					key: 'pruneSupersededBundles',
+					name: '导出后清掉被取代的旧更新包',
+					desc: '更新包是**累积**的：新包包含旧包的全部内容，所以老的那些留着只是占地方，'
+						+ '还会让人以为"包越攒越多、是不是漏应用了什么"。开着的话，导完新更新包就把'
+						+ '「changes」里被它取代的旧更新包删掉（同血脉、同基准世代、世代更小的那些）；'
+						+ '**完整包一个都不碰**（那是你的还原点），别的机器导的包也不碰',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.pruneSupersededBundles),
+				},
+				{
+					key: 'bundleSizeWarnLimit',
+					name: '更新包超过多大就提醒换基准',
+					desc: '更新包是**累积**的，越攒越大；大到快赶上完整副本时，它最大的好处（传得小）就没了。'
+						+ '到点会弹窗：建议先把手上这个更新包传过去应用，再重导一份完整副本当新基准'
+						+ '（换完基准，更新包从零重新累积）。写 200MB / 500KB / 1GB 都行，不带单位按 MB 算；'
+						+ '留空＝默认 200MB，**填 0 ＝ 不提醒**',
+					control: { type: 'text', placeholder: DEFAULT_SIZE_LIMIT },
+					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleSizeWarnLimit),
+				},
+				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
 					desc: `留空＝放在**目标文件夹**的 .lsave/bundles 下（这个目录不参与同步，包不会被当成副本内容传回仓库）。`
@@ -163,8 +184,7 @@ export const SYNC_SECTION: FieldSection = {
 				},
 				{
 					key: 'bundleVerify',
-					name: '应用前校验完整性',
-					desc: '把整个包读一遍算校验和，确认传输（U 盘、网盘）没把文件弄坏。包很大时这一步会多花几秒',
+					name: '应用前校验完整性',					desc: '把整个包读一遍算校验和，确认传输（U 盘、网盘）没把文件弄坏。包很大时这一步会多花几秒',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
 				},
