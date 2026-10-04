@@ -157,7 +157,7 @@ check('B 的内容更新', read(B, 'notes/a.md'), 'AAA-CHANGED');
 check('B 的删除也跟上了', exists(B, 'notes/b.md'), false);
 check('删除进了回收目录', fs.existsSync(path.join(B, '.trash', 'locally-save')), true);
 
-// 5. 漏包：B 没应用第 3 个包，A 又导出了第 4 个 → 降级合并
+// 5. 累积更新包：B 没应用第 3 个包，直接应用第 4 个 —— 不该少内容、也不该满屏冲突
 // （修改时间要拉开：大小相同、又在 2 秒容差内的话，会被当成"没改过"）
 const T3 = Date.now();
 write(A, 'notes/a.md', 'AAA-V3', T3);
@@ -168,21 +168,58 @@ write(A, 'notes/new.md', 'NEW', T3 + 60_000);
 const fourth = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
 checkTrue('第四个包导出成功', fourth.file !== null, fourth.reason ?? '');
 checkTrue('同秒内连导两个包不会互相覆盖', third.file !== fourth.file, `都写到了 ${third.file}`);
+check('更新包以完整包为基准累积', fourth.cumulative, true);
+
+const fourthInfo = await readBundleInfo(fourth.file as string);
+check(
+	'累积包把跳过的那一轮也装进来了（a.md 与 new.md）',
+	fourthInfo.header.entries.map(entry => entry.path).sort(),
+	['notes/a.md', 'notes/new.md'],
+);
 
 plan = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
-check('漏了包 → 不拒绝服务，降级为逐文件合并', plan.report.mode, 'merge');
-check('世代差 1（B 落后一代）', plan.report.generationGap, 1);
-check('本地也改过的算冲突', plan.report.conflicts, 1);
+check('跳过中间包也能直接应用（基准是完整包，世代 ≥ 基准即可）', plan.report.mode, 'fast');
+check('本地停在"我发过的中间版本" → 不算冲突', plan.report.conflicts, 0);
+checkTrue('而且认出它来了', plan.report.historyMatches >= 1, `实际 ${plan.report.historyMatches}`);
 check('新文件算新增', plan.report.adds, 1);
 result = await executeBundlePlan(plan, applyOptions(B, STATE_B, fourth.file as string));
-check('冲突的那份占原名', read(B, 'notes/a.md'), 'AAA-V4');
-checkTrue('本地那份留成了冲突副本（没被静默覆盖）', hasConflictCopy(B, 'notes'), '没找到冲突副本');
+check('跳过包也不会少内容：a.md 是最新的', read(B, 'notes/a.md'), 'AAA-V4');
 check('新文件写进来了', read(B, 'notes/new.md'), 'NEW');
+checkTrue('没有产生冲突副本（认得出中间版本）', !hasConflictCopy(B, 'notes'), '不该有冲突副本');
 
-// 6. 同一个包再打开一次：同步程度 100%
-plan = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
-check('已经应用过的包 → 同步程度 100%', plan.report.syncPercent, 100);
-check('全部条目都被跳过', plan.report.skips, 2);
+// 5a. 同一个包再打开一次：本地已经全一致
+const again = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
+check('已经应用过的包 → 同步程度 100%', again.report.syncPercent, 100);
+check('全部条目都被跳过', again.report.skips, 2);
+
+// 5b. 真·本地改动还是要留冲突副本（上一条不能把这条也放过）
+write(B, 'notes/a.md', 'B 自己改的', Date.now() + 300_000);
+write(A, 'notes/a.md', 'AAA-V5', T3 + 600_000);
+const fifth = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+checkTrue('第五个包导出成功', fifth.file !== null, fifth.reason ?? '');
+plan = await planBundleApply(applyOptions(B, STATE_B, fifth.file as string));
+check('本地真改过的 → 冲突', plan.report.conflicts, 1);
+result = await executeBundlePlan(plan, applyOptions(B, STATE_B, fifth.file as string));
+check('包里的内容占原名', read(B, 'notes/a.md'), 'AAA-V5');
+checkTrue('本地那份留成冲突副本', hasConflictCopy(B, 'notes'), '没找到冲突副本');
+
+// 5c. 重导一次完整包 → 累积清零
+const anchorReset = await exportBundle(exportOptions(A, STATE_A));
+checkTrue('重新导完整包', anchorReset.file !== null, anchorReset.reason ?? '');
+check('新完整包是全量的（不是累积）', anchorReset.cumulative, false);
+const afterReset = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+check('刚导完完整包 → 更新包没有内容可装', afterReset.file, null);
+checkTrue('并说明原因', (afterReset.reason ?? '').includes('没有任何变化'), afterReset.reason ?? '');
+
+// 5d. 没有基准就不给导更新包（更新包是"以完整包为基准"的）
+const fresh = path.join(ROOT, 'state-fresh.json');
+let noAnchor = '';
+try {
+	await exportBundle(exportOptions(A, fresh, { bundleMode: 'changes' }));
+} catch (error) {
+	noAnchor = error instanceof Error ? error.message : String(error);
+}
+checkTrue('没导过完整包 → 拒绝导更新包', noAnchor.includes('完整副本'), noAnchor);
 
 // 7. 损坏的包会被拒绝（U 盘 / 网盘传坏的典型情况）
 const broken = path.join(OUT, 'broken.lsave');
@@ -255,7 +292,7 @@ result = await executeBundlePlan(
 );
 check('比包旧的多余文件没了', exists(F, 'old-extra.md'), false);
 check('比包新的也没了（这才是"强制一致"）', exists(F, 'new-extra.md'), false);
-check('本地改动被包的内容覆盖', read(F, 'notes/a.md'), 'AAA-V4');
+check('本地改动被包的内容覆盖', read(F, 'notes/a.md'), 'AAA-V5');
 check('被覆盖的本地版本进了回收目录', fs.existsSync(path.join(F, '.trash', 'locally-save')), true);
 
 // 10b. 完整包 + 「所有都保留」：本地改过的（比包新的）留冲突副本，不静默覆盖

@@ -55,6 +55,13 @@ export interface BundleEntry {
 	baseSize?: number;
 	baseMtime?: number;
 	baseHash?: string;
+	/**
+	 * 这个文件自上次**完整包**以来经历过的版本（不含现在这一版）。
+	 *
+	 * 用来认"中间版本"：接收方可能跳过了一两个更新包，手里那份是我以前发过的，
+	 * 而不是他自己改的 —— 比对得上就直接覆盖，不该留冲突副本。
+	 */
+	history?: { size: number; mtime: number }[];
 }
 
 /** 增量包里的删除项：同样带 base，本地改过就不删 */
@@ -125,6 +132,8 @@ export interface BundleSource {
 	baseSize?: number;
 	baseMtime?: number;
 	baseHash?: string;
+	/** 自上次完整包以来经历过的版本（见 BundleEntry.history） */
+	history?: { size: number; mtime: number }[];
 }
 
 const CHUNK = 4 * 1024 * 1024;
@@ -153,6 +162,7 @@ export async function writeBundle(
 			...(source.baseSize !== undefined ? { baseSize: source.baseSize } : {}),
 			...(source.baseMtime !== undefined ? { baseMtime: source.baseMtime } : {}),
 			...(source.baseHash ? { baseHash: source.baseHash } : {}),
+			...(source.history && source.history.length > 0 ? { history: source.history } : {}),
 		});
 		offset += source.size;
 	}

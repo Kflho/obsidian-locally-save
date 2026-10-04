@@ -88,9 +88,10 @@ export const SYNC_SECTION: FieldSection = {
 			fields: [
 				{
 					key: 'autoExportChanges',
-					name: '同步后自动留改动包',
-					desc: '每次同步成功后，把这一次的改动导成一个包放进「同步包文件夹/changes」（没有改动就不导）。'
-						+ '用的是同步刚扫完的结果，几乎不额外花时间；包很小，随时可以拷走',
+					name: '同步后自动留更新包',
+					desc: '每次同步成功后，把自上次**完整副本**以来的累积改动导成一个包放进「同步包文件夹/changes」'
+						+ '（没有变化就不导）。用的是同步刚扫完的结果，几乎不额外花时间；'
+						+ '包会随改动累积变大，定期导一次完整副本即可清零。**第一次要先导一次完整副本**，更新包要有基准',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
@@ -126,13 +127,14 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'bundleMode',
 					name: '手动导出的默认类型',
-					desc: `命令「导出同步包…」打开时默认选哪个。完整副本＝整个仓库；仅改动＝自上次导出后变过的文件加删除清单。`
-						+ '上面两个自动开关各自独立，不受这里影响',
+					desc: '命令「导出同步包…」打开时默认选哪个。'
+						+ '**完整副本**＝整个仓库，是更新包的基准（对方必须先应用它）；'
+						+ '**更新包**＝自上次完整副本以来累积的全部改动，直接应用最新的那一个即可，跳过中间几个也不会少内容',
 					control: {
 						type: 'dropdown',
 						options: {
 							full: '完整副本（整个仓库）',
-							changes: '仅改动（自上次导出后变过的文件）',
+							changes: '更新包（自上次完整副本以来累积）',
 						},
 					},
 					coerce: value => coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode),
