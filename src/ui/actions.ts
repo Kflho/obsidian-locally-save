@@ -72,11 +72,12 @@ async function writeBundleFile(
 	const label = mode === 'full' ? '完整包' : '改动包';
 	try {
 		const result = await exportBundle({
-			settings: { ...plugin.settings, bundleMode: mode },
+			settings: plugin.settings,
 			log: plugin.log,
 			vaultRoot: plugin.vaultRoot(),
 			vaultName: plugin.vaultName(),
 			stateFile: plugin.stateFile(),
+			mode,
 			outDir: base,
 			configDir: plugin.configDir(),
 			inventory: outcome.localInventory,

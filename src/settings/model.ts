@@ -100,8 +100,6 @@ export interface PluginSettings {
 	// ------------------------------------------------------------ 同步包
 	/** 同步包放哪儿；**留空＝放在同步目标文件夹的 `.lsave/bundles` 下** */
 	bundleDir: string;
-	/** 手动导出对话框里的默认类型 */
-	bundleMode: 'full' | 'changes';
 	/** 应用前校验包的完整性（读一遍全包算校验和，大包会慢一点） */
 	bundleVerify: boolean;
 	/** 把 .lsave 拖到 Obsidian 窗口上时，自动打开"应用同步包"对话框 */
@@ -144,7 +142,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	showLastSyncInStatusBar: true,
 
 	bundleDir: '',
-	bundleMode: 'full',
 	bundleVerify: true,
 	dropBundleToApply: true,
 	rememberFingerprints: true,
@@ -194,7 +191,7 @@ export function coerceConflict(value: unknown): ConflictStrategy {
 }
 
 export function coerceBundleMode(value: unknown): 'full' | 'changes' {
-	return coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode);
+	return coerceChoice(value, ['full', 'changes'] as const, 'full');
 }
 
 /**
@@ -234,7 +231,6 @@ export function settingsFrom(data: unknown): PluginSettings {
 		showLastSyncInStatusBar: coerceBoolean(raw.showLastSyncInStatusBar, DEFAULT_SETTINGS.showLastSyncInStatusBar),
 
 		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
-		bundleMode: coerceBundleMode(raw.bundleMode),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),

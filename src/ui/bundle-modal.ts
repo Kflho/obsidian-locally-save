@@ -5,6 +5,7 @@ import { executeBundlePlan, planBundleApply, APPLY_MODE_LABELS } from '../bundle
 import type { ApplyMode, ApplyPlan } from '../bundle/apply';
 import { exportBundle } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
+import type { BundleMode } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
 import { listFiles } from '../sync/disk';
@@ -26,7 +27,9 @@ const MAX_ROWS = 200;
  */
 export class ExportBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
-	private mode: 'full' | 'changes';
+	/** 两个**独立**的选项：可以都要（不是互斥的下拉框） */
+	private wantChanges = true;
+	private wantFull = false;
 	/** 用户自己填的值（可能为空 ＝ 用默认） */
 	private outDir: string;
 	/** 留空时会用的默认位置：显示成灰底提示，而不是预先填进输入框 */
@@ -37,7 +40,6 @@ export class ExportBundleModal extends Modal {
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
 		this.plugin = plugin;
-		this.mode = plugin.settings.bundleMode;
 		// 只显示"用户自己填的"；留空就是留空，别把默认值预先填进去 ——
 		// 那样用户一删就变成"没填路径"，还得自己猜默认在哪儿
 		this.outDir = plugin.settings.bundleDir.trim();
@@ -59,18 +61,24 @@ export class ExportBundleModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
+		// 两个独立选项，不是互斥的：都要就都勾上（导出时会先导更新包、再导完整包）
 		new Setting(contentEl)
-			.setName('导出内容')
-			.setDesc('完整副本＝整个仓库，是更新包的基准（对方必须先应用它）；'
-				+ '更新包＝自上次完整副本以来累积的全部改动，对方直接应用最新的一个即可')
-			.addDropdown(dropdown => dropdown
-				.addOptions({
-					full: '完整副本',
-					changes: '更新包（累积）',
-				})
-				.setValue(this.mode)
+			.setName('导出更新包')
+			.setDesc('自上次完整副本以来累积的全部改动。对方直接应用最新的一个即可，跳过中间几个也不会少内容')
+			.addToggle(toggle => toggle
+				.setValue(this.wantChanges)
 				.onChange(value => {
-					this.mode = value === 'changes' ? 'changes' : 'full';
+					this.wantChanges = value;
+					this.renderWhere();
+				}));
+
+		new Setting(contentEl)
+			.setName('导出完整副本')
+			.setDesc('整个仓库，也是更新包的**基准**（对方必须先应用它）。体积大，每次都要把整个仓库重写一遍')
+			.addToggle(toggle => toggle
+				.setValue(this.wantFull)
+				.onChange(value => {
+					this.wantFull = value;
 					this.renderWhere();
 				}));
 
@@ -99,15 +107,30 @@ export class ExportBundleModal extends Modal {
 				.onClick(() => this.close()));
 	}
 
-	/** 让用户看清"这个包会落到哪个目录" */
+	/** 让用户看清"这次会导出哪些包、落到哪个目录" */
 	private renderWhere(): void {
+		const modes = this.wantedModes();
 		const base = this.effectiveDir();
 		if (!base) {
 			this.whereEl.setText('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个路径。');
 			return;
 		}
-		const hint = this.outDir === '' ? '（留空＝跟着目标文件夹）' : '';
-		this.whereEl.setText(`会写到：${bundleDirForMode(base, this.mode)}${hint}`);
+		if (modes.length === 0) {
+			this.whereEl.setText('两种都没勾：至少勾一个（更新包或完整副本）。');
+			return;
+		}
+		const targets = modes
+			.map(mode => `${mode === 'full' ? '完整副本' : '更新包'} → ${bundleDirForMode(base, mode)}`)
+			.join('；');
+		this.whereEl.setText(`会写到：${targets}${this.outDir === '' ? '（留空＝跟着目标文件夹）' : ''}`);
+	}
+
+	/** 勾了哪几种，以及导出顺序：**先更新包、后完整包** */
+	private wantedModes(): BundleMode[] {
+		const modes: BundleMode[] = [];
+		if (this.wantChanges) modes.push('changes');
+		if (this.wantFull) modes.push('full');
+		return modes;
 	}
 
 	private async run(): Promise<void> {
@@ -117,37 +140,55 @@ export class ExportBundleModal extends Modal {
 			new Notice('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个同步包文件夹');
 			return;
 		}
-		this.statusEl.setText('正在导出……');
-		try {
-			const outcome = await exportBundle({
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				vaultName: this.plugin.vaultName(),
-				stateFile: this.plugin.stateFile(),
-				outDir,
-				configDir: this.plugin.configDir(),
-				onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file }),
-			});
-			this.plugin.reportProgress(null);
+		const modes = this.wantedModes();
+		if (modes.length === 0) {
+			new Notice('至少勾一个：更新包或完整副本');
+			return;
+		}
 
-			if (!outcome.file) {
-				this.statusEl.setText(outcome.reason ?? '没有需要导出的内容');
-				return;
+		const notes: string[] = [];
+		let anySuccess = false;
+
+		for (const mode of modes) {
+			const label = mode === 'full' ? '完整副本' : '更新包';
+			this.statusEl.setText(`正在导出${label}……`);
+			// 一种失败不影响另一种：第一次用的人往往两个都勾，而"更新包"会因为
+			// 还没有基准而失败 —— 不该把"完整副本"也一起带崩
+			try {
+				const outcome = await exportBundle({
+					settings: this.plugin.settings,
+					log: this.plugin.log,
+					vaultRoot: this.plugin.vaultRoot(),
+					vaultName: this.plugin.vaultName(),
+					stateFile: this.plugin.stateFile(),
+					mode,
+					outDir,
+					configDir: this.plugin.configDir(),
+					onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file }),
+				});
+				this.plugin.reportProgress(null);
+
+				if (!outcome.file) {
+					notes.push(`${label}：${outcome.reason ?? '没有需要导出的内容'}`);
+					continue;
+				}
+				anySuccess = true;
+				notes.push(
+					`${label} ${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
+					+ `（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`,
+				);
+			} catch (error) {
+				this.plugin.reportProgress(null);
+				const message = describe(error);
+				notes.push(`${label}失败：${message}`);
+				this.plugin.log.error(`导出${label}失败`, error);
 			}
+		}
+
+		this.statusEl.setText(notes.join('；'));
+		if (anySuccess) {
+			new Notice(`导出完成：${notes.join('；')}`, 12000);
 			this.close();
-			new Notice(
-				`${outcome.cumulative ? '累积更新包' : '完整副本'}已导出：`
-				+ `${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
-				+ `（${formatDuration(outcome.durationMs)}）\n${outcome.file}`,
-				10000,
-			);
-		} catch (error) {
-			this.plugin.reportProgress(null);
-			const message = error instanceof Error ? error.message : String(error);
-			this.statusEl.setText(`导出失败：${message}`);
-			new Notice(`导出同步包失败：${message}`, 8000);
-			this.plugin.log.error('导出同步包失败', error);
 		}
 	}
 
