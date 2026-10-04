@@ -15,6 +15,11 @@ if (typeof globalThis.window === 'undefined') {
 	globalThis.window = { setInterval: () => 0, clearInterval: () => {} };
 }
 
+/** Obsidian 提供的当前窗口文档（插件用它挂全局拖放） */
+if (typeof globalThis.activeDocument === 'undefined') {
+	globalThis.activeDocument = makeEl();
+}
+
 export class TAbstractFile {}
 export class TFile extends TAbstractFile {}
 export class TFolder extends TAbstractFile {}
@@ -144,10 +149,12 @@ export class PluginSettingTab {
 /** 造一个只有本插件用到的那几个方法的元素替身（并记下写入的文字 / 类名） */
 function makeEl() {
 	const classes = new Set();
+	const listeners = [];
 	return {
 		classes,
 		text: "",
 		children: [],
+		listeners,
 		empty() { this.children = []; },
 		createEl(tag, options) {
 			const child = makeEl();
@@ -159,6 +166,11 @@ function makeEl() {
 		},
 		createDiv(options) {
 			return this.createEl("div", options);
+		},
+		addEventListener(name, handler) { listeners.push({ name, handler }); },
+		removeEventListener(name, handler) {
+			const index = listeners.findIndex(item => item.name === name && item.handler === handler);
+			if (index >= 0) listeners.splice(index, 1);
 		},
 		setText(text) { this.text = text; },
 		addClass(name) { classes.add(name); },
@@ -188,6 +200,7 @@ export class Plugin {
 		this.events = [];
 		this.stubData = null;
 		this.saved = [];
+		this.domEvents = [];
 	}
 	addCommand(command) {
 		this.commands.push(command);
@@ -209,7 +222,12 @@ export class Plugin {
 	registerEvent(event) {
 		this.events.push(event);
 	}
-	registerDomEvent() {}
+	/** 记下挂过的 DOM 事件：测试要核对"全局拖放到底注册没有" */
+	registerDomEvent(el, name, handler, options) {
+		const ref = { el, name, handler, options };
+		this.domEvents.push(ref);
+		return ref;
+	}
 	registerInterval() {}
 	register() {}
 	async loadData() { return this.stubData; }

@@ -104,6 +104,8 @@ export interface PluginSettings {
 	bundleMode: 'full' | 'changes';
 	/** 应用前校验包的完整性（读一遍全包算校验和，大包会慢一点） */
 	bundleVerify: boolean;
+	/** 把 .lsave 拖到 Obsidian 窗口上时，自动打开"应用同步包"对话框 */
+	dropBundleToApply: boolean;
 	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
 	rememberFingerprints: boolean;
 	/** 每次同步成功后，把这一次的改动导成一个包（几乎不额外花时间） */
@@ -144,6 +146,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	bundleDir: '',
 	bundleMode: 'full',
 	bundleVerify: true,
+	dropBundleToApply: true,
 	rememberFingerprints: true,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
@@ -233,6 +236,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
 		bundleMode: coerceBundleMode(raw.bundleMode),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
+		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),

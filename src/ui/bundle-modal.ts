@@ -6,10 +6,11 @@ import type { ApplyMode, ApplyPlan } from '../bundle/apply';
 import { exportBundle } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
-import type { DropdownComponent } from 'obsidian';
+import type { DropdownComponent, TextComponent } from 'obsidian';
 import { listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
 import { summarizeOutcome } from './sync-modal';
+import { pickBundleFromDrop } from './drop';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
@@ -160,11 +161,15 @@ export class ApplyBundleModal extends Modal {
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
 	private modeDropdown: DropdownComponent | null = null;
+	private pathInput: TextComponent | null = null;
+	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
+	private dropHost: HTMLElement | null = null;
+	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
 	private listEl!: HTMLElement;
 	private reportEl!: HTMLElement;
 	private applyButton: { setDisabled(disabled: boolean): unknown } | null = null;
 
-	constructor(app: App, plugin: LocallySavePlugin) {
+	constructor(app: App, plugin: LocallySavePlugin, initialPath?: string) {
 		super(app);
 		this.plugin = plugin;
 		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
@@ -172,7 +177,8 @@ export class ApplyBundleModal extends Modal {
 		this.keepBackup = plugin.settings.deletedToTrash;
 		// 配了副本就默认顺手同步 —— 不然备份会在应用完包之后悄悄落后一截
 		this.alsoSyncCopy = plugin.settings.targetDir.trim() !== '';
-		this.current = null;
+		// 拖进来的包（或命令带过来的路径）：打开就直接检查它
+		this.current = initialPath?.trim() ? initialPath.trim() : null;
 	}
 
 	onOpen(): void {
@@ -184,6 +190,12 @@ export class ApplyBundleModal extends Modal {
 			text: '选一个 .lsave 文件，这里会先算一遍"应用之后会变成什么样"，确认无误再动手。',
 			cls: 'locally-save-hint',
 		});
+
+		// 拖放区：从资源管理器直接把包拖进来，等同于在下面粘路径
+		const dropZone = contentEl.createDiv({ cls: 'locally-save-drop' });
+		dropZone.createSpan({ text: '把 .lsave 同步包拖到这里' });
+		dropZone.createSpan({ text: '（等同于在下面粘路径）', cls: 'locally-save-drop-sub' });
+		this.wireDropTarget(contentEl, dropZone);
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
@@ -200,12 +212,15 @@ export class ApplyBundleModal extends Modal {
 		new Setting(contentEl)
 			.setName('包文件路径')
 			.setDesc('也可以直接粘一个完整路径')
-			.addText(text => text
-				.setPlaceholder('D:\\传输\\我的笔记-changes-20261004-153000.lsave')
-				.onChange(value => {
-					const path = value.trim();
-					if (path) void this.select(path);
-				}));
+			.addText(text => {
+				this.pathInput = text;
+				text
+					.setPlaceholder('D:\\传输\\我的笔记-changes-20261004-153000.lsave')
+					.onChange(value => {
+						const path = value.trim();
+						if (path) void this.select(path);
+					});
+			});
 
 		// ---------------------------------------------------------- 应用方式
 		// 放在这儿而不是设置里：这是"这一次要怎么应用"的决定，每次搬包时的心态都不一样
@@ -268,6 +283,12 @@ export class ApplyBundleModal extends Modal {
 				.onClick(() => this.close()));
 
 		void this.refresh();
+
+		// 拖进来的 / 命令带过来的包：先填进输入框（让人看清是哪个文件），再直接检查
+		if (this.current) {
+			this.pathInput?.setValue(this.current);
+			void this.select(this.current);
+		}
 	}
 
 	private async refresh(): Promise<void> {
@@ -317,6 +338,53 @@ export class ApplyBundleModal extends Modal {
 		this.reportEl.empty();
 		this.reportEl.setText('正在检查这个包……');
 		await this.replan();
+	}
+
+	/**
+	 * 把整个对话框变成放置目标（拖到哪儿都行），拖着东西悬在上面时高亮那个提示框。
+	 *
+	 * Modal 并不继承 Component（见 obsidian.d.ts），所以没有 registerDomEvent，
+	 * 用原生监听、并在关闭时自己摘掉。
+	 *
+	 * `dragover` 必须 preventDefault，否则浏览器根本不会派发 drop —— 拖放最常见的坑。
+	 */
+	private wireDropTarget(container: HTMLElement, dropZone: HTMLElement): void {
+		this.dropHost = container;
+		const bind = (name: string, handler: (event: Event) => void) => {
+			container.addEventListener(name, handler);
+			this.dropBindings.push({ name, handler });
+		};
+
+		bind('dragover', (event: Event) => {
+			event.preventDefault();
+			dropZone.addClass('is-over');
+		});
+		bind('dragleave', () => dropZone.removeClass('is-over'));
+		bind('drop', (event: Event) => {
+			event.preventDefault();
+			dropZone.removeClass('is-over');
+			this.handleDrop(event as DragEvent);
+		});
+	}
+
+	private unwireDropTarget(): void {
+		if (!this.dropHost) return;
+		for (const { name, handler } of this.dropBindings) this.dropHost.removeEventListener(name, handler);
+		this.dropBindings = [];
+		this.dropHost = null;
+	}
+
+	/** 拖进来的文件：能认出路径就当作"用户填了这个路径" */
+	private handleDrop(event: DragEvent): void {
+		const files = event.dataTransfer?.files;
+		const { path, error } = pickBundleFromDrop(files as unknown as ArrayLike<{ name: string; path?: string }>);
+		if (!path) {
+			if (error) new Notice(error, 9000);
+			return;
+		}
+		// 同步更新输入框：让用户看清"拖进来的到底是哪个文件"
+		this.pathInput?.setValue(path);
+		void this.select(path);
 	}
 
 	/**
@@ -503,6 +571,7 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	onClose(): void {
+		this.unwireDropTarget();
 		this.plugin.reportProgress(null);
 		this.contentEl.empty();
 	}

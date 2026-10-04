@@ -6,6 +6,7 @@ import { runSync as runSyncEngine } from './sync/runner';
 import type { SyncHost, SyncOutcome, SyncProgress, SyncRunOptions } from './sync/runner';
 import { STATE_FILE_NAME } from './sync/state';
 import { applyBundleAction, exportBundleAction, syncNow } from './ui/actions';
+import { registerBundleDropTarget } from './ui/drop-watch';
 import { SyncStatusBar } from './ui/progress';
 import { pickIcon } from './ui/ribbon';
 import { createLogger } from './utils/log';
@@ -67,6 +68,8 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		this.refreshEntryPoints();
 
 		registerCommands(this);
+		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
+		registerBundleDropTarget(this);
 		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 
 		// 一个固定节拍管两种自动同步（定时 / 保存后），
