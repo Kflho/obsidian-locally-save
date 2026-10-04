@@ -3,12 +3,12 @@ import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
 import { toNative } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
-import { DEFAULT_MTIME_TOLERANCE_MS, planSync, rebuildState } from './diff';
-import { ensureDir, moveToTrash, removeFile, scanTree, statFile } from './disk';
+import { DEFAULT_MTIME_TOLERANCE_MS, planSync, rebuildDirs, rebuildState } from './diff';
+import { ensureDir, moveToTrash, pruneEmptyDirsDetailed, removeFile, scanTree, statFile } from './disk';
 import { parsePatterns } from './exclude';
 import { executePlan } from './execute';
 import type { ExecuteResult } from './execute';
-import { loadState, saveState, setTargetBaseline, targetBaseline } from './state';
+import { loadState, saveState, setTargetBaseline, targetBaseline, targetDirs } from './state';
 import { recordFromOutcome } from './summary';
 import type { Inventory, SyncDirection, SyncPlan } from './types';
 
@@ -126,6 +126,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		propagateDeletions: settings.propagateDeletions,
 		conflictStrategy: settings.conflictStrategy,
 		mtimeToleranceMs: DEFAULT_MTIME_TOLERANCE_MS,
+		baseDirs: targetDirs(state, targetDir),
 	});
 
 	host.log.debug(
@@ -151,9 +152,9 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 	let localAfter = local;
 	let remoteAfter = remote;
 
-	const folderCount = planned.folders?.length ?? 0;
+	const folderCount = (planned.folders?.length ?? 0) + (planned.removedFolders?.length ?? 0);
 
-	// 只差文件夹也得跑：空文件夹没有文件动作可搭，漏掉这一步就永远传不过去
+	// 只差文件夹也得跑：空文件夹没有文件动作可搭，漏掉这一步就永远传不过去（或删不掉）
 	if (planned.actions.length > 0 || folderCount > 0) {
 		result = await executePlan(planned, {
 			vaultRoot,
@@ -175,6 +176,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		targetDir,
 		rebuildState(localAfter, remoteAfter, DEFAULT_MTIME_TOLERANCE_MS),
 		Date.now(),
+		rebuildDirs(localAfter, remoteAfter),
 	);
 	const outcome: SyncOutcome = {
 		targetDir,
@@ -222,6 +224,7 @@ export async function removeFromTarget(
 	const stateFile = host.stateFile();
 	const state = await loadState(stateFile);
 	const baseline = { ...targetBaseline(state, targetDir) };
+	const dirs = targetDirs(state, targetDir);
 	const stamp = formatStamp(Date.now());
 	let removed = 0;
 
@@ -235,8 +238,16 @@ export async function removeFromTarget(
 		delete baseline[rel];
 	}
 
-	setTargetBaseline(state, targetDir, baseline, Date.now());
+	// 文件清掉之后，副本里被清空的目录也收拾掉，并**同步划掉目录基准** ——
+	// 不划的话，下一轮会说"基准里有它、副本里没有 → 副本把它删了"，于是把仓库里
+	// 那个（刚被包删空的）目录也一起删掉：用户没要求过这种连带删除。
+	const prunedDirs = await pruneEmptyDirsDetailed(targetDir, paths);
+	for (const dir of prunedDirs) dirs.delete(dir);
+
+	setTargetBaseline(state, targetDir, baseline, Date.now(), [...dirs]);
 	await saveState(stateFile, state);
-	host.log.debug(`已把 ${paths.length} 个路径从副本里清掉（实际删除 ${removed} 个）`);
+	host.log.debug(
+		`已把 ${paths.length} 个路径从副本里清掉（实际删除 ${removed} 个文件、顺手清掉 ${prunedDirs.length} 个空目录）`,
+	);
 	return removed;
 }

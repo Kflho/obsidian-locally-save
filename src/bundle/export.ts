@@ -228,6 +228,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		fullFiles: mode === 'full' ? Object.fromEntries(inventory.files) : anchor,
 		fullGeneration: mode === 'full' ? targetGeneration : (state.bundle?.fullGeneration ?? null),
 		history: mode === 'full' ? {} : nextHistory,
+		// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
+		dirs: [...inventory.dirs],
 	};
 	state.lastExportedBundleId = bundleId;
 	state.generation = targetGeneration;

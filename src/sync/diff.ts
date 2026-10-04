@@ -268,12 +268,22 @@ export function planSync(
 		}
 	}
 
-	// 目录也要跟着走：只比文件的话，空文件夹永远传不过去（它里面没有文件可复制）。
+	// 目录：**建**的是"对面没有、而且基准里也没有"，**删**的是"对面没有、但基准里有"
+	// （＝对面把它删掉了）。两条都要有 —— 只建的话，空文件夹删了会被对面重新建回来，
+	// 用户会看到"我明明删了它，它又回来了"。
 	//
-	// 目录**只建不删**，这是故意的：空目录留着不碍事，删错了却是整片内容消失；
-	// 而且目录没有"大小 + 修改时间"能做基准检查，三方比对那套保护在目录上根本不成立。
-	// 真正被删空 / 挪空的目录，由执行阶段顺着被删文件的父路径顺手收拾（pruneEmptyDirs）。
+	// 删除的安全性靠三件事叠起来，缺一不可：
+	// 1. **基准检查**（`baseDirs`）：只有两边都有过的目录才谈得上"被某一侧删了"，
+	//    新出现的目录一律只建不删（与文件的规矩完全一致）；
+	// 2. **方向**：改本地要"允许下载"、改副本要"允许上传"，和文件删除同一条线；
+	// 3. **只走 rmdir**：非空目录必然失败（见 disk.ts 的 removeEmptyDir），
+	//    所以就算清单里漏看了文件（比如被排除规则挡住），最坏也只是"没删掉"。
 	const folders: { path: string; side: 'local' | 'remote' }[] = [];
+	const removedFolders: { path: string; side: 'local' | 'remote' }[] = [];
+	const baseDirs = options.baseDirs ?? new Set<string>();
+	// 里面有文件的目录不归目录规则管：那里的东西由文件规则自己决定
+	const filledLocal = dirsContainingFiles(local);
+	const filledRemote = dirsContainingFiles(remote);
 	// 已经在往某侧写文件的目录会被顺带建出来（copyFilePreservingMtime 里有 ensureDir），
 	// 不必再单独立一条 —— 否则界面上会把同一个目录报两遍
 	const implied: Record<'local' | 'remote', Set<string>> = { local: new Set(), remote: new Set() };
@@ -288,18 +298,50 @@ export function planSync(
 		}
 	}
 	for (const dir of local.dirs ?? []) {
-		if (allowsUpload && !(remote.dirs ?? new Set<string>()).has(dir) && !implied.remote.has(dir)) {
-			folders.push({ path: dir, side: 'remote' });
+		if ((remote.dirs ?? new Set<string>()).has(dir)) continue;
+		if (baseDirs.has(dir)) {
+			// 副本那边没有、基准里有 → 副本把它删了 → 本地跟着删
+			if (options.propagateDeletions && allowsDownload && !filledLocal.has(dir)) {
+				removedFolders.push({ path: dir, side: 'local' });
+			}
+			continue;
 		}
+		if (allowsUpload && !implied.remote.has(dir)) folders.push({ path: dir, side: 'remote' });
 	}
 	for (const dir of remote.dirs ?? []) {
-		if (allowsDownload && !(local.dirs ?? new Set<string>()).has(dir) && !implied.local.has(dir)) {
-			folders.push({ path: dir, side: 'local' });
+		if ((local.dirs ?? new Set<string>()).has(dir)) continue;
+		if (baseDirs.has(dir)) {
+			// 本地这边没有、基准里有 → 本地把它删了 → 副本跟着删
+			if (options.propagateDeletions && allowsUpload && !filledRemote.has(dir)) {
+				removedFolders.push({ path: dir, side: 'remote' });
+			}
+			continue;
+		}
+		if (allowsDownload && !implied.local.has(dir)) folders.push({ path: dir, side: 'local' });
+	}
+	folders.sort(byPath);
+	removedFolders.sort(byPath);
+
+	return { actions, unchanged, summary: summarize(actions), moves: moves.length, folders, removedFolders };
+}
+
+/** 路径排序用**码位**比较而不是 localeCompare：结果与系统语言无关，测试与 CI 才稳 */
+function byPath(a: { path: string }, b: { path: string }): number {
+	return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
+
+/** 每个目录里有没有文件（只看清单；被排除规则挡住的看不到，所以删除只走 rmdir） */
+export function dirsContainingFiles(inventory: Inventory): Set<string> {
+	const filled = new Set<string>();
+	for (const file of inventory.files.keys()) {
+		let dir = dirnameRel(file);
+		while (dir) {
+			if (filled.has(dir)) break;
+			filled.add(dir);
+			dir = dirnameRel(dir);
 		}
 	}
-	folders.sort((a, b) => a.path.localeCompare(b.path));
-
-	return { actions, unchanged, summary: summarize(actions), moves: moves.length, folders };
+	return filled;
 }
 
 /** 这个动作往哪一侧写数据（建目录要跟着它走）；删除与不写数据的不算 */
@@ -345,4 +387,19 @@ export function rebuildState(
 		if (there && sameRecord(here, there, toleranceMs)) merged[path] = { ...here };
 	}
 	return merged;
+}
+
+/**
+ * 重建目录基准：**只记两边都有的目录**（与文件同一条规矩）。
+ *
+ * 记"两边都有"而不是"本地有"，是因为基准的用途是回答"它后来是不是被某一侧删了"：
+ * 只有两边都见过的目录，少了一侧才说明有人删了它。本地独有的目录记进去，
+ * 下次就会被当成"对方删过它"而删掉本地那个 —— 那正是应用同步包时踩过的那个 bug。
+ */
+export function rebuildDirs(local: Inventory, remote: Inventory): string[] {
+	const both: string[] = [];
+	for (const dir of local.dirs ?? []) {
+		if ((remote.dirs ?? new Set<string>()).has(dir)) both.push(dir);
+	}
+	return both.sort();
 }

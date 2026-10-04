@@ -244,7 +244,7 @@ check(
 );
 // 目录**只建不删**：不会因为"对面没有这个目录"就产生删除动作
 check(
-	'目录不会带来任何删除动作（只建不删）',
+	'目录删除不会走文件动作（自己单独一条清单）',
 	kinds(dirPlan({}, [], { 'a.md': [10, T] }, ['空目录'])),
 	['download:a.md'],
 );
@@ -252,6 +252,73 @@ check(
 	'同一轮里文件照旧、目录补建',
 	dirPlan({}, [], { 'a.md': [10, T] }, ['空目录']).folders,
 	[{ path: '空目录', side: 'local' }],
+);
+
+// 目录删除：**只有基准里记过（＝两边都有过）的目录才敢删** —— 与文件同一条规矩。
+// 不然"新出现的空目录"会被当成"对面把它删了"，当场就被删掉。
+const dirsInBase = (dirs: string[]) => ({ baseDirs: new Set(dirs) });
+check(
+	'基准里有、对面没了 → 本地跟着删（本地删了它）',
+	dirPlan({}, ['草稿'], {}, [], dirsInBase(['草稿'])).removedFolders,
+	[{ path: '草稿', side: 'local' }],
+);
+check(
+	'基准里有、本地没了 → 副本跟着删',
+	dirPlan({}, [], {}, ['草稿'], dirsInBase(['草稿'])).removedFolders,
+	[{ path: '草稿', side: 'remote' }],
+);
+check(
+	'基准里没记过 → 一个新出现的空目录，只建不删',
+	dirPlan({}, ['草稿'], {}, []).removedFolders,
+	[],
+);
+check(
+	'而且它会建到对面去',
+	dirPlan({}, ['草稿'], {}, []).folders,
+	[{ path: '草稿', side: 'remote' }],
+);
+check(
+	'两边都有的目录不会被删',
+	dirPlan({}, ['草稿'], {}, ['草稿'], dirsInBase(['草稿'])).removedFolders,
+	[],
+);
+check(
+	'关掉删除传播 → 目录也不删（否则开关只管文件、不管目录，很怪）',
+	dirPlan({}, ['草稿'], {}, [], { ...dirsInBase(['草稿']), propagateDeletions: false }).removedFolders,
+	[],
+);
+check(
+	'仅上传方向：不因为副本没了就删仓库里的目录',
+	dirPlan({}, ['草稿'], {}, [], { ...dirsInBase(['草稿']), direction: 'upload' }).removedFolders,
+	[],
+);
+check(
+	'仅下载方向：不删副本里的目录',
+	dirPlan({}, [], {}, ['草稿'], { ...dirsInBase(['草稿']), direction: 'download' }).removedFolders,
+	[],
+);
+check(
+	'目录里还有文件 → 不按目录规则删，交给文件规则',
+	dirPlan({ '草稿/a.md': [10, T] }, ['草稿'], {}, [], dirsInBase(['草稿'])).removedFolders,
+	[],
+);
+check(
+	'那种情况下照旧按文件规则上传',
+	kinds(dirPlan({ '草稿/a.md': [10, T] }, ['草稿'], {}, [], dirsInBase(['草稿']))),
+	['upload:草稿/a.md'],
+);
+check(
+	'删除清单排好序（多层目录）',
+	dirPlan({}, ['b/x', 'a/x'], {}, [], dirsInBase(['a/x', 'b/x'])).removedFolders,
+	[
+		{ path: 'a/x', side: 'local' },
+		{ path: 'b/x', side: 'local' },
+	],
+);
+check(
+	'建与删不会同时点同一个目录',
+	dirPlan({}, ['草稿'], {}, [], dirsInBase(['草稿'])).folders,
+	[],
 );
 
 // ---------------------------------------------------------------- 状态重建

@@ -575,6 +575,7 @@ export class ApplyBundleModal extends Modal {
 		if (report.extraDeletes > 0) line(`本地有、包里没有、且对方删过的：${report.extraDeletes} 个`);
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个（直接改名，不重传内容）`);
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个空文件夹`);
+		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹（包里没有它们）`);
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
@@ -731,9 +732,10 @@ function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** 这次应用会不会"动到本地已经有的东西"：删文件、覆盖本地改动、产生冲突副本 */
+/** 这次应用会不会"动到本地已经有的东西"：删文件、删空文件夹、覆盖本地改动、产生冲突副本 */
 function isDestructive(plan: ApplyPlan): boolean {
 	return plan.actions.some(action => action.kind === 'delete')
+		|| plan.foldersToRemove.length > 0
 		|| plan.report.conflicts > 0
 		|| plan.report.forcedOverwrites > 0;
 }
@@ -776,6 +778,11 @@ class ConfirmApplyModal extends Modal {
 		if (paths.length > 0) {
 			facts.createEl('li', { text: `会删除 ${paths.length} 个本地文件` });
 		}
+		if (this.plan.foldersToRemove.length > 0) {
+			facts.createEl('li', {
+				text: `会删掉 ${this.plan.foldersToRemove.length} 个本地空文件夹（包里没有它们）`,
+			});
+		}
 		facts.createEl('li', {
 			text: report.keepBackup
 				? '被覆盖 / 删掉 / 冲突输掉的本地版本都会进回收目录（仓库/.trash/locally-save），还能捞回来'
@@ -791,6 +798,18 @@ class ConfirmApplyModal extends Modal {
 			if (paths.length > MAX_ROWS) {
 				list.createDiv({ text: `…… 其余 ${paths.length - MAX_ROWS} 个已省略`, cls: 'locally-save-more' });
 			}
+		}
+
+		if (this.plan.foldersToRemove.length > 0) {
+			contentEl.createEl('h3', { text: '会被删掉的空文件夹' });
+			const list = contentEl.createDiv({ cls: 'locally-save-list' });
+			for (const item of this.plan.foldersToRemove.slice(0, MAX_ROWS)) {
+				list.createDiv({ text: `${item}/`, cls: 'locally-save-row is-delete' });
+			}
+			contentEl.createEl('p', {
+				text: '只删空的：里面但凡还有东西就删不动（用的是 rmdir，不是递归删除）。',
+				cls: 'locally-save-hint',
+			});
 		}
 
 		new Setting(contentEl)

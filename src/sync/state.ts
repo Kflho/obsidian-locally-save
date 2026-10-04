@@ -26,6 +26,13 @@ export interface TargetState {
 	lastSync: number;
 	/** 上次同步后两边一致的文件 */
 	files: Record<string, FileRecord>;
+	/**
+	 * 上次同步后**两边都有的目录**。
+	 *
+	 * 与文件同一个用途：判断"目录是被删了还是新出现的"。老状态文件里没有这一项，
+	 * 于是升级后的第一轮不删任何目录（等于旧行为），第二轮起删除才正常传播。
+	 */
+	dirs?: string[];
 }
 
 export interface BundleBaseline {
@@ -58,6 +65,14 @@ export interface BundleBaseline {
 	 * 于是跳过一两个包也不会满屏冲突副本。导完整包时整个清空。
 	 */
 	history: Record<string, FileRecord[]>;
+	/**
+	 * 上次导出 / 应用时两边都有的目录（含空文件夹）。
+	 *
+	 * 应用同步包时靠它区分"这个空目录是对方删掉了"（基准里有、包里没有 → 跟着删）
+	 * 与"这个空目录是我独有的"（基准里没有 → 一律保留）。
+	 * 老状态文件里没有这一项：那一轮一个目录都不删，之后补上。
+	 */
+	dirs?: string[];
 }
 
 /** 内容指纹缓存的一条 */
@@ -136,6 +151,7 @@ export async function loadState(absPath: string): Promise<PluginState> {
 				fullFiles: raw.bundle.fullFiles ?? null,
 				fullGeneration: raw.bundle.fullGeneration ?? null,
 				history: raw.bundle.history ?? {},
+				dirs: raw.bundle.dirs ?? [],
 			}
 			: null,
 		lastSync: raw.lastSync ?? null,
@@ -152,13 +168,19 @@ export function targetBaseline(state: PluginState, targetDir: string): Record<st
 	return state.targets[targetDir]?.files ?? {};
 }
 
+/** 取某个同步目标的目录基准（老状态文件没有这一项 → 空集＝这轮谁都不删） */
+export function targetDirs(state: PluginState, targetDir: string): Set<string> {
+	return new Set(state.targets[targetDir]?.dirs ?? []);
+}
+
 export function setTargetBaseline(
 	state: PluginState,
 	targetDir: string,
 	files: Record<string, FileRecord>,
 	time: number,
+	dirs?: string[],
 ): PluginState {
-	state.targets[targetDir] = { lastSync: time, files };
+	state.targets[targetDir] = { lastSync: time, files, dirs: dirs ?? [] };
 	return state;
 }
 

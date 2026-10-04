@@ -29,7 +29,8 @@ export class SyncPreviewModal extends Modal {
 		const { contentEl } = this;
 		const { plan } = this.outcome;
 		const folders = plan.folders ?? [];
-		const pending = plan.actions.length + folders.length;
+		const removedFolders = plan.removedFolders ?? [];
+		const pending = plan.actions.length + folders.length + removedFolders.length;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '同步预览' });
@@ -58,6 +59,10 @@ export class SyncPreviewModal extends Modal {
 			const dirParts: string[] = [];
 			if (remoteDirs > 0) dirParts.push(`副本新建文件夹 ${remoteDirs}`);
 			if (localDirs > 0) dirParts.push(`本地新建文件夹 ${localDirs}`);
+			const dropRemote = removedFolders.filter(folder => folder.side === 'remote').length;
+			const dropLocal = removedFolders.length - dropRemote;
+			if (dropRemote > 0) dirParts.push(`副本删除空文件夹 ${dropRemote}`);
+			if (dropLocal > 0) dirParts.push(`本地删除空文件夹 ${dropLocal}`);
 			if (dirParts.length > 0) {
 				contentEl.createEl('p', { text: dirParts.join(' · '), cls: 'locally-save-summary' });
 			}
@@ -81,6 +86,15 @@ export class SyncPreviewModal extends Modal {
 				row.createSpan({ text: `${folder.path}/`, cls: 'locally-save-file' });
 				row.createSpan({
 					text: folder.side === 'remote' ? '副本里还没有' : '仓库里还没有',
+					cls: 'locally-save-reason',
+				});
+			}
+			for (const folder of removedFolders.slice(0, MAX_ROWS)) {
+				const row = list.createDiv({ cls: 'locally-save-row is-delete' });
+				row.createSpan({ text: '删文件夹', cls: 'locally-save-action' });
+				row.createSpan({ text: `${folder.path}/`, cls: 'locally-save-file' });
+				row.createSpan({
+					text: folder.side === 'remote' ? '仓库里已经删了它（空目录）' : '副本里已经删了它（空目录）',
 					cls: 'locally-save-reason',
 				});
 			}
