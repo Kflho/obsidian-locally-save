@@ -19,8 +19,8 @@ async function runCommands(commands: AssociationCommand[]): Promise<void> {
 }
 
 /** 装上关联：双击 .lsave → 调起 URI → 插件打开应用对话框 */
-export async function applyFileAssociation(): Promise<void> {
-	await runCommands(installCommands(process.execPath));
+export async function applyFileAssociation(vaultName: string): Promise<void> {
+	await runCommands(installCommands(process.execPath, vaultName));
 }
 
 /** 拆掉关联 */

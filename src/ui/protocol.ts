@@ -22,6 +22,18 @@ import { ApplyBundleModal } from './bundle-modal';
 export const PROTOCOL_ACTION = 'locally-save';
 
 /**
+ * 参数名：**千万别叫 `path`**。
+ *
+ * Obsidian 对 URI 里的 `path` 有特殊处理（见官方文档 Obsidian URI）：
+ * "path 会覆盖 vault 与 file，并让应用去**搜索哪个 vault 包含这个路径**"。
+ * 我们的包在仓库外面、不属于任何 vault，于是 Obsidian 找不到 vault，
+ * 直接弹 **"Unable to find a vault for the URL"**，压根到不了插件（这个坑踩过）。
+ *
+ * 所以用自定义参数名 `bundle`，并且额外带一个 `vault` 说明交给哪个 vault。
+ */
+const PARAM_BUNDLE = 'bundle';
+
+/**
  * 把协议里带过来的路径收拾干净。
  *
  * 两种情况都要认：
@@ -38,15 +50,24 @@ export function normalizeProtocolPath(raw: string): string {
 	}
 }
 
-/** 生成"用 Obsidian 打开某个包"的链接（复制给别人 / 自己做快捷方式用） */
-export function bundleLink(path: string): string {
-	return `obsidian://${PROTOCOL_ACTION}?path=${encodeURIComponent(path)}`;
+/**
+ * 生成"用 Obsidian 打开某个包"的链接。
+ *
+ * `vaultName` 是当前 vault 的名字：Obsidian 靠它决定把 URI 交给哪个 vault
+ * （插件属于某个 vault；多 vault 或应用没在运行时，少了它就会报 vault 找不到）。
+ */
+export function bundleLink(path: string, vaultName?: string): string {
+	const parts: string[] = [];
+	if (vaultName) parts.push(`vault=${encodeURIComponent(vaultName)}`);
+	parts.push(`${PARAM_BUNDLE}=${encodeURIComponent(path)}`);
+	return `obsidian://${PROTOCOL_ACTION}?${parts.join('&')}`;
 }
 
-/** 注册协议处理器：`obsidian://locally-save?path=…` */
+/** 注册协议处理器：`obsidian://locally-save?vault=…&bundle=…` */
 export function registerProtocolHandler(plugin: LocallySavePlugin): void {
 	plugin.registerObsidianProtocolHandler(PROTOCOL_ACTION, params => {
-		const raw = params.path ?? params.file ?? '';
+		// bundle 是现在用的；path / file 是兼容早期版本发出去的链接
+		const raw = params.bundle ?? params.path ?? params.file ?? '';
 		const path = raw ? normalizeProtocolPath(raw) : '';
 
 		if (!plugin.settings.enabled) {

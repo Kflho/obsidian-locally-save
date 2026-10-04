@@ -122,14 +122,25 @@
 
 为什么不能简单"用 Obsidian 打开"：把 `.lsave` 关联到 `Obsidian.exe "%1"` 是**通不了**的 ——
 Obsidian 收到一个陌生路径只会当成未知文件，压根到不了插件。能到插件的通路只有 **URI 协议**，
-所以关联要指向 `obsidian://locally-save?path=%1`（`%1` 由系统换成被双击的文件路径）。
+所以关联要指向 `obsidian://locally-save?vault=<仓库名>&bundle=%1`（`%1` 由系统换成被双击的路径）。
+
+两个坑（都踩过，写在代码注释里了）：
+
+- **`vault=` 不能省**：插件属于某个 vault，Obsidian 得知道把 URI 交给哪个。
+  少了它会直接弹 **`Vault not found. Unable to find a vault for the URL`**，压根到不了插件。
+  链接里的仓库名就是**当前打开的仓库**，换 vault 或改过文件夹名后重新点一次「设置关联」即可
+- **参数名不能叫 `path`**：Obsidian 对 URI 里的 `path` 有特殊处理（[官方文档](https://obsidian.md/help/uri)：
+  "path 会覆盖 vault 与 file，并让应用去搜索哪个 vault 包含这个路径"）。
+  我们的包在仓库外、不属于任何 vault —— 于是它找不到 vault，报同一个错。所以用的是自定义参数名 `bundle`
 
 - 只写**当前用户**注册表（`HKCU\Software\Classes`），**不需要管理员权限**；
   点"设置关联"前会把要跑的命令**逐条列出来**
 - 会覆盖你现有的 `.lsave` 关联；不想用了在同一处点 **解除关联**
 - 链接形式也可以手工用（路径要 URL 编码）：
-  `obsidian://locally-save?path=D%3A%5C%E4%BC%A0%E8%BE%93%5Ca.lsave`
-- 不带路径也行：`obsidian://locally-save` 就是"打开应用对话框，让我自己选"
+  `obsidian://locally-save?vault=我的仓库&bundle=D%3A%5C%E4%BC%A0%E8%BE%93%5Ca.lsave`
+- 不带路径也行：`obsidian://locally-save?vault=我的仓库` 就是"打开应用对话框，让我自己选"
+- **这台机器上双击没用？** 关联是**每台机器各自设置**的（注册表在本机），
+  换机器后要在那台机器上重新点一次「设置关联」；在此之前用拖放或对话框选文件一样能用
 
 ### `.lsave` 不是 Obsidian 能打开的格式
 
