@@ -74,8 +74,9 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		registerCommands(this);
 		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
 		registerBundleDropTarget(this);
-		// 用 Obsidian 直接打开包：obsidian://locally-save?path=…
-		// （配合设置里那个"关联 .lsave"，双击文件就能应用）
+		// 用 Obsidian 直接打开包：obsidian://locally-save?vault=…&bundle=…
+		// （配合设置里那个"关联 .lsave"，双击文件就能应用。参数名**不能叫 path**，
+		//   那会让 Obsidian 去找"哪个 vault 包含这个路径"、直接报 vault 找不到）
 		registerProtocolHandler(this);
 		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 

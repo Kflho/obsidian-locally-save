@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { toNative } from '../utils/paths';
+import { dirnameRel, toNative } from '../utils/paths';
 import { isExcluded } from './exclude';
 import type { FileRecord, Inventory } from './types';
 
@@ -29,9 +29,10 @@ export interface ScanOptions {
  */
 export const CONFLICT_TRASH_DIR = '冲突';
 
-/** 递归扫描一个目录，返回「相对路径 → 大小 + 修改时间」 */
+/** 递归扫描一个目录，返回「文件 → 大小 + 修改时间」与「见过的目录」 */
 export async function scanTree(root: string, options: ScanOptions): Promise<Inventory> {
 	const files = new Map<string, FileRecord>();
+	const dirs = new Set<string>();
 	const skip = new Set(options.skipTopLevelDirs ?? []);
 
 	async function walk(relDir: string): Promise<void> {
@@ -51,6 +52,7 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 			if (entry.isDirectory()) {
 				if (!relDir && skip.has(entry.name)) continue;
 				if (isExcluded(rel, options.exclude)) continue;
+				dirs.add(rel);
 				await walk(rel);
 				continue;
 			}
@@ -63,7 +65,38 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 	}
 
 	await walk('');
-	return { files };
+	return { files, dirs };
+}
+
+/**
+ * 把一批路径**删空之后剩下的空目录**收拾掉。
+ *
+ * 传进来的是刚被删掉 / 挪走的路径：顺着它们的父目录往上走，能删就删
+ * （`rmdir` 对非空目录会失败，所以只会删真空的，绝不会碰有内容的目录），
+ * 到根为止。返回删掉几个目录。
+ */
+export async function pruneEmptyDirs(root: string, removedPaths: string[]): Promise<number> {
+	const candidates = new Set<string>();
+	for (const rel of removedPaths) {
+		let dir = dirnameRel(rel);
+		while (dir) {
+			candidates.add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+
+	// 深的先删：父子都在名单里时，先删子目录，父目录才可能变空
+	const ordered = [...candidates].sort((a, b) => b.split('/').length - a.split('/').length);
+	let removed = 0;
+	for (const dir of ordered) {
+		try {
+			await fs.promises.rmdir(toNative(root, dir));
+			removed++;
+		} catch {
+			// 非空 / 不存在 / 没权限：都当成"不用删"
+		}
+	}
+	return removed;
 }
 
 /** 取一个文件的大小与修改时间；不存在 / 读不到返回 null */

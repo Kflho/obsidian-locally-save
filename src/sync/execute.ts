@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { toNative } from '../utils/paths';
-import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, removeFile } from './disk';
+import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, pruneEmptyDirs, removeFile, statFile } from './disk';
 import type { SyncAction, SyncPlan } from './types';
 
 /**
@@ -30,6 +30,10 @@ export interface ExecuteResult {
 	deletedRemote: number;
 	conflicts: number;
 	moved: number;
+	/** 新建的目录（空文件夹也要跟着走） */
+	foldersCreated: number;
+	/** 删空之后顺手收拾掉的空目录 */
+	foldersRemoved: number;
 	bytesCopied: number;
 	failed: { path: string; error: string }[];
 }
@@ -42,6 +46,8 @@ export function emptyResult(): ExecuteResult {
 		deletedRemote: 0,
 		conflicts: 0,
 		moved: 0,
+		foldersCreated: 0,
+		foldersRemoved: 0,
 		bytesCopied: 0,
 		failed: [],
 	};
@@ -65,8 +71,40 @@ export async function executePlan(plan: SyncPlan, options: ExecuteOptions): Prom
 		done++;
 	}
 
+	// 目录：先把这次要新建的建出来（空文件夹就靠这一步传过去）
+	for (const folder of plan.folders ?? []) {
+		const root = folder.side === 'remote' ? options.targetRoot : options.vaultRoot;
+		try {
+			const abs = toNative(root, folder.path);
+			// 要建文件夹的位置杵着一个同名文件：不删也不挪，如实报出来让人自己决定
+			if (await statFile(abs)) {
+				result.failed.push({ path: folder.path, error: '要建文件夹的位置是一个同名文件，没有动它' });
+				continue;
+			}
+			await ensureDir(abs);
+			result.foldersCreated++;
+		} catch (error) {
+			result.failed.push({ path: folder.path, error: describe(error) });
+		}
+	}
+
+	// 收尾：把"被删空 / 挪空"的目录收拾掉，别留一串空壳
+	const vacated = (kinds: string[]) => plan.actions.flatMap(action => {
+		if (!kinds.includes(action.kind)) return [];
+		if (action.kind === 'rename-local' || action.kind === 'rename-remote') {
+			return action.from ? [action.from] : [];
+		}
+		return [action.path];
+	});
+	result.foldersRemoved += await pruneEmptyDirs(options.vaultRoot, vacated(['delete-local', 'rename-local']));
+	result.foldersRemoved += await pruneEmptyDirs(options.targetRoot, vacated(['delete-remote', 'rename-remote']));
+
 	options.onProgress?.(done, total, '');
 	return result;
+}
+
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 async function runAction(action: SyncAction, options: ExecuteOptions, result: ExecuteResult): Promise<void> {

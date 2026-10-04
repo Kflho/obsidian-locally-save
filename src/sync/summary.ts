@@ -23,6 +23,8 @@ export interface LastSyncRecord {
 	copiedBytes: number;
 	failed: number;
 	durationMs: number;
+	/** 这一轮补建了几个文件夹（只有空文件夹才会单独冒出来，可缺省以兼容老状态文件） */
+	foldersCreated?: number;
 }
 
 /** 从一轮同步的结果里抽出要记的那部分 */
@@ -35,6 +37,7 @@ export function recordFromOutcome(outcome: SyncOutcome): LastSyncRecord {
 		copiedBytes: outcome.result?.bytesCopied ?? 0,
 		failed: outcome.result?.failed.length ?? 0,
 		durationMs: outcome.durationMs,
+		foldersCreated: outcome.result?.foldersCreated ?? 0,
 	};
 }
 
@@ -43,6 +46,8 @@ export function describeChanges(record: LastSyncRecord): string {
 	const parts = (Object.keys(CHANGE_LABELS) as ChangeKind[])
 		.filter(kind => record.changes[kind] > 0)
 		.map(kind => `${CHANGE_LABELS[kind]} ${record.changes[kind]}`);
+	// 空文件夹是独立的一类：不写出来的话，只建了文件夹的那一轮会显示成"无事可做"
+	if ((record.foldersCreated ?? 0) > 0) parts.push(`新建文件夹 ${record.foldersCreated}`);
 	if (parts.length === 0) return record.unchanged > 0 ? '无改动' : '无事可做';
 	return parts.join('、');
 }

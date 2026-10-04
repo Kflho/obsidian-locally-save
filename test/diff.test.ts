@@ -6,7 +6,7 @@
  * 所以每种组合都在这里钉死，改算法必须先过这一关。
  */
 import { planSync, rebuildState, DEFAULT_MTIME_TOLERANCE_MS } from "../src/sync/diff";
-import type { FileRecord, Inventory, SyncAction, SyncPlan } from "../src/sync/types";
+import type { DiffOptions, FileRecord, Inventory, SyncAction, SyncPlan } from "../src/sync/types";
 
 // -------------------------------------------------------------------- 断言
 let checks = 0;
@@ -27,10 +27,10 @@ function checkTrue(name: string, condition: boolean, detail: string): void {
 // -------------------------------------------------------------------- 工具
 const T = 1_700_000_000_000;
 
-function inventory(files: Record<string, [number, number]>): Inventory {
+function inventory(files: Record<string, [number, number]>, dirs: string[] = []): Inventory {
 	const map = new Map<string, FileRecord>();
 	for (const [path, [size, mtime]] of Object.entries(files)) map.set(path, { size, mtime });
-	return { files: map };
+	return { files: map, dirs: new Set(dirs) };
 }
 
 function plan(
@@ -174,6 +174,84 @@ check(
 	"两个候选同时存在：只认能对上的那个",
 	kinds(plan({ 'b.md': [10, T], 'c.md': [77, T] }, { 'a.md': [10, T] }, moveBase)),
 	['rename-remote:a.md->b.md', 'upload:c.md'],
+);
+
+// ---------------------------------------------------------------- 目录（空文件夹）
+const dirOptions = {
+	direction: 'both' as const,
+	propagateDeletions: true,
+	conflictStrategy: 'keep-both' as const,
+};
+
+function dirPlan(
+	localFiles: Record<string, [number, number]>,
+	localDirs: string[],
+	remoteFiles: Record<string, [number, number]>,
+	remoteDirs: string[],
+	overrides: Partial<DiffOptions> = {},
+): SyncPlan {
+	return planSync(inventory(localFiles, localDirs), inventory(remoteFiles, remoteDirs), {}, {
+		...dirOptions,
+		...overrides,
+	});
+}
+
+check(
+	'本地多一个空文件夹 → 到副本里建出来',
+	dirPlan({}, ['空目录'], {}, []).folders,
+	[{ path: '空目录', side: 'remote' }],
+);
+check(
+	'副本多一个空文件夹 → 往仓库里建',
+	dirPlan({}, [], {}, ['空目录']).folders,
+	[{ path: '空目录', side: 'local' }],
+);
+check('两边都有这个空文件夹 → 什么都不做', dirPlan({}, ['空目录'], {}, ['空目录']).folders, []);
+check(
+	'嵌套的空文件夹逐个列出，顺序稳定',
+	dirPlan({}, ['b/z', 'a', 'b'], {}, []).folders,
+	[
+		{ path: 'a', side: 'remote' },
+		{ path: 'b', side: 'remote' },
+		{ path: 'b/z', side: 'remote' },
+	],
+);
+check(
+	'「仅上传」方向：副本里的空文件夹不往仓库建',
+	dirPlan({}, [], {}, ['空目录'], { direction: 'upload' }).folders,
+	[],
+);
+check(
+	'「仅下载」方向：仓库里的空文件夹不往副本建',
+	dirPlan({}, ['空目录'], {}, [], { direction: 'download' }).folders,
+	[],
+);
+// 有文件要传的目录会被"顺带"建出来，不该再报一遍（否则界面上重复计数）
+check(
+	'目录里的文件本来就要传 → 不再单独立一条建目录',
+	dirPlan({ 'notes/a.md': [10, T] }, ['notes'], {}, []).folders,
+	[],
+);
+check(
+	'同时建目录时文件动作照旧',
+	kinds(dirPlan({ 'notes/a.md': [10, T] }, ['notes'], {}, [])),
+	['upload:notes/a.md'],
+);
+check(
+	'空目录不影响文件的增删改计数',
+	dirPlan({}, ['空目录'], {}, []).summary,
+	{ add: 0, modify: 0, delete: 0, move: 0, conflict: 0 },
+);
+// 目录**只建不删**：不会因为"对面没有这个目录"就产生删除动作
+check(
+	'目录不会带来任何删除动作（只建不删）',
+	kinds(dirPlan({}, [], { 'a.md': [10, T] }, ['空目录'])),
+	['download:a.md'],
+);
+check(
+	'同一轮里文件照旧、目录补建',
+	dirPlan({}, [], { 'a.md': [10, T] }, ['空目录']).folders,
+	[{ path: '空目录', side: 'local' }],
 );
 
 // ---------------------------------------------------------------- 状态重建

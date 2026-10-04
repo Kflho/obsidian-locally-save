@@ -115,11 +115,41 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
-		contentEl.createEl('h3', { text: '.lsave 不是 Obsidian 能打开的格式' });
+		contentEl.createEl('h3', { text: '文件夹（包括空文件夹）也一起搬' });
+		const dirs = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		dirs.createEl('li', {
+			text: '空文件夹会跟着走：两条通道都会把对面没有的文件夹建出来。'
+				+ '装进包里的那些空目录记在包的头部，应用时一并补建（报告里会写"要补建几个"）',
+		});
+		dirs.createEl('li', {
+			text: '**只建不删**：删文件夹的风险远大于收益 —— 空目录留着不碍事，判断错一次却是整片内容消失。'
+				+ '所以插件永远不会因为"对面没有这个文件夹"就去删它',
+		});
+		dirs.createEl('li', {
+			text: '但**被删空 / 被挪空**的文件夹会顺手收拾掉：某个文件夹里的东西删光了，'
+				+ '它自己也不会留成一串空壳（`pruneEmptyDirs`，只删真空的，非空目录一律不碰）',
+		});
+		dirs.createEl('li', {
+			text: '文件夹与同名文件撞车（本地是文件夹、包里是文件，或反过来）：默认档**如实报失败、不动那个文件夹**；'
+				+ '只有强制档才会把它挪进回收目录腾位置',
+		});
+
+		contentEl.createEl('h3', { text: '双击 .lsave 直接用 Obsidian 打开' });
 		contentEl.createEl('p', {
-			text: '同步包是本插件自己的容器格式。**别**用 Obsidian 双击它 —— 那样只会被当成未知文件塞进仓库。'
-				+ '正确用法是把包**拖到 Obsidian 窗口上**，或者在这里选它。'
-				+ '插件读包只看绝对路径，跟你系统里 .lsave 关联到哪个程序完全无关；'
+			text: '同步包是本插件自己的容器格式。**直接**把 .lsave 关联到 `Obsidian.exe "%1"` 是通不了的 ——'
+				+ 'Obsidian 收到一个陌生路径只会当成未知文件，压根到不了插件。能到插件的通路只有 URI 协议：'
+				+ '设置里那个「设置关联」会往注册表写一条"双击就调起 obsidian:// 链接"的关联，'
+				+ '链接里写明交给哪个 vault，插件收到之后直接弹出应用对话框。'
+				+ '不想设关联也行 —— 把包**拖到 Obsidian 窗口上**，或者在这里选它，效果一样。',
+			cls: 'locally-save-hint',
+		});
+		contentEl.createEl('p', {
+			text: '关联写在本机注册表里、内容是写死的（当时的 vault 名），所以**每台电脑要各设一次**；'
+				+ '换过仓库文件夹名之后也要重设一次。不想要了就点「解除关联」，不会留下别的东西。',
+			cls: 'locally-save-hint',
+		});
+		contentEl.createEl('p', {
+			text: '插件读包只看绝对路径，跟你系统里 .lsave 关联到哪个程序完全无关；'
 				+ '默认排除规则里也有 *.lsave，万一包进了仓库也不会跟着同步出去。',
 			cls: 'locally-save-hint',
 		});
