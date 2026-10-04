@@ -20,6 +20,15 @@ export interface ScanOptions {
 	skipTopLevelDirs?: string[];
 }
 
+/**
+ * 回收目录里专门放"冲突输的那一份"的子文件夹。
+ *
+ * 为什么不留在原地：留在仓库里的冲突副本会**跟着同步传到对面去**，两边各滚一份、越滚越多。
+ * 挪进回收目录之后它天然不参与同步（`.trash` / `.lsave` 本来就被排除），
+ * 而且照样能捞回来。
+ */
+export const CONFLICT_TRASH_DIR = '冲突';
+
 /** 递归扫描一个目录，返回「相对路径 → 大小 + 修改时间」 */
 export async function scanTree(root: string, options: ScanOptions): Promise<Inventory> {
 	const files = new Map<string, FileRecord>();

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { toNative, conflictName } from '../utils/paths';
-import { copyFilePreservingMtime, ensureDir, moveToTrash, removeFile } from './disk';
+import { toNative } from '../utils/paths';
+import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, removeFile } from './disk';
 import type { SyncAction, SyncPlan } from './types';
 
 /**
@@ -100,14 +100,14 @@ async function runAction(action: SyncAction, options: ExecuteOptions, result: Ex
 			return;
 		}
 		case 'conflict': {
-			// 输的那一份存成「冲突副本」留在原地，赢的占原名 —— 两份都不丢
-			const backupName = conflictName(action.path, stamp);
+			// 输的那一份**挪进回收目录的「冲突」文件夹**，不留在原地 ——
+			// 留在原地的冲突副本会跟着同步传到对面去，两边各滚一份、越滚越多
 			if (action.winner === 'remote') {
-				await copyFilePreservingMtime(here, toNative(vaultRoot, backupName));
+				await moveToTrash(here, `${vaultRoot}/.trash/locally-save/${CONFLICT_TRASH_DIR}`, action.path, stamp);
 				const record = await copyFilePreservingMtime(there, here);
 				result.bytesCopied += record.size;
 			} else {
-				await copyFilePreservingMtime(there, toNative(targetRoot, backupName));
+				await moveToTrash(there, `${targetRoot}/.lsave/trash/${CONFLICT_TRASH_DIR}`, action.path, stamp);
 				const record = await copyFilePreservingMtime(here, there);
 				result.bytesCopied += record.size;
 			}

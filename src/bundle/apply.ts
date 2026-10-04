@@ -3,12 +3,12 @@ import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
 import { DEFAULT_MTIME_TOLERANCE_MS, planSync } from '../sync/diff';
-import { ensureDir, moveToTrash, scanTree, statFile } from '../sync/disk';
+import { CONFLICT_TRASH_DIR, ensureDir, moveToTrash, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
-import { conflictName, toNative } from '../utils/paths';
+import { toNative } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
 import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../sync/types';
 
@@ -399,23 +399,24 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 					break;
 				}
 				case 'conflict': {
-					// 留两份：新的那份占原名，旧的那份存成冲突副本（与副本同步完全一致）
+					// 留两份：新的那份占原名，**输的那份挪进回收目录的「冲突」文件夹**。
+					// 不留在原地是因为：留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份
+					const conflictDir = `.trash/locally-save/${CONFLICT_TRASH_DIR}`;
 					if (action.winner === 'remote') {
-						const backup = conflictName(action.path, stamp, '本地冲突副本');
-						const backupAbs = toNative(options.vaultRoot, backup);
-						await ensureDir(path.dirname(backupAbs));
-						await fs.promises.copyFile(target, backupAbs);
-						await fs.promises.utimes(backupAbs, new Date(), new Date());
-						result.conflictCopies.push(backup);
+						await moveToTrash(target, toNative(options.vaultRoot, conflictDir), action.path, stamp);
 						await extractEntry(options.file, plan.info, action.entry, target);
 						result.written++;
 						result.bytesWritten += action.entry.size;
 					} else {
-						// 本地这份更新：原名不动，把包里那份存成冲突副本
-						const backup = conflictName(action.path, stamp, '包里的版本');
-						await extractEntry(options.file, plan.info, action.entry, toNative(options.vaultRoot, backup));
-						result.conflictCopies.push(backup);
+						// 本地这份更新：原名不动，把包里那份写进冲突文件夹
+						await extractEntry(
+							options.file,
+							plan.info,
+							action.entry,
+							toNative(options.vaultRoot, `${conflictDir}/${stamp}/${action.path}`),
+						);
 					}
+					result.conflictCopies.push(`${conflictDir}/${stamp}/${action.path}`);
 					result.conflicts++;
 					break;
 				}

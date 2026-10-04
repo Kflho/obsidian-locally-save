@@ -60,21 +60,30 @@ function read(root: string, rel: string): string | null {
 
 const exists = (root: string, rel: string) => fs.existsSync(abs(root, rel));
 
+/** 冲突输的那一份会不会留在原地（现在应该都不留了） */
 function hasConflictCopy(root: string, relDir: string): boolean {
 	const dir = abs(root, relDir);
 	if (!fs.existsSync(dir)) return false;
-	return fs.readdirSync(dir).some(name => isConflictCopyName(name));
+	return fs.readdirSync(dir).some(name => name.includes('冲突') || name.includes('包里的版本'));
 }
 
-/** 冲突副本的两种命名：本地那份是输家时叫「本地冲突副本」，包里那份输时叫「包里的版本」 */
-function isConflictCopyName(name: string): boolean {
-	return name.includes('冲突副本') || name.includes('包里的版本');
-}
-
-/** 读第一份冲突副本的内容（用来核对"存下来的到底是哪一份"） */
+/** 从回收目录里读冲突输掉的那一份（不留在仓库里，所以要去 .trash 找） */
 function readConflictCopy(root: string): string | null {
-	const name = fs.readdirSync(root).find(item => isConflictCopyName(item));
-	return name ? fs.readFileSync(path.join(root, name), 'utf8') : null;
+	const trash = path.join(root, '.trash', 'locally-save');
+	if (!fs.existsSync(trash)) return null;
+	const walk = (dir: string): string | null => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const next = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				const found = walk(next);
+				if (found !== null) return found;
+				continue;
+			}
+			return fs.readFileSync(next, 'utf8');
+		}
+		return null;
+	};
+	return walk(trash);
 }
 
 const log = createLogger(() => 'silent');
@@ -220,7 +229,8 @@ plan = await planBundleApply(applyOptions(B, STATE_B, fifth.file as string));
 check('本地真改过的 → 冲突', plan.report.conflicts, 1);
 result = await executeBundlePlan(plan, applyOptions(B, STATE_B, fifth.file as string));
 check('包里的内容占原名', read(B, 'notes/a.md'), 'AAA-V5');
-checkTrue('本地那份留成冲突副本', hasConflictCopy(B, 'notes'), '没找到冲突副本');
+checkTrue('本地那份挪走了（不留在原地）', !hasConflictCopy(B, 'notes'), '原地不该有冲突副本');
+checkTrue('挪进了回收目录的「冲突」文件夹', hasConflictCopy(B, '.trash/locally-save'), '没找到');
 
 // 5c. 重导一次完整包 → 累积清零
 const anchorReset = await exportBundle(exportOptions(A, STATE_A));
@@ -315,8 +325,13 @@ plan = await planBundleApply(applyOptions(F, STATE_F, thirdFull.file as string))
 check('两边都改过 → 冲突', plan.report.conflicts, 1);
 result = await executeBundlePlan(plan, applyOptions(F, STATE_F, thirdFull.file as string));
 check('新的那份（本地的）占原名', read(F, 'brand-new.md'), 'F 改的（更新）');
-checkTrue('旧的那份（包里的）存成了冲突副本', hasConflictCopy(F, '.'), '没找到冲突副本');
-check('冲突副本里是包里的内容', readConflictCopy(F), 'A 改的（更旧）');
+checkTrue('仓库里**不再**留下冲突副本', !hasConflictCopy(F, '.'), '留在原地的副本会跟着同步传出去');
+checkTrue(
+	'输的那份进了回收目录的「冲突」文件夹',
+	hasConflictCopy(F, '.trash/locally-save'),
+	'没找到冲突文件夹',
+);
+check('回收目录里存的是包里的内容', readConflictCopy(F), 'A 改的（更旧）');
 
 // 10. 本地那份只是"旧副本"（包里没给基准）→ 直接覆盖，不该留冲突副本
 const G = path.join(ROOT, 'machineG');
