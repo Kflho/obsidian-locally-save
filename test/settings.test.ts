@@ -15,7 +15,7 @@
  *   7. 面板结构：按功能分页、页内分组有标题且不重名
  */
 import type { App } from "obsidian";
-import { DEFAULT_SETTINGS, ALL_ACTIONS, LOG_LEVELS, LocallySaveSettingTab, settingsFrom } from "../src/settings";
+import { DEFAULT_SETTINGS, ALL_ACTIONS, ALL_FIELDS, LOG_LEVELS, LocallySaveSettingTab, placeholderOf, settingsFrom } from "../src/settings";
 import type { PluginSettings } from "../src/settings";
 import type LocallySavePlugin from "../src/main";
 
@@ -189,6 +189,29 @@ try {
 	checkTrue("旧版 DOM 路径能画出按钮", true, "");
 } catch (error) {
 	checkTrue("旧版 DOM 路径能画出按钮", false, String(error));
+}
+
+// 9. 灰底提示（placeholder）：留空时的默认值要显示成灰字，而不是预先填进输入框 ——
+//    预先填进去的话，用户一删就变成"没填路径"，还得自己猜默认是哪儿
+const bundleDirField = ALL_FIELDS.find(field => field.key === 'bundleDir');
+checkTrue('字段表里有「同步包文件夹」', bundleDirField !== undefined, '没找到');
+const bundleDirControl = bundleDirField?.control;
+checkTrue(
+	'它的灰底提示是动态的（默认值依赖目标文件夹）',
+	bundleDirControl?.type === 'text' && typeof bundleDirControl.placeholder === 'function',
+	'写成了固定字符串',
+);
+if (bundleDirField && bundleDirControl) {
+	check(
+		'没填目标文件夹时，提示先去填它',
+		placeholderOf(bundleDirControl, { ...DEFAULT_SETTINGS, targetDir: '' }),
+		'先填上面的「目标文件夹」，或在这里直接指定',
+	);
+	check(
+		'填了目标文件夹 → 灰字显示默认路径',
+		placeholderOf(bundleDirControl, { ...DEFAULT_SETTINGS, targetDir: 'D:/备份/我的笔记' }),
+		'D:/备份/我的笔记/.lsave/bundles',
+	);
 }
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);

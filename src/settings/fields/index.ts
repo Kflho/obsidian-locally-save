@@ -49,4 +49,5 @@ export const ALL_FIELDS: FieldSpec[] = [...FIELD_INDEX.values()];
 export const ALL_ACTIONS: ActionSpec[] = SETTINGS_SECTIONS.flatMap(section =>
 	(section.groups ?? []).flatMap(group => group.actions ?? []));
 
-export type { ActionSpec, ControlSpec, FieldGroup, FieldSection, FieldSpec } from './types';
+export { placeholderOf } from './types';
+export type { ActionSpec, ControlSpec, FieldGroup, FieldSection, FieldSpec, PlaceholderSpec } from './types';

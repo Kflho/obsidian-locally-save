@@ -19,5 +19,5 @@ export {
 } from './model';
 export type { LogLevel, PluginSettings } from './model';
 export { LocallySaveSettingTab } from './tab';
-export { ALL_ACTIONS, ALL_FIELDS, FIELD_INDEX, SETTINGS_SECTIONS } from './fields';
-export type { ActionSpec, ControlSpec, FieldGroup, FieldSection, FieldSpec } from './fields';
+export { ALL_ACTIONS, ALL_FIELDS, FIELD_INDEX, SETTINGS_SECTIONS, placeholderOf } from './fields';
+export type { ActionSpec, ControlSpec, FieldGroup, FieldSection, FieldSpec, PlaceholderSpec } from './fields';

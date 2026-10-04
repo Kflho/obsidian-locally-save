@@ -10,6 +10,7 @@ import {
 	coerceText,
 } from '../model';
 import type { PluginSettings } from '../model';
+import { bundleBaseDir } from '../../bundle/paths';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
 import type { FieldSection } from './types';
@@ -108,8 +109,17 @@ export const SYNC_SECTION: FieldSection = {
 					key: 'bundleDir',
 					name: '同步包文件夹',
 					desc: `留空＝放在**目标文件夹**的 .lsave/bundles 下（这个目录不参与同步，包不会被当成副本内容传回仓库）。`
-						+ `填了就用你指定的路径。完整包与改动包分别放在它的 full 与 changes 子目录里`,
-					control: { type: 'text', placeholder: '留空＝跟着目标文件夹' },
+						+ `填了就用你指定的路径。完整包与更新包分别放在它的 full 与 changes 子目录里。`
+						+ `输入框里的灰字就是"留空时会用的路径"`,
+					control: {
+						type: 'text',
+						// 按惯例把"默认值"显示成灰底提示，而不是预先填进输入框 ——
+						// 预先填进去的话，用户一删就变成"没填路径"，还得自己猜默认是哪儿
+						placeholder: settings => {
+							const base = bundleBaseDir(settings, settings.targetDir);
+							return base || '先填上面的「目标文件夹」，或在这里直接指定';
+						},
+					},
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
 				},
 				{
