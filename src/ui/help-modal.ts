@@ -103,7 +103,10 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 		const rules = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		rules.createEl('li', { text: '两边都改过 → 按「两边都改了怎么办」：默认留两份，**新的那份占原名**，旧的存成冲突副本' });
+		rules.createEl('li', {
+			text: '两边都改过 → 按「两边都改了怎么办」：默认留两份，**新的那份占原名**，'
+				+ '输的那份挪进回收目录的「冲突」文件夹（`.trash/locally-save/冲突`），不留在仓库里',
+		});
 		rules.createEl('li', { text: '本地有、包里没有、但基准里也有 → 对方删过它 → 按「同步删除」处理（关掉就取回来）' });
 		rules.createEl('li', { text: '本地有、包里没有、基准里也没有 → 我独有的文件 → **一律保留**' });
 		rules.createEl('li', { text: '对方改了名 → 本地跟着改名，不重传内容' });

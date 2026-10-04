@@ -43,6 +43,10 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   包才不会被当成"副本新增文件"同步回仓库。完整包与更新包分 `full` / `changes` 两个子目录
   （`src/bundle/paths.ts`）。两个自动留包的开关**各自独立**，导出顺序必须是
   **先更新包、后完整包** —— 完整包会把"上次导出的样子"更新成当前仓库，反过来更新包就没内容可装了。
+- **冲突输的那一份必须挪进回收目录的「冲突」文件夹**（`disk.ts` 的 `CONFLICT_TRASH_DIR`，
+  本地侧 `.trash/locally-save/冲突/时间戳/`、副本侧 `.lsave/trash/冲突/时间戳/`），
+  **不要留在原地** —— 留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份、越滚越多。
+  两条通道（副本同步 / 应用同步包）都要守这条。
 - **更新包是以完整包为基准累积的**（`state.bundle.fullFiles` / `fullGeneration` / `history`）：
   成员按"自完整包以来变过"挑，但每个条目的 `base` 用**上次导出**时的样子 ——
   这样按顺序应用的人零冲突；`history` 则是为了认出"对方跳过了几个包、手里是我发过的中间版本"。
@@ -71,7 +75,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 321 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 356 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
@@ -89,5 +93,4 @@ npm run lint    # eslint（obsidianmd 插件规则）
 ## 还没做的事
 
 - [ ] 移动端：目前 `isDesktopOnly: true`（同步到仓库外必须用 fs）
-- [ ] 冲突副本目前会参与同步（会传到对面去）—— 刻意如此，但值得在界面上说明
 - [ ] 大仓库的性能：扫描是元数据遍历，几百 MB 没问题；几万文件时值得再做增量扫描

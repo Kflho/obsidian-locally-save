@@ -82,21 +82,38 @@ function kinds(outcome: SyncOutcome): string[] {
 
 /** 回收目录里有没有这个文件（按后缀找，因为中间隔了一层时间戳目录） */
 function inTrash(rel: string): boolean {
-	const root = path.join(TARGET, '.lsave', 'trash');
-	if (!fs.existsSync(root)) return false;
-	const walk = (dir: string): boolean => fs.readdirSync(dir, { withFileTypes: true }).some(entry => {
-		const next = path.join(dir, entry.name);
-		if (entry.isDirectory()) return walk(next);
-		return next.replace(/\\/g, '/').endsWith(rel);
-	});
-	return walk(root);
+	return findInTrash(rel) !== null;
 }
 
-/** 仓库里有没有「冲突副本」文件 */
+/** 找出回收目录里某个文件的实际路径 */
+function findInTrash(rel: string): string | null {
+	const root = path.join(TARGET, '.lsave', 'trash');
+	const vaultTrash = path.join(VAULT, '.trash', 'locally-save');
+	for (const base of [root, vaultTrash]) {
+		if (!fs.existsSync(base)) continue;
+		const walk = (dir: string): string | null => {
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				const next = path.join(dir, entry.name);
+				if (entry.isDirectory()) {
+					const found = walk(next);
+					if (found !== null) return found;
+					continue;
+				}
+				if (next.replace(/\\/g, '/').endsWith(rel)) return next;
+			}
+			return null;
+		};
+		const found = walk(base);
+		if (found !== null) return found;
+	}
+	return null;
+}
+
+/** 仓库里有没有「冲突副本」文件（留在原地的那种；现在应该没有了） */
 function hasConflictCopy(dir: string): boolean {
 	const root = abs(VAULT, dir);
 	if (!fs.existsSync(root)) return false;
-	return fs.readdirSync(root).some(name => name.includes('冲突副本'));
+	return fs.readdirSync(root).some(name => name.includes('冲突副本') || name.includes('包里的版本'));
 }
 
 // -------------------------------------------------------------------- 用例
@@ -170,7 +187,17 @@ write(TARGET, 'notes/conflict.md', 'REMOTE-EDIT', Date.now() + 60_000);
 outcome = await runSync(host());
 check('两边都改 → 冲突', kinds(outcome), ['conflict:notes/conflict.md']);
 check('新的那份占原名', read(VAULT, 'notes/conflict.md'), 'REMOTE-EDIT');
-checkTrue('旧的那份留成了冲突副本', hasConflictCopy('notes'), '没有找到冲突副本文件');
+checkTrue('仓库里**不再**留下冲突副本（留在原地会跟着同步传出去）', !hasConflictCopy('notes'), '原地不该有');
+checkTrue(
+	'输的那份（本地改的那版）进了回收目录的「冲突」文件夹',
+	inTrash('notes/conflict.md'),
+	'回收目录里应该有一份',
+);
+check(
+	'而且存的是本地那一版',
+	fs.readFileSync(findInTrash('notes/conflict.md') ?? '', 'utf8'),
+	'LOCAL-EDIT',
+);
 
 // 9. 排除规则真的生效
 write(VAULT, '.obsidian/app.json', '{}');

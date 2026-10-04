@@ -567,10 +567,12 @@ export class ApplyBundleModal extends Modal {
 			'remote-wins': '以包为准（本地改动会被覆盖）',
 		};
 		this.reportEl.createEl('p', {
-			text: `与本地副本同步同一套规则：两边都改过时 ${strategyText[report.conflictStrategy]}；`
+			text: `与本地副本同步同一套规则：两边都改过时 ${strategyText[report.conflictStrategy]}。`
+				+ '输的那一份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突），'
+				+ '不留在仓库里 —— 留在原地的冲突副本会跟着同步传到对面去。'
 				+ `对方删掉的文件${report.propagateDeletions ? '这边也删' : '取回来'}。`
 				+ (report.keepBackup
-					? '删掉的本地版本会先进回收目录（仓库/.trash/locally-save）'
+					? '删掉的本地版本同样进回收目录'
 					: '⚠ 回收目录已关：删掉的本地版本会直接消失'),
 			cls: report.keepBackup ? 'locally-save-hint' : 'locally-save-warn',
 		});
@@ -748,7 +750,7 @@ class ConfirmApplyModal extends Modal {
 		}
 		facts.createEl('li', {
 			text: report.keepBackup
-				? '被覆盖 / 删掉的本地版本会先进回收目录（仓库/.trash/locally-save），还能捞回来'
+				? '被覆盖 / 删掉 / 冲突输掉的本地版本都会进回收目录（仓库/.trash/locally-save），还能捞回来'
 				: '⚠ 回收目录已关：被覆盖 / 删掉的本地版本会直接消失',
 		});
 
