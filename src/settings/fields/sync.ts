@@ -12,15 +12,15 @@ import {
 import type { FieldSection } from './types';
 
 /**
- * 「本地同步」一页：副本放哪儿、怎么比、删了怎么办。
+ * 「本地同步」一页：副本放哪儿、怎么比、删了怎么办，以及怎么把改动装进一个文件搬走。
  *
- * 这一页是整个插件的核心设置，所以每个说明都写清"后果"，
- * 别让用户稀里糊涂就开了删除传播。
+ * 同步包不单独分页：它本来就是"本地同步的搬运方式"——包里的内容就是同步的产物，
+ * 放在一起用户才看得明白两者的关系（2026-10 从独立一页并进来的）。
  */
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '本地同步',
-	desc: '把仓库同步到本地的一个文件夹副本：目标在哪儿、怎么比、删了怎么办',
+	desc: '把仓库同步到本地的一个文件夹副本，并把改动装进单个文件来回搬',
 	groups: [
 		{
 			heading: '同步目标',
@@ -80,31 +80,51 @@ export const SYNC_SECTION: FieldSection = {
 				},
 			],
 		},
-	],
-};
-
-/** 「同步包」一页：把一个副本装进单个文件，用 U 盘 / 网盘搬来搬去 */
-export const BUNDLE_SECTION: FieldSection = {
-	type: 'page',
-	heading: '同步包',
-	desc: `把仓库（或只把改动）导出成单个 ${BUNDLE_EXTENSION} 文件，拷到另一台机器上打开即可应用`,
-	groups: [
 		{
-			heading: '导出',
+			heading: '同步包：自动留包',
 			fields: [
+				{
+					key: 'autoExportChanges',
+					name: '同步后自动留改动包',
+					desc: '每次同步成功后，把这一次的改动导成一个包放进「同步包文件夹/changes」（没有改动就不导）。'
+						+ '用的是同步刚扫完的结果，几乎不额外花时间；包很小，随时可以拷走',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
+				},
+				{
+					key: 'autoExportFull',
+					name: '同步后自动留完整包',
+					desc: '每次同步成功后，把整个仓库导成一个包放进「同步包文件夹/full」。'
+						+ '注意：完整包每次都要把整个仓库重写一遍，几百 MB 的库会明显变慢；'
+						+ '只在"随时要给别人一份完整副本"时才打开',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
+				},
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: `导出的 ${BUNDLE_EXTENSION} 文件放哪儿（填绝对路径）。留空则每次导出时手动填路径；`
-						+ '「同步后自动留一个改动包」也往这里放',
-					control: { type: 'text', placeholder: 'D:\\传输' },
+					desc: `留空＝放在**目标文件夹**的 .lsave/bundles 下（这个目录不参与同步，包不会被当成副本内容传回仓库）。`
+						+ `填了就用你指定的路径。完整包与改动包分别放在它的 full 与 changes 子目录里`,
+					control: { type: 'text', placeholder: '留空＝跟着目标文件夹' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
-					rerenderOnChange: true,
 				},
 				{
+					key: 'rememberFingerprints',
+					name: '记住内容指纹',
+					desc: '给文件算 sha256 并记下来（按大小与修改时间缓存，改过的才算）。作用是：世代对不上时能靠"内容"而不是"时间"判断本地有没有改过，合并更准。第一次导出会多花一两秒读一遍全库',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.rememberFingerprints),
+				},
+			],
+		},
+		{
+			heading: '同步包：手动导出',
+			fields: [
+				{
 					key: 'bundleMode',
-					name: '导出内容',
-					desc: '完整副本＝整个仓库，体积大但到哪台机器都能整份恢复；仅改动＝只装自上次导出后变过的文件，体积小，适合天天来回搬',
+					name: '手动导出的默认类型',
+					desc: `命令「导出同步包…」打开时默认选哪个。完整副本＝整个仓库；仅改动＝自上次导出后变过的文件加删除清单。`
+						+ '上面两个自动开关各自独立，不受这里影响',
 					control: {
 						type: 'dropdown',
 						options: {
@@ -114,27 +134,10 @@ export const BUNDLE_SECTION: FieldSection = {
 					},
 					coerce: value => coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode),
 				},
-				{
-					key: 'rememberFingerprints',
-					name: '记住内容指纹',
-					desc: '给文件算 sha256 并记下来（按大小与修改时间缓存，改过的才算）。作用是：世代对不上时能靠"内容"而不是"时间"判断本地有没有改过，合并更准。第一次导出会多花一两秒读一遍全库',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.rememberFingerprints),
-				},
-				{
-					key: 'autoExportBundle',
-					name: '同步后自动留一个改动包',
-					desc: '每次同步成功后，顺手把这次的改动导成一个包放进上面的文件夹（没有改动就不导）。'
-						+ '用的是同步刚扫完的结果，几乎不额外花时间；包很小，随时可以拷走。'
-						+ '自动留的包**只含改动**——完整副本请用命令手动导出',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportBundle),
-					disabled: settings => settings.bundleDir.trim() === '',
-				},
 			],
 		},
 		{
-			heading: '应用',
+			heading: '同步包：应用',
 			fields: [
 				{
 					key: 'bundleDeleteMissing',

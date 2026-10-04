@@ -12,6 +12,7 @@ import type { ApplyOptions } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { readBundleInfo, verifyBundle } from '../src/bundle/format';
+import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
 import { loadState } from '../src/sync/state';
@@ -233,6 +234,33 @@ const reused = await exportBundle({
 check('复用传入的清单：不在清单里的文件不进包', reused.entryCount, 1);
 const reusedInfo = await readBundleInfo(reused.file as string);
 check('包里只有清单里那一个', reusedInfo.header.entries.map(entry => entry.path), ['notes/a.md']);
+
+// 11. 包目录的解析规则
+const base = { ...DEFAULT_SETTINGS, bundleDir: '' };
+check(
+	'同步包文件夹留空 → 跟着同步目标走',
+	bundleBaseDir(base, 'D:/vault-copy'),
+	'D:/vault-copy/.lsave/bundles',
+);
+check(
+	'填了同步包文件夹 → 用填的',
+	bundleBaseDir({ ...base, bundleDir: 'D:/传输' }, 'D:/vault-copy'),
+	'D:/传输',
+);
+check('目标文件夹也没填 → 空串（调用方要提示去填）', bundleBaseDir(base, ''), '');
+check(
+	'完整包与改动包分两个目录',
+	[bundleDirForMode('D:/x', 'full'), bundleDirForMode('D:/x', 'changes')],
+	['D:/x/full', 'D:/x/changes'],
+);
+check('找包时两个子目录都看（外加根目录，兼容早期直接放根目录的包）', bundleDirsToScan('D:/x').length, 3);
+check('没填目录时不去找包', bundleDirsToScan(''), []);
+
+// 12. 导出真的落到了对应的子目录里
+const fullInfo2 = await readBundleInfo(FILE_FULL);
+check('完整包落在 full 子目录', FILE_FULL.replace(/\\/g, '/').includes('/full/'), true);
+check('改动包落在 changes 子目录', FILE_CHANGES.replace(/\\/g, '/').includes('/changes/'), true);
+checkTrue('包文件名带上了包 ID 前几位', path.basename(FILE_FULL).endsWith('.lsave'), FILE_FULL);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

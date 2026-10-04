@@ -4,6 +4,7 @@ import type LocallySavePlugin from '../main';
 import { executeBundlePlan, planBundleApply } from '../bundle/apply';
 import type { ApplyPlan } from '../bundle/apply';
 import { exportBundle } from '../bundle/export';
+import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
 import { listFiles } from '../sync/disk';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -21,12 +22,14 @@ export class ExportBundleModal extends Modal {
 	private mode: 'full' | 'changes';
 	private outDir: string;
 	private statusEl!: HTMLElement;
+	private whereEl!: HTMLElement;
 
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
 		this.plugin = plugin;
 		this.mode = plugin.settings.bundleMode;
-		this.outDir = plugin.settings.bundleDir;
+		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
+		this.outDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
 	}
 
 	onOpen(): void {
@@ -48,17 +51,25 @@ export class ExportBundleModal extends Modal {
 					changes: '仅改动',
 				})
 				.setValue(this.mode)
-				.onChange(value => { this.mode = value === 'changes' ? 'changes' : 'full'; }));
+				.onChange(value => {
+					this.mode = value === 'changes' ? 'changes' : 'full';
+					this.renderWhere();
+				}));
 
 		new Setting(contentEl)
-			.setName('输出文件夹')
-			.setDesc('填绝对路径；文件夹不存在会自动创建')
+			.setName('同步包文件夹')
+			.setDesc('留空＝跟着同步目标文件夹走；完整包与改动包分别放在它的 full 与 changes 子目录里')
 			.addText(text => text
 				.setPlaceholder('例如 D:\\传输')
 				.setValue(this.outDir)
-				.onChange(value => { this.outDir = value.trim(); }));
+				.onChange(value => {
+					this.outDir = value.trim();
+					this.renderWhere();
+				}));
 
+		this.whereEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.statusEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
+		this.renderWhere();
 
 		new Setting(contentEl)
 			.addButton(button => button
@@ -70,9 +81,18 @@ export class ExportBundleModal extends Modal {
 				.onClick(() => this.close()));
 	}
 
+	/** 让用户看清"这个包会落到哪个目录" */
+	private renderWhere(): void {
+		if (!this.outDir) {
+			this.whereEl.setText('还没填文件夹：先在设置里填「目标文件夹」，或在这里填一个路径。');
+			return;
+		}
+		this.whereEl.setText(`会写到：${bundleDirForMode(this.outDir, this.mode)}`);
+	}
+
 	private async run(): Promise<void> {
 		if (!this.outDir) {
-			new Notice('请先填输出文件夹');
+			new Notice('请先填同步包文件夹（留空则需要在设置里填目标文件夹）');
 			return;
 		}
 		this.statusEl.setText('正在导出……');
@@ -133,7 +153,8 @@ export class ApplyBundleModal extends Modal {
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
 		this.plugin = plugin;
-		this.dir = plugin.settings.bundleDir;
+		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
+		this.dir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
 		this.current = null;
 	}
 
@@ -149,7 +170,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('填绝对路径后按刷新，或直接在下面手填包文件路径')
+			.setDesc('留空＝跟着同步目标文件夹走。会列出它的 full 与 changes 两个子目录里的包')
 			.addText(text => text
 				.setPlaceholder('例如 D:\\传输')
 				.setValue(this.dir)
@@ -195,24 +216,36 @@ export class ApplyBundleModal extends Modal {
 			this.listEl.setText('（没填文件夹，可直接在下面粘包文件路径）');
 			return;
 		}
-		const files = (await listFiles(this.dir))
-			.filter(file => file.name.endsWith('.lsave'))
-			.sort((a, b) => b.mtime - a.mtime)
-			.slice(0, MAX_BUNDLES);
 
-		if (files.length === 0) {
-			this.listEl.setText('这个文件夹里没有 .lsave 文件');
+		// 两个子目录都看，列表里标出包来自哪一类
+		const found: { file: string; label: string; size: number; mtime: number }[] = [];
+		for (const dir of bundleDirsToScan(this.dir)) {
+			const segments = dir.split(/[/\\]/);
+			const sub = dir === this.dir ? '' : `${segments[segments.length - 1] ?? ''}/`;
+			for (const item of await listFiles(dir)) {
+				if (!item.name.endsWith('.lsave')) continue;
+				found.push({
+					file: `${dir.replace(/[/\\]+$/, '')}/${item.name}`,
+					label: `${sub}${item.name}`,
+					size: item.size,
+					mtime: item.mtime,
+				});
+			}
+		}
+		found.sort((a, b) => b.mtime - a.mtime);
+
+		if (found.length === 0) {
+			this.listEl.setText('这些文件夹里没有 .lsave 文件');
 			return;
 		}
-		for (const file of files) {
-			const full = `${this.dir.replace(/[/\\]+$/, '')}/${file.name}`;
+		for (const item of found.slice(0, MAX_BUNDLES)) {
 			const row = this.listEl.createDiv({ cls: 'locally-save-row is-bundle' });
-			row.createSpan({ text: file.name, cls: 'locally-save-file' });
+			row.createSpan({ text: item.label, cls: 'locally-save-file' });
 			row.createSpan({
-				text: `${formatBytes(file.size)} · ${formatTime(file.mtime)}`,
+				text: `${formatBytes(item.size)} · ${formatTime(item.mtime)}`,
 				cls: 'locally-save-reason',
 			});
-			row.addEventListener('click', () => { void this.select(full); });
+			row.addEventListener('click', () => { void this.select(item.file); });
 		}
 	}
 

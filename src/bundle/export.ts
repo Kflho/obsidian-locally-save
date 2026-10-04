@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, writeBundle } from './format';
 import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
+import { bundleDirForMode } from './paths';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { scanTree } from '../sync/disk';
 import { excludePatterns } from '../sync/runner';
@@ -31,7 +32,7 @@ export interface ExportOptions {
 	vaultRoot: string;
 	vaultName: string;
 	stateFile: string;
-	/** 包放哪个目录（绝对路径） */
+	/** 同步包文件夹；实际会写进它的 `full` / `changes` 子目录 */
 	outDir: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
@@ -137,7 +138,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const bundleId = randomUUID();
 	// 文件名带上包 ID 的前几位：时间戳只精确到秒，同一秒内连导两个会互相覆盖
 	const file = path.join(
-		options.outDir,
+		bundleDirForMode(options.outDir, mode),
 		`${safeName(options.vaultName)}-${mode === 'full' ? 'full' : 'changes'}-${formatStamp(now)}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
 	);
 
