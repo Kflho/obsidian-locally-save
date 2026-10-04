@@ -39,13 +39,17 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '两种包，什么时候用哪个' });
 		const pick = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		pick.createEl('li', {
-			text: '完整副本：整个仓库。第一次给对方、或者对方那边搞乱了要整份恢复时用。体积大，每次都要重写一遍',
+			text: '完整副本：整个仓库。第一次给对方时用，也是所有更新包的**基准**',
 		});
 		pick.createEl('li', {
-			text: '仅改动：只装自上次导出后变过的文件，外加一份删除清单。天天来回搬用这个，通常只有几十 KB 到几 MB',
+			text: '更新包：自上次完整副本以来**累积**的全部改动。对方永远只需要应用最新的那一个 —— '
+				+ '跳过中间几个也不会少内容，也不会留下冲突副本（它认得出"这是我以前发过的版本"）',
 		});
 		pick.createEl('li', {
-			text: '两个自动开关各自独立，可以只开"改动包"，也可以都开（都开时先导改动包、再导完整包）',
+			text: '更新包会随改动越攒越大（笔记型仓库通常几 MB 就到顶）。定期导一次完整副本，累积就清零了',
+		});
+		pick.createEl('li', {
+			text: '两个自动开关各自独立，可以只开"更新包"，也可以都开（都开时先导更新包、再导完整包）',
 		});
 
 		contentEl.createEl('h3', { text: '打开包那一步是只读的' });

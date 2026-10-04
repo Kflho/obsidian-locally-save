@@ -92,6 +92,8 @@ export interface ApplyReport {
 	conflicts: number;
 	/** 强制应用时：本地改过、但照样被覆盖掉的数量 */
 	forcedOverwrites: number;
+	/** 本地停在"我以前发过的中间版本"上（跳过了一两个更新包）、直接覆盖的数量 */
+	historyMatches: number;
 	/** 包里要求删除、且本地确实停在基准上的 */
 	deletes: number;
 	/** 包里要求删除、但本地改过所以不删的（强制应用时不会有） */
@@ -131,6 +133,18 @@ function matchesBase(local: { size: number; mtime: number }, entry: BundleEntry)
 	return local.size === entry.baseSize && Math.abs(local.mtime - entry.baseMtime) <= TOLERANCE;
 }
 
+/**
+ * 本地这份是不是"我以前发过的中间版本"。
+ *
+ * 更新包是**以完整包为基准累积**的，所以接收方可能跳过了一两个包、手里停在中间某一版。
+ * 那不是我改的，是我发过的 —— 直接覆盖，不该留冲突副本。
+ */
+function matchesHistory(local: { size: number; mtime: number }, entry: BundleEntry): boolean {
+	return (entry.history ?? []).some(
+		record => record.size === local.size && Math.abs(record.mtime - local.mtime) <= TOLERANCE,
+	);
+}
+
 function sameAsEntry(local: { size: number; mtime: number }, entry: BundleEntry): boolean {
 	return local.size === entry.size && Math.abs(local.mtime - entry.mtime) <= TOLERANCE;
 }
@@ -157,8 +171,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
+	// 更新包是累积的：接收方只要**应用过基准那个完整包**（世代 ≥ 基准世代）就能收，
+	// 不必逐个按顺序应用 —— 所以这里是 >=，不是 ==
 	const sameGeneration = header.baseGeneration === null
-		|| (sameLineage && state.generation === header.baseGeneration);
+		|| (sameLineage && state.generation >= header.baseGeneration);
 	const fastPath = sameGeneration;
 
 	const entries: ApplyPlan['entries'] = [];
@@ -167,6 +183,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let skips = 0;
 	let conflicts = 0;
 	let forcedOverwrites = 0;
+	let historyMatches = 0;
 
 	for (const entry of header.entries) {
 		const local = await statFile(toNative(options.vaultRoot, entry.path));
@@ -190,6 +207,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				// 本地没动过 → 覆盖不丢东西
 				entries.push({ entry, action: 'write', backup: false });
 				overwrites++;
+				continue;
+			}
+			if (matchesHistory(local, entry)) {
+				// 本地停在"我以前发过的中间版本"上（跳过了一两个包）→ 同样不丢东西
+				entries.push({ entry, action: 'write', backup: false });
+				overwrites++;
+				historyMatches++;
 				continue;
 			}
 			// 本地也改过
@@ -296,6 +320,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		skips,
 		conflicts,
 		forcedOverwrites,
+		historyMatches,
 		deletes: deletes.filter(item => item.action === 'delete').length,
 		keptDeletes,
 		extraDeletes: extra.length,
@@ -394,7 +419,18 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 		exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
 		skipTopLevelDirs: [VAULT_TRASH_DIR],
 	});
-	state.bundle = { lastExport: state.bundle?.lastExport ?? 0, files: Object.fromEntries(inventory.files) };
+	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
+	// 所以基准与中间版本记录一起重置；应用更新包则保留原来的基准
+	const isFull = plan.info.header.mode === 'full';
+	state.bundle = {
+		lastExport: state.bundle?.lastExport ?? 0,
+		files: Object.fromEntries(inventory.files),
+		fullFiles: isFull ? Object.fromEntries(inventory.files) : (state.bundle?.fullFiles ?? null),
+		fullGeneration: isFull
+			? plan.info.header.targetGeneration
+			: (state.bundle?.fullGeneration ?? null),
+		history: isFull ? {} : (state.bundle?.history ?? {}),
+	};
 	await saveState(options.stateFile, state);
 
 	result.durationMs = Date.now() - started;

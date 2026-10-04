@@ -50,11 +50,12 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('导出内容')
-			.setDesc('完整副本＝整个仓库；仅改动＝自上次导出后变过的文件加删除清单')
+			.setDesc('完整副本＝整个仓库，是更新包的基准（对方必须先应用它）；'
+				+ '更新包＝自上次完整副本以来累积的全部改动，对方直接应用最新的一个即可')
 			.addDropdown(dropdown => dropdown
 				.addOptions({
 					full: '完整副本',
-					changes: '仅改动',
+					changes: '更新包（累积）',
 				})
 				.setValue(this.mode)
 				.onChange(value => {
@@ -121,7 +122,8 @@ export class ExportBundleModal extends Modal {
 			}
 			this.close();
 			new Notice(
-				`同步包已导出：${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
+				`${outcome.cumulative ? '累积更新包' : '完整副本'}已导出：`
+				+ `${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
 				+ `（${formatDuration(outcome.durationMs)}）\n${outcome.file}`,
 				10000,
 			);
@@ -372,10 +374,15 @@ export class ApplyBundleModal extends Modal {
 		// 防呆第二层：改动包说清它不能干什么
 		if (report.bundle.mode !== 'full') {
 			this.reportEl.createEl('p', {
-				text: '⚠ 这是「仅改动」的包：里面只装了变过的文件。所以「清老的」与「强制应用」都用不了 ——'
+				text: '⚠ 这是「更新包」：里面只装了自完整副本以来变过的文件。所以「清老的」与「强制应用」都用不了 ——'
 					+ ' 对着它清理会把仓库里其余文件全删掉（那两个选项已灰掉）。'
 					+ '真要让仓库和某个状态完全一致，让对方导一份**完整副本**。',
 				cls: 'locally-save-warn',
+			});
+			this.reportEl.createEl('p', {
+				text: '它是**累积**的：包含自对方上次导出完整副本以来的全部改动，'
+					+ '所以永远只需要应用最新的这一个 —— 跳过中间几个也不会少内容、不会留下冲突副本。',
+				cls: 'locally-save-hint',
 			});
 		}
 
@@ -392,6 +399,9 @@ export class ApplyBundleModal extends Modal {
 		line(`覆盖 ${report.overwrites} 个`);
 		if (report.forcedOverwrites > 0) {
 			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（强制应用：以包为准）`);
+		}
+		if (report.historyMatches > 0) {
+			line(`其中 ${report.historyMatches} 个：本地停在对方以前发过的中间版本上，直接覆盖（不留冲突副本）`);
 		}
 		if (report.conflicts > 0) line(`本地也改过、会留冲突副本的：${report.conflicts} 个`);
 		if (report.deletes > 0) line(`删除 ${report.deletes} 个（本地未改动过的）`);
@@ -425,14 +435,15 @@ export class ApplyBundleModal extends Modal {
 		}
 		if (!report.parentMatches && report.bundle.mode === 'changes') {
 			this.reportEl.createEl('p', {
-				text: '注意：这个包的上一个包不是你最后应用的那个 —— 中间可能漏了包。'
-					+ '漏掉的内容不会凭空补上，必要时让对方导一份完整副本。',
-				cls: 'locally-save-warn',
+				text: '这个包不是接在你上次应用的那个后面（你跳过了一些）。不要紧：更新包是累积的，'
+					+ '内容不会缺，只要确认你应用过它所基于的完整副本就行。',
+				cls: 'locally-save-hint',
 			});
 		}
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
-				text: `注意：你的世代落后 ${report.generationGap} 代，中间可能漏了包。`,
+				text: `⚠ 你还没应用这个包所基于的完整副本（落后 ${report.generationGap} 代）。`
+					+ '更新包是相对完整副本累积的，请先让对方导一份完整副本并应用。',
 				cls: 'locally-save-warn',
 			});
 		}

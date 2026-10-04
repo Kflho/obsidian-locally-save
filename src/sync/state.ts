@@ -30,8 +30,33 @@ export interface TargetState {
 export interface BundleBaseline {
 	/** 上次导出同步包的时间戳 */
 	lastExport: number;
-	/** 上次导出时仓库的样子 */
+	/** 上次导出时仓库的样子（用来算"自上次以来变了什么"） */
 	files: Record<string, FileRecord>;
+	/**
+	 * 上次导出**完整包**时仓库的样子 —— 更新包以它为基准累积。
+	 *
+	 * 为什么要有它：如果更新包只是"相对上次导出"的差集，接收方漏掉任何一个，
+	 * 那部分内容就永久缺失。改成"相对上次完整包累积"之后，
+	 * **永远只需要应用最新的那一个**。代价是包会越滚越大，
+	 * 所以"导一次完整包就清零"是这套方案能成立的关键。
+	 *
+	 * null ＝ 还没导过完整包，这时不给导更新包（没有基准）。
+	 */
+	fullFiles: Record<string, FileRecord> | null;
+	/**
+	 * 上次导出完整包时到达的世代 —— 更新包的"基准世代"。
+	 *
+	 * 接收方只要**应用过那个完整包**（世代 ≥ 基准世代）就能收更新包，
+	 * 不必逐个按顺序应用。
+	 */
+	fullGeneration: number | null;
+	/**
+	 * 自上次完整包以来，每个文件经历过的版本（不含最新那一版）。
+	 *
+	 * 接收方靠它认出"我手里这份是你以前发过的中间版本，不是我自己改的"，
+	 * 于是跳过一两个包也不会满屏冲突副本。导完整包时整个清空。
+	 */
+	history: Record<string, FileRecord[]>;
 }
 
 /** 内容指纹缓存的一条 */
@@ -95,7 +120,15 @@ export async function loadState(absPath: string): Promise<PluginState> {
 		lastBundleId: raw.lastBundleId ?? null,
 		lastExportedBundleId: raw.lastExportedBundleId ?? null,
 		targets: raw.targets ?? {},
-		bundle: raw.bundle ?? null,
+		bundle: raw.bundle
+			? {
+				lastExport: raw.bundle.lastExport ?? 0,
+				files: raw.bundle.files ?? {},
+				fullFiles: raw.bundle.fullFiles ?? null,
+				fullGeneration: raw.bundle.fullGeneration ?? null,
+				history: raw.bundle.history ?? {},
+			}
+			: null,
 		hashes: raw.hashes ?? {},
 	};
 }
