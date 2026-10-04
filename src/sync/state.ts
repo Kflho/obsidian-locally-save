@@ -73,6 +73,14 @@ export interface BundleBaseline {
 	 * 老状态文件里没有这一项：那一轮一个目录都不删，之后补上。
 	 */
 	dirs?: string[];
+	/**
+	 * 上次提醒"更新包太大了，要不要换基准"时**那条提醒线**（字节）。
+	 *
+	 * 记它是为了别每轮同步都弹：用户点过「跳过这次导出」之后，提醒线按原上限整数倍往上抬
+	 * （200MB → 400MB → 600MB，见 `size-warn.ts` 的 `advanceWarnThreshold`）；
+	 * 换过一次基准就清零，回到 1 倍。
+	 */
+	warnedThreshold?: number;
 }
 
 /** 内容指纹缓存的一条 */
@@ -152,6 +160,9 @@ export async function loadState(absPath: string): Promise<PluginState> {
 				fullGeneration: raw.bundle.fullGeneration ?? null,
 				history: raw.bundle.history ?? {},
 				dirs: raw.bundle.dirs ?? [],
+				warnedThreshold: typeof raw.bundle.warnedThreshold === 'number'
+					? raw.bundle.warnedThreshold
+					: undefined,
 			}
 			: null,
 		lastSync: raw.lastSync ?? null,

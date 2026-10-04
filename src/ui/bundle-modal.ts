@@ -6,6 +6,7 @@ import type { ApplyPlan, ApplyStrictness } from '../bundle/apply';
 import { CONFLICT_OPTIONS } from '../settings/model';
 import type { ConflictStrategy } from '../sync/types';
 import { exportBundle } from '../bundle/export';
+import type { ExportOutcome } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
@@ -15,6 +16,7 @@ import { removeFromTarget } from '../sync/runner';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { pickBundleFromDrop } from './drop';
 import { bringWindowForward, focusWindow } from './modal-layout';
+import { offerBaselineReset } from './reset-baseline-modal';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
@@ -151,6 +153,10 @@ export class ExportBundleModal extends Modal {
 
 		const notes: string[] = [];
 		let anySuccess = false;
+		/** 导出的更新包（攒大了要问"要不要换基准"） */
+		let resetCandidate: ExportOutcome | null = null;
+		/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
+		const written: string[] = [];
 
 		for (const mode of modes) {
 			const label = mode === 'full' ? '完整副本' : '更新包';
@@ -167,6 +173,7 @@ export class ExportBundleModal extends Modal {
 					mode,
 					outDir,
 					configDir: this.plugin.configDir(),
+					keepPaths: written,
 					onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file }),
 				});
 				this.plugin.reportProgress(null);
@@ -175,12 +182,18 @@ export class ExportBundleModal extends Modal {
 					notes.push(`${label}：${outcome.reason ?? '没有需要导出的内容'}`);
 					continue;
 				}
+				written.push(outcome.file);
 				anySuccess = true;
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
 					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
-					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`,
+					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`
+					+ (outcome.superseded.length > 0
+						? `；顺手清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
+						: ''),
 				);
+				// 更新包攒大了 → 关掉本窗后问"要不要换基准"
+				if (outcome.cumulative) resetCandidate = outcome;
 			} catch (error) {
 				this.plugin.reportProgress(null);
 				const message = describe(error);
@@ -193,6 +206,8 @@ export class ExportBundleModal extends Modal {
 		if (anySuccess) {
 			new Notice(`导出完成：${notes.join('；')}`, 12000);
 			this.close();
+			// 关掉本窗之后再问，免得两个弹窗叠在一起
+			if (resetCandidate) await offerBaselineReset(this.plugin, resetCandidate);
 		}
 	}
 

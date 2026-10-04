@@ -117,6 +117,22 @@ export interface PluginSettings {
 	autoExportChanges: boolean;
 	/** 每次同步成功后，导一份完整包（每次都重写整个仓库，慢，默认关） */
 	autoExportFull: boolean;
+	/**
+	 * 导出更新包之后，删掉被它取代的旧更新包。
+	 *
+	 * 更新包是"自完整副本累积"的：新包包含旧包的全部内容，旧包留着只是占地方，
+	 * 还会让人以为"包越攒越多、是不是漏了什么"。只删同血脉、同基准世代、世代更小的更新包；
+	 * 完整包（还原点）与别的机器导的包一个都不碰。
+	 */
+	pruneSupersededBundles: boolean;
+	/**
+	 * 更新包攒到多大就提醒"该换基准了"（写法见 `bundle/size-warn.ts`）。
+	 *
+	 * 更新包是累积的、越攒越大；大到接近完整副本时，它唯一的好处（传得小）就没了。
+	 * 到点会弹窗问：要不要重导一份完整副本当新基准（更新包从零重新累积）。
+	 * 留空＝默认 200MB；填 0 ＝ 关掉这个提醒。
+	 */
+	bundleSizeWarnLimit: string;
 
 	// ------------------------------------------------------------ 界面
 	/** 左侧栏：立即同步到本地副本 */
@@ -156,6 +172,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
+	pruneSupersededBundles: true,
+	bundleSizeWarnLimit: '',
 
 	ribbonSyncIcon: true,
 	ribbonExportIcon: true,
@@ -245,6 +263,8 @@ export function settingsFrom(data: unknown): PluginSettings {
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
+		pruneSupersededBundles: coerceBoolean(raw.pruneSupersededBundles, DEFAULT_SETTINGS.pruneSupersededBundles),
+		bundleSizeWarnLimit: coerceText(raw.bundleSizeWarnLimit, DEFAULT_SETTINGS.bundleSizeWarnLimit),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
 		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),

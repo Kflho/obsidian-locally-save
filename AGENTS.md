@@ -100,6 +100,21 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   成员按"自完整包以来变过"挑，但每个条目的 `base` 用**上次导出**时的样子 ——
   这样按顺序应用的人零冲突；`history` 则是为了认出"对方跳过了几个包、手里是我发过的中间版本"。
   没有基准（没导过完整包）时**拒绝**导更新包，不要悄悄退化成旧的"相对上次导出"语义。
+- **`changes/` 里只留最新那一个更新包**（`removeSupersededChanges`）：导出成功后，把同血脉、
+  世代更小的旧更新包删掉 —— 任何更新的更新包或更新的完整副本都包含它们的全部内容，
+  留着只是占地，还会让人以为"包越攒越多、是不是漏应用了什么"（用户报过）。
+  **只在写包成功、状态落盘之后**才动手（旧包是"目前唯一的改动备份"）；
+  完整包（还原点）、别的血脉的包、读不出头部的一律不碰；
+  同一次导出里先导出来的那个要用 `keepPaths` 排掉（两个都勾时：先更新包、后完整包，
+  不然完整包那一步会把刚写的更新包当成"被取代的旧包"删掉）。
+  开关是设置里的 `pruneSupersededBundles`。
+- **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
+  上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
+  填 0 ＝ 关掉）。到线弹窗，三个选项：**重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
+  顺序上建议"先把更新包传过去应用、再换基准"（增量传得快），所以弹窗必须写清**换基准会清掉旧更新包**。
+  「跳过」把**提醒线**记进 `state.bundle.warnedThreshold`，并按原上限整数倍往上抬
+  （200 → 400 → 600…，不是按百分比）；换过基准则清零 —— 这样不会每轮同步都弹。
+  判定与阈值都在 `size-warn.ts`（纯函数，测试钉死），弹窗只管显示与执行。
 
 ## 目录结构
 
@@ -124,7 +139,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 533 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 556 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
