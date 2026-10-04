@@ -783,6 +783,41 @@ check('文件照旧写入', await (async () => {
 check('本机那个空目录还在', exists(X, '本机空目录'), true);
 check('新版包不会被误判成旧包', (await planBundleApply(applyOptions(X, STATE_X, R_FILE))).report.bundleDirsUnknown, false);
 
+// 25. 关键回归：**更新包不许删"它没提到的文件"**
+// 更新包里只有变过的文件，"没提到"什么也不代表。曾经照着三方比对的结果翻译，
+// 于是"1 万文件的仓库 + 只改了 1 个文件的更新包"算出了"删除 10203 个"（用户报过）。
+const Y = path.join(ROOT, 'machineY');
+const STATE_Y = path.join(ROOT, 'state-y.json');
+fs.mkdirSync(Y, { recursive: true });
+const yFull = await planBundleApply(applyOptions(Y, STATE_Y, R_FILE));
+await executeBundlePlan(yFull, applyOptions(Y, STATE_Y, R_FILE));
+check('先应用完整包：文件进基准', read(Y, 'notes/keep.md'), 'KEEP');
+
+const yChanges = await planBundleApply(applyOptions(Y, STATE_Y, FILE_CHANGES));
+check(
+	'更新包：没提到的文件不许当成"被删了"',
+	yChanges.actions.filter(action => action.kind === 'delete').map(action => action.path),
+	[],
+);
+check('报告里的删除数也是 0', yChanges.report.deletes, 0);
+check('"对方删过的"这个数同样是 0', yChanges.report.extraDeletes, 0);
+await executeBundlePlan(yChanges, applyOptions(Y, STATE_Y, FILE_CHANGES));
+check('应用之后那个文件还在（更新包只动它提到的东西）', read(Y, 'notes/keep.md'), 'KEEP');
+check('包里点名删的、本地没有的：什么都不用做', yChanges.report.keptDeletes, 0);
+
+// 另一半：**完整包**才是完整清单 —— 基准里有、包里没有 = 对方删过它 → 跟着删
+fs.rmSync(abs(Q, 'notes/keep.md'));
+const qFull2 = await exportBundle(exportOptions(Q, STATE_Q));
+checkTrue('再导一份不含 notes/keep.md 的完整包', qFull2.file !== null, qFull2.reason ?? '');
+const yFull2 = await planBundleApply(applyOptions(Y, STATE_Y, qFull2.file as string));
+check(
+	'完整包：对方删过的要跟着删（notes/a.md 是刚才更新包带进来的，这份完整包里也没有）',
+	yFull2.actions.filter(action => action.kind === 'delete').map(action => action.path),
+	['notes/a.md', 'notes/keep.md'],
+);
+await executeBundlePlan(yFull2, applyOptions(Y, STATE_Y, qFull2.file as string));
+check('删掉了', exists(Y, 'notes/keep.md'), false);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

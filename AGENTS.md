@@ -90,6 +90,12 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   本地侧 `.trash/locally-save/冲突/时间戳/`、副本侧 `.lsave/trash/冲突/时间戳/`），
   **不要留在原地** —— 留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份、越滚越多。
   两条通道（副本同步 / 应用同步包）都要守这条。
+- **更新包只按它点名的删除清单删文件**（`header.deleted`）：**"没提到"不等于"被删了"** ——
+  更新包只装自完整副本以来变过的文件，其余文件在包里根本不出现；照三方比对的结果翻译
+  `delete-local` 的话，接收方每个没被提到的文件都会被判成"对方删过它"（1 万文件的仓库 +
+  只改 1 个文件的更新包 → "删除 10203 个"，用户报过的 bug）。完整包才是"完整清单"，
+  那时"基准里有、包里没有"确实是对方删过它。目录那侧不受影响：更新包的 `emptyDirs`
+  是导出方**全部空文件夹**的清单（不是增量），所以"对方删了某个空文件夹"仍能正确识别。
 - **更新包是以完整包为基准累积的**（`state.bundle.fullFiles` / `fullGeneration` / `history`）：
   成员按"自完整包以来变过"挑，但每个条目的 `base` 用**上次导出**时的样子 ——
   这样按顺序应用的人零冲突；`history` 则是为了认出"对方跳过了几个包、手里是我发过的中间版本"。
@@ -118,7 +124,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 524 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 533 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
