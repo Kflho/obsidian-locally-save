@@ -27,6 +27,8 @@ export interface LastSyncRecord {
 	foldersCreated?: number;
 	/** 这一轮删掉了几个空文件夹（对面删了它，跟着删） */
 	foldersRemoved?: number;
+	/** 本该删、却删不掉的文件夹数（里面有被排除规则挡住的东西） */
+	foldersKept?: number;
 }
 
 /** 从一轮同步的结果里抽出要记的那部分 */
@@ -41,6 +43,7 @@ export function recordFromOutcome(outcome: SyncOutcome): LastSyncRecord {
 		durationMs: outcome.durationMs,
 		foldersCreated: outcome.result?.foldersCreated ?? 0,
 		foldersRemoved: outcome.result?.foldersRemoved ?? 0,
+		foldersKept: outcome.keptFolders.length,
 	};
 }
 
@@ -63,7 +66,11 @@ export function describeRecord(record: LastSyncRecord): string {
 		: describeChanges(record);
 	const size = record.copiedBytes > 0 ? `，${formatBytes(record.copiedBytes)}` : '';
 	const failed = record.failed > 0 ? `，失败 ${record.failed}` : '';
-	return `${head}${size}${failed}（${formatDuration(record.durationMs)}）`;
+	// 删不掉的文件夹要说原因，不然只有一句干巴巴的"删不掉"
+	const kept = (record.foldersKept ?? 0) > 0
+		? `，${record.foldersKept} 个文件夹没删掉（里面还有被排除的文件）`
+		: '';
+	return `${head}${size}${failed}${kept}（${formatDuration(record.durationMs)}）`;
 }
 
 /** 状态栏那一行（重启之后也照这个显示） */

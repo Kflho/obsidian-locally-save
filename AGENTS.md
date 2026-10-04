@@ -49,6 +49,9 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
     "上传"（本地说了算），在包的方向上被过滤掉，那样就不叫"以包为准"了；
   - 强制两档**必然先备份**（`keepBackup` 忽略用户设置）：关掉回收 + 强制 = 不可恢复的批量删除，不给这个组合留口子；
   - `mirror` 会删掉"本机新建的文件"，所以界面上必须额外确认，且它是唯一会这么干的一档。
+  - **更新包只开放 `normal`**：引擎层直接 clamp（`strictnessDowngraded` 标出来），界面同时把
+    那两个选项 `disabled` 掉。更新包里只有变过的文件，配上"强制/清老的"会把仓库里其余文件
+    全当成"该删"——一次清空。这条不能只靠界面提示（用户可能先选方式、再换包）。
 - **应用有模块级串行锁**（`bundle/apply.ts` 里的 `applying`）：同步那边有 plugin 层锁，应用这边以前没有，
   两个对话框一起点会互相踩着写同一批文件。
 - **目录（含空文件夹）要建，也要删 —— 但删必须过基准检查**：`scanTree` 除了文件还要收 `dirs`；
@@ -59,12 +62,21 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **目录的删除只能走 `removeEmptyDir`（`rmdir`）**：非空必然失败，所以清单漏看了文件
   （被排除规则挡住的那种）也只会"没删掉"。里面有文件的目录一律不归目录规则管（`dirsContainingFiles`），
   交给文件规则；被文件删除腾空的目录由 `pruneEmptyDirsDetailed` 顺手收拾。
+  **删除清单必须"深的排前面"**（`byDepthDesc`）：父子都要删时先删父目录会被"非空"挡住，
+  一轮只清掉最深的一层 —— 用户看到的就是"应用一次删不干净、每次多删几个"（报过的 bug）。
+  **计划里的空目录还要按磁盘复核**（`pickRemovableEmptyDirs`）：扫描清单看不见被排除规则挡住的东西
+  （`*.lsave`、`desktop.ini`…），`rmdir` 却会失败；复核时**从深到浅累计**，一个目录算"能删"
+  要么本来就空、要么里面的东西全是这次要删的子目录。复核不掉的**如实报出来**
+  （`SyncOutcome.keptFolders` / `ApplyReport.foldersKept`，通知里也写一句原因），
+  并把它记进目录基准 —— 否则下一轮会把它当"新目录"重新建到对面去（用户明明删过它）。
   已经要写文件的目录会被 `copyFilePreservingMtime` 里的 `ensureDir` 顺带建出来，
   所以 `folders` 要跳过这些（`receivingSide()` + `implied`），否则界面上会重复报数。
   同步包那头：包里的目录集 = `header.emptyDirs` ＋ 条目的上级目录（`dirsInBundle`）；
   `mirror` 删掉本地所有"包里没有"的空目录（它的承诺就是完全一致）、
   `bundle-wins` / `normal` 只删 `state.bundle.dirs` 里记过的（＝对方删过它，`normal` 还要看开关）。
   应用/导出后 `state.bundle.dirs` 只记**两边都见过**的目录。目录位置杵着同名文件时**报失败不硬来**。
+  报告里**文件与文件夹都要报**（包里几个、本地几个、一致几个、要建几个、要删几个、留着几个）——
+  只报文件的话，用户永远不知道目录这边差多少。
 - **目录 / 文件冲突**（本地同路径是文件夹、包里是文件）：`normal` 档报成明确失败、**不动那个文件夹**；
   强制两档才把它挪进回收目录腾位置。
 - **上一次应用的结果必须落盘**：`state.bundle.files` 只记**两边都见过、且这次真的写成了一致**的路径 ——
@@ -101,7 +113,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 464 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 500 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

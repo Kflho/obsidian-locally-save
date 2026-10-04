@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { ensureDir } from '../sync/disk';
+import { YIELD_EVERY, yieldToUi } from '../utils/async';
 
 /**
  * 同步包（`.lsave`）的容器格式。
@@ -193,6 +194,7 @@ export async function writeBundle(
 
 		const payloadHash = createHash('sha256');
 		const buffer = Buffer.alloc(CHUNK);
+		let chunks = 0;
 
 		for (const source of sources) {
 			const sourceHandle = await fs.promises.open(source.abs, 'r');
@@ -206,6 +208,8 @@ export async function writeBundle(
 					await handle.write(buffer, 0, bytesRead, position);
 					position += bytesRead;
 					written += bytesRead;
+					// 导一个几百 MB 的完整包要好几秒：中途让出事件循环，界面才不会僵在那儿
+					if (++chunks % YIELD_EVERY === 0) await yieldToUi();
 				}
 				if (written !== source.size) {
 					throw new Error(
@@ -322,12 +326,15 @@ export async function verifyBundle(file: string, info: BundleInfo): Promise<bool
 		const hash = createHash('sha256');
 		const buffer = Buffer.alloc(CHUNK);
 		let read = 0;
+		let chunks = 0;
 		while (read < info.header.payloadBytes) {
 			const want = Math.min(CHUNK, info.header.payloadBytes - read);
 			const { bytesRead } = await handle.read(buffer, 0, want, info.payloadOffset + read);
 			if (bytesRead <= 0) break;
 			hash.update(buffer.subarray(0, bytesRead));
 			read += bytesRead;
+			// 几百 MB 的包要读好几秒：中途让出事件循环，界面才不会僵在那儿
+			if (++chunks % YIELD_EVERY === 0) await yieldToUi();
 		}
 		return read === info.header.payloadBytes && hash.digest('hex') === info.trailer.payloadHash;
 	} finally {

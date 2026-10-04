@@ -168,6 +168,14 @@ export const SYNC_SECTION: FieldSection = {
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
 				},
+				{
+					key: 'bundleDialogFullscreen',
+					name: '打开包时铺满窗口',
+					desc: '把「应用同步包」对话框铺满整个 Obsidian 窗口：长报告与长列表一眼能看到底，'
+						+ '不用在小盒子里滚（那种"界面卡住了"的错觉多半就是这么来的）。对话框里也有同一个开关',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleDialogFullscreen),
+				},
 			],
 			actions: [
 				{

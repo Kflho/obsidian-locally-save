@@ -78,7 +78,10 @@ export class Modal {
 	constructor(app) {
 		this.app = app;
 		this.contentEl = makeEl();
+		// 真实 Obsidian 里 .modal 是外层容器（插件往它上面加类，比如"铺满窗口"）
+		this.modalEl = makeEl();
 		this.opened = false;
+		Modal.instances.push(this);
 	}
 	open() {
 		this.opened = true;
@@ -89,6 +92,8 @@ export class Modal {
 		this.onClose?.();
 	}
 }
+/** 建过的弹窗，按顺序记下来：测试要核对"打开时有没有铺满窗口"这类行为 */
+Modal.instances = [];
 
 /** 通知替身：只记录消息，便于断言"操作结果有提示" */
 export class Notice {

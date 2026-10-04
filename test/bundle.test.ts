@@ -571,7 +571,11 @@ check('有文件的目录不算「空文件夹」', (qInfo.header.emptyDirs ?? [
 
 const R_FILE = qExport.file as string;
 const qPlan = await planBundleApply(applyOptions(R, STATE_R, R_FILE));
-check('报告里说清了要补建几个文件夹', [qPlan.report.bundle.emptyDirCount, qPlan.report.foldersToCreate], [3, 3]);
+check(
+	'报告里说清了文件夹的情况（包里几个 / 要补建几个）',
+	[qPlan.report.bundleDirCount, qPlan.report.bundle.emptyDirCount, qPlan.report.foldersToCreate],
+	[4, 3, 4],
+);
 check('建文件夹不算文件条目', qPlan.report.adds, 1);
 const qResult = await executeBundlePlan(qPlan, applyOptions(R, STATE_R, R_FILE));
 check(
@@ -682,6 +686,62 @@ const uResult = await executeBundlePlan(uMirror, applyOptions(U, STATE_U, R_FILE
 check('强制一致：多余的文件被删掉', exists(U, '自己的一摊/mine.md'), false);
 check('腾空的目录跟着收拾掉（不是靠目录规则删的）', exists(U, '自己的一摊'), false);
 check('结果里也算进了清理数', uResult.foldersRemoved, 1);
+
+// 21. 更新包 + 破坏性方式 → **引擎层直接降级**（不能只靠界面提示）
+// 更新包里只装了变过的文件，拿它"清老的/强制应用"会把仓库里其余文件全当"该删"
+const V = path.join(ROOT, 'machineV');
+const STATE_V = path.join(ROOT, 'state-v.json');
+fs.mkdirSync(V, { recursive: true });
+write(V, 'notes/keep.md', 'KEEP'); // 更新包里没有它
+const vPlan = await planBundleApply(applyOptions(V, STATE_V, FILE_CHANGES, { strictness: 'mirror' }));
+check('更新包用强制档 → 降级成默认档', vPlan.report.strictness, 'normal');
+check('报告里标出"被降级了"（界面要说明白）', vPlan.report.strictnessDowngraded, true);
+check('报告里 forced 也不再成立', vPlan.report.forced, false);
+check(
+	'没有把"包里没提到的文件"当成该删',
+	vPlan.actions.filter(action => action.kind === 'delete').map(action => action.path),
+	[],
+);
+await executeBundlePlan(vPlan, applyOptions(V, STATE_V, FILE_CHANGES, { strictness: 'mirror' }));
+check('仓库里那个文件还在（没被清空）', read(V, 'notes/keep.md'), 'KEEP');
+check(
+	'完整包不受影响：强制档照旧生效',
+	(await planBundleApply(applyOptions(V, STATE_V, R_FILE, { strictness: 'mirror' }))).report.strictness,
+	'mirror',
+);
+
+// 22. 嵌套的空目录：强制档**一轮就删干净**
+// （父目录排在子目录前面时 rmdir 会被"非空"挡住，一轮只清掉最深的一层 —— 报过的 bug）
+fs.mkdirSync(abs(V, '树/子/孙'), { recursive: true });
+const vNested = await planBundleApply(applyOptions(V, STATE_V, R_FILE, { strictness: 'mirror' }));
+check(
+	'删除清单是深的排前面',
+	vNested.foldersToRemove.filter(dir => dir.startsWith('树')),
+	['树/子/孙', '树/子', '树'],
+);
+const vNestedResult = await executeBundlePlan(vNested, applyOptions(V, STATE_V, R_FILE, { strictness: 'mirror' }));
+check('一轮就删干净', exists(V, '树'), false);
+check('清理数对得上', vNestedResult.foldersRemoved, 3);
+check(
+	'再打开一次这个包：已经没有多余目录可删',
+	(await planBundleApply(applyOptions(V, STATE_V, R_FILE, { strictness: 'mirror' }))).report.foldersToRemove,
+	0,
+);
+
+// 23. 目录里只有被排除规则挡住的东西 → **不列进删除**，而是报成"留着"
+// （清单里看不见 desktop.ini，rmdir 却会失败：不按磁盘复核的话就是"每轮都删但它就是不走"）
+const W = path.join(ROOT, 'machineW');
+const STATE_W = path.join(ROOT, 'state-w.json');
+fs.mkdirSync(W, { recursive: true });
+write(W, '有隐藏东西的/desktop.ini', 'x');
+const wPlan = await planBundleApply(applyOptions(W, STATE_W, R_FILE, { strictness: 'mirror' }));
+check('不列进"要删"', wPlan.foldersToRemove, []);
+check('报成"留着"（界面会说明原因）', wPlan.report.foldersKept, 1);
+check('报告里的文件夹总数也说得清', [wPlan.report.bundleDirCount, wPlan.report.localDirCount], [4, 1]);
+const wResult = await executeBundlePlan(wPlan, applyOptions(W, STATE_W, R_FILE, { strictness: 'mirror' }));
+check('被排除的文件没被删', read(W, '有隐藏东西的/desktop.ini'), 'x');
+check('文件夹也还在', exists(W, '有隐藏东西的'), true);
+check('而且不算失败', wResult.failed.map(item => item.path), []);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

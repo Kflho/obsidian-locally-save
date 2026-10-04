@@ -1,5 +1,8 @@
 import type { SyncProgress } from '../sync/runner';
 
+/** 状态栏进度最多多久写一次 DOM（毫秒） */
+export const PROGRESS_THROTTLE_MS = 100;
+
 /**
  * 状态栏那一格：同步中显示进度，平时显示上次同步的结果。
  *
@@ -10,6 +13,9 @@ export class SyncStatusBar {
 	private el: HTMLElement;
 	private summary = '尚未同步';
 	private visible = true;
+	/** 上一次真的写了 DOM 的时间与文字（进度更新要节流，见 showProgress） */
+	private lastProgressAt = 0;
+	private lastProgressText = '';
 
 	constructor(el: HTMLElement) {
 		this.el = el;
@@ -22,13 +28,26 @@ export class SyncStatusBar {
 		this.render();
 	}
 
-	/** 同步进行中：显示 done/total；传 null 表示收工（回到上次结果） */
+	/**
+	 * 同步进行中：显示 done/total；传 null 表示收工（回到上次结果）。
+	 *
+	 * **节流**：引擎是"每个文件报一次进度"，一万个文件就是一万次 `setText` ——
+	 * 光是这些 DOM 写入就够让界面发顿（用户报的"卡界面"里有它一份）。
+	 * 所以 100 毫秒内的重复更新直接丢掉，收工那一次（null）一定会写。
+	 */
 	showProgress(progress: SyncProgress | null): void {
 		if (!progress) {
+			this.lastProgressText = '';
 			this.render();
 			return;
 		}
-		this.el.setText(`同步中 ${progress.done}/${progress.total}`);
+		const text = `同步中 ${progress.done}/${progress.total}`;
+		if (text === this.lastProgressText) return;
+		const now = Date.now();
+		if (progress.done < progress.total && now - this.lastProgressAt < PROGRESS_THROTTLE_MS) return;
+		this.lastProgressAt = now;
+		this.lastProgressText = text;
+		this.el.setText(text);
 	}
 
 	/** 收工后写一句结果 */

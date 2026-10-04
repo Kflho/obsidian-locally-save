@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { toNative } from '../utils/paths';
+import { toNative, byDepthDesc } from '../utils/paths';
+import { YIELD_EVERY, yieldToUi } from '../utils/async';
 import { CONFLICT_TRASH_DIR, copyFilePreservingMtime, ensureDir, moveToTrash, pruneEmptyDirs, removeEmptyDir, removeFile, statFile } from './disk';
 import type { SyncAction, SyncPlan } from './types';
 
@@ -69,6 +70,8 @@ export async function executePlan(plan: SyncPlan, options: ExecuteOptions): Prom
 			});
 		}
 		done++;
+		// 长循环里让一步：不然界面在同步几百个文件时完全不重绘（"卡住了"就是这么来的）
+		if (done % YIELD_EVERY === 0) await yieldToUi();
 	}
 
 	// 目录：先把这次要新建的建出来（空文件夹就靠这一步传过去）
@@ -100,10 +103,22 @@ export async function executePlan(plan: SyncPlan, options: ExecuteOptions): Prom
 	result.foldersRemoved += await pruneEmptyDirs(options.targetRoot, vacated(['delete-remote', 'rename-remote']));
 
 	// 对面把空目录删了 → 这边跟着删。只走 rmdir：目录里但凡有东西就删不动，
-	// 所以这里不需要 base 之外的第二道保护（清单漏看的文件也伤不到）
-	for (const folder of plan.removedFolders ?? []) {
+	// 所以这里不需要 base 之外的第二道保护（清单漏看的文件也伤不到）。
+	// **深的先删**：父子都在清单里时，先删父目录会被"非空"挡住（这里再排一次，
+	// 不依赖上游的顺序 —— 少删一轮就是用户看到的"删不干净"）
+	for (const folder of [...(plan.removedFolders ?? [])].sort((a, b) => byDepthDesc(a.path, b.path))) {
 		const root = folder.side === 'remote' ? options.targetRoot : options.vaultRoot;
-		if (await removeEmptyDir(toNative(root, folder.path))) result.foldersRemoved++;
+		if (await removeEmptyDir(toNative(root, folder.path))) {
+			result.foldersRemoved++;
+			continue;
+		}
+		// 计划说它是空的、磁盘说它还有东西：多半是**被排除规则挡住的文件**
+		// （*.lsave、desktop.ini…）在清单里看不见。如实报出来，
+		// 不然就是"每轮都列着几十个、实际只删掉十几个"那种查不出的怪现象
+		result.failed.push({
+			path: folder.path,
+			error: '这个文件夹里还有东西（多半是被排除规则挡住的文件），只删空的，没有动它',
+		});
 	}
 
 	options.onProgress?.(done, total, '');

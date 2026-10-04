@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { dirnameRel, toNative } from '../utils/paths';
+import { byDepthDesc, dirnameRel, toNative } from '../utils/paths';
+import { YIELD_EVERY, yieldToUi } from '../utils/async';
 import { isExcluded } from './exclude';
 import type { FileRecord, Inventory } from './types';
 
@@ -61,6 +62,8 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 
 			const record = await statFile(toNative(root, rel));
 			if (record) files.set(rel, record);
+			// 一万个文件的全库遍历也要让界面喘气：每 N 个文件让一步
+			if (files.size > 0 && files.size % YIELD_EVERY === 0) await yieldToUi();
 		}
 	}
 
@@ -143,6 +146,56 @@ export async function dirExists(absPath: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * 这个目录里**真的**没有东西吗？
+ *
+ * 与"扫描清单里这个目录下没有文件"不是一回事：被排除规则挡住的东西
+ * （`*.lsave`、`desktop.ini`、`.DS_Store`…）在清单里根本看不见，
+ * 但 `rmdir` 照样会失败。所以计划"要删哪些空目录"之前得按磁盘问一次 ——
+ * 否则会出现"清单里几十个、实际只删掉十几个，而且每轮都这样"。
+ */
+export async function isEmptyDir(absPath: string): Promise<boolean> {
+	try {
+		const entries = await fs.promises.readdir(absPath);
+		return entries.length === 0;
+	} catch {
+		// 不存在 / 读不到：当成"没什么可删的"，交给调用方按失败处理
+		return false;
+	}
+}
+
+/**
+ * 从候选里挑出**真的能删掉**的空目录。
+ *
+ * 两个坑都要躲开：
+ * 1. 被排除规则挡住的东西在清单里看不见，`rmdir` 却会失败（→ 按磁盘问一次）；
+ * 2. 父目录要等子目录都没了才可能是空的 —— 所以**从深到浅**累计：
+ *    一个目录算"能删"，要么它本来就空，要么它里面的东西**全都是**这次要删的子目录。
+ *
+ * 返回 `{ removable, kept }`：`kept` 是"想删但里面还有东西"的，界面要如实说清楚，
+ * 不然就是"每轮都列着几十个、实际只删掉十几个"那种查不出的怪现象。
+ */
+export async function pickRemovableEmptyDirs(
+	root: string,
+	candidates: string[],
+): Promise<{ removable: string[]; kept: string[] }> {
+	const removable = new Set<string>();
+	const kept: string[] = [];
+	for (const dir of [...candidates].sort(byDepthDesc)) {
+		let entries: string[];
+		try {
+			entries = await fs.promises.readdir(toNative(root, dir));
+		} catch {
+			kept.push(dir); // 读不到（不存在 / 没权限）：不硬来
+			continue;
+		}
+		// 里面每一样都得是"这次也要删掉的子目录"，才轮得到它
+		if (entries.every(name => removable.has(`${dir}/${name}`))) removable.add(dir);
+		else kept.push(dir);
+	}
+	return { removable: [...removable].sort(byDepthDesc), kept: kept.sort(byDepthDesc) };
 }
 
 export async function ensureDir(absDir: string): Promise<void> {

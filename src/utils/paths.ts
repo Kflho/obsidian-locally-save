@@ -50,3 +50,22 @@ export function conflictName(rel: string, stamp: string, label = '冲突副本')
 	const renamed = `${stem} (${label} ${stamp})${ext}`;
 	return dir ? `${dir}/${renamed}` : renamed;
 }
+
+/** 路径有几层（顶层是 1） */
+export function depthOf(rel: string): number {
+	return rel ? rel.split('/').length : 0;
+}
+
+/**
+ * **深的排前面**：删目录必须按这个顺序。
+ *
+ * `rmdir` 对非空目录会失败，而父子目录同时要删时，父目录里还挂着子目录 ——
+ * 先删父目录必然失败，这一轮就只删掉了最深的那一层，用户看到的是
+ * "应用一次包文件夹删不干净，每次只多删几个"（报过的 bug）。
+ * 同层之间按码位排，结果与系统语言无关。
+ */
+export function byDepthDesc(a: string, b: string): number {
+	const diff = depthOf(b) - depthOf(a);
+	if (diff !== 0) return diff;
+	return a < b ? -1 : a > b ? 1 : 0;
+}
