@@ -45,6 +45,7 @@ type Stub = {
 	settingTabs: unknown[];
 	saved: unknown[];
 	stubData: unknown;
+	domEvents: { name: string; options?: { capture?: boolean } }[];
 };
 
 /** 造一个插件：stubData 就是喂给 loadData() 的 data.json 内容 */
@@ -93,6 +94,21 @@ checkTrue(
 	"状态文件放在插件目录里",
 	plugin.stateFile().includes('locally-save/sync-state.json'),
 	plugin.stateFile(),
+);
+
+// 2b. 全局拖放：onload 时挂了窗口级处理，而且要挂在捕获阶段
+// （不挂 dragover 的话浏览器根本不派发 drop；不在捕获阶段就抢不到 .lsave）
+checkTrue(
+	"注册了窗口级 dragover（否则 drop 不会派发）",
+	stub.domEvents.some(event => event.name === 'dragover'),
+	JSON.stringify(stub.domEvents.map(event => event.name)),
+);
+const dropHandlers = stub.domEvents.filter(event => event.name === 'drop');
+checkTrue("注册了窗口级 drop", dropHandlers.length > 0, '没注册');
+checkTrue(
+	"drop 挂在捕获阶段（要抢在 Obsidian 把包当附件导入之前）",
+	dropHandlers.every(event => event.options?.capture === true),
+	JSON.stringify(dropHandlers.map(event => event.options)),
 );
 
 // 3. 没设置目标文件夹时，报错要说得像人话（而不是抛个栈）

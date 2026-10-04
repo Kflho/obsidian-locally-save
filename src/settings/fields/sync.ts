@@ -155,6 +155,14 @@ export const SYNC_SECTION: FieldSection = {
 			heading: '同步包：应用',
 			fields: [
 				{
+					key: 'dropBundleToApply',
+					name: '拖入 .lsave 即打开应用对话框',
+					desc: '把 .lsave 文件直接拖到 Obsidian 窗口上，自动打开这个对话框并填好路径（等同于在这里粘路径）。'
+						+ '只拦 .lsave，往笔记里拖图片、拖别的文件一概不受影响；关掉的话拖进来会交给 Obsidian 自己处理',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.dropBundleToApply),
+				},
+				{
 					key: 'bundleVerify',
 					name: '应用前校验完整性',
 					desc: '把整个包读一遍算校验和，确认传输（U 盘、网盘）没把文件弄坏。包很大时这一步会多花几秒',

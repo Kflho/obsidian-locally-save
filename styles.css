@@ -114,6 +114,32 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* 拖放区：把 .lsave 文件拖进对话框，等同于粘路径 */
+.locally-save-drop {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.2em;
+	margin: 0.5em 0 1em;
+	padding: 1.2em;
+	border: 2px dashed var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	text-align: center;
+}
+
+/* 拖着东西悬在上面时高亮，让人知道"松手就行" */
+.locally-save-drop.is-over {
+	border-color: var(--interactive-accent);
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.locally-save-drop-sub {
+	color: var(--text-faint);
+}
+
 /* 同步包报告区 */
 .locally-save-report h3 {
 	margin: 1em 0 0.3em;

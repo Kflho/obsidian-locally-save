@@ -15,6 +15,7 @@ const entryPoints = [
 	"test/diff.test.ts",
 	"test/sync.test.ts",
 	"test/bundle.test.ts",
+	"test/drop.test.ts",
 	"test/settings.test.ts",
 	"test/commands.test.ts",
 ];

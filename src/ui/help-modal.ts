@@ -33,7 +33,8 @@ export class BundleHelpModal extends Modal {
 			text: '把生成的 .lsave 文件拷到另一台机器（U 盘、网盘、聊天软件，怎么拷都行）',
 		});
 		steps.createEl('li', {
-			text: '在那台机器上应用：下面的「打开同步包并应用…」按钮 → 选中文件 → 先看报告 → 再点应用',
+			text: '在那台机器上应用：**直接把 .lsave 拖到 Obsidian 窗口上**，会自动打开应用对话框并填好路径；'
+				+ '也可以点下面的「打开同步包并应用…」再选文件 → 先看报告 → 再点应用',
 		});
 
 		contentEl.createEl('h3', { text: '两种包，什么时候用哪个' });
