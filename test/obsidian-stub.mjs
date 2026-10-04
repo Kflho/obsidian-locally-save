@@ -121,6 +121,7 @@ export class Setting {
 			cta: false,
 			disabled: false,
 			setButtonText(text) { this.text = text; return this; },
+			setIcon(icon) { this.icon = icon; return this; },
 			setCta() { this.cta = true; return this; },
 			setDisabled(value) { this.disabled = value; return this; },
 			setTooltip() { return this; },
@@ -216,6 +217,14 @@ export class Plugin {
 }
 
 export const Platform = { isWin: true, isMacOS: false, isLinux: false, isMobile: false, isDesktop: true };
+
+/**
+ * 图标清单：真实 Obsidian 里是内置的 Lucide 全集。
+ * 测试里给几个名字，让 pickIcon 有机会命中；没命中就用兜底名。
+ */
+export function getIconIds() {
+	return ['refresh-cw', 'package', 'package-open', 'hard-drive', 'archive', 'import', 'save', 'download', 'upload', 'file'];
+}
 
 export function normalizePath(p) {
 	return p;

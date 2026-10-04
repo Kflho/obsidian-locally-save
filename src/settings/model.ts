@@ -114,8 +114,12 @@ export interface PluginSettings {
 	autoExportFull: boolean;
 
 	// ------------------------------------------------------------ 界面
-	/** 在左侧栏放一个插件图标 */
-	ribbonIcon: boolean;
+	/** 左侧栏：立即同步到本地副本 */
+	ribbonSyncIcon: boolean;
+	/** 左侧栏：导出同步包 */
+	ribbonExportIcon: boolean;
+	/** 左侧栏：打开同步包并应用 */
+	ribbonApplyIcon: boolean;
 	/** 在右下角状态栏显示状态 */
 	showStatusBar: boolean;
 }
@@ -148,7 +152,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	autoExportChanges: false,
 	autoExportFull: false,
 
-	ribbonIcon: true,
+	ribbonSyncIcon: true,
+	ribbonExportIcon: true,
+	ribbonApplyIcon: true,
 	showStatusBar: true,
 };
 
@@ -235,7 +241,10 @@ export function settingsFrom(data: unknown): PluginSettings {
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 
-		ribbonIcon: coerceBoolean(raw.ribbonIcon, DEFAULT_SETTINGS.ribbonIcon),
+		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
+		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),
+		ribbonExportIcon: coerceBoolean(raw.ribbonExportIcon, DEFAULT_SETTINGS.ribbonExportIcon),
+		ribbonApplyIcon: coerceBoolean(raw.ribbonApplyIcon, DEFAULT_SETTINGS.ribbonApplyIcon),
 		showStatusBar: coerceBoolean(raw.showStatusBar, DEFAULT_SETTINGS.showStatusBar),
 	};
 }
