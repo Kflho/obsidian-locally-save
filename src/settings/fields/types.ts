@@ -11,16 +11,31 @@ import type { PluginSettings } from '../model';
  * 换插件时只需换 `T`（默认就是本插件的 PluginSettings）。
  */
 
+/**
+ * 输入框的灰底提示。
+ *
+ * 允许传函数是因为**默认值可能依赖别的设置**（例如"同步包文件夹留空就跟着目标文件夹走"）——
+ * 这种提示要能跟着变。直接给字符串时就是普通提示。
+ */
+export type PlaceholderSpec<T = PluginSettings> = string | ((settings: T) => string);
+
 /** 控件形态：决定渲染成下拉框 / 开关 / 输入框，也决定声明式定义里的 control.type */
-export type ControlSpec =
+export type ControlSpec<T = PluginSettings> =
 	/** 开关 */
 	| { type: 'toggle' }
 	/** 单行输入框 */
-	| { type: 'text'; placeholder: string }
+	| { type: 'text'; placeholder: PlaceholderSpec<T> }
 	/** 多行输入框（一行的列表用它，如"每行一个菜单项"） */
-	| { type: 'textarea'; placeholder: string; rows: number }
+	| { type: 'textarea'; placeholder: PlaceholderSpec<T>; rows: number }
 	/** 下拉框：取值 → 显示文案 */
 	| { type: 'dropdown'; options: Record<string, string> };
+
+/** 取某个控件此刻该显示的灰底提示 */
+export function placeholderOf<T>(control: ControlSpec<T>, settings: T): string {
+	if (control.type !== 'text' && control.type !== 'textarea') return '';
+	const placeholder = control.placeholder;
+	return typeof placeholder === 'function' ? placeholder(settings) : placeholder;
+}
 
 /** 一条设置项 */
 export interface FieldSpec<T = PluginSettings> {
@@ -30,7 +45,7 @@ export interface FieldSpec<T = PluginSettings> {
 	name: string;
 	/** 说明文字（旧版 DOM 走 setDesc，声明式走 desc） */
 	desc?: string;
-	control: ControlSpec;
+	control: ControlSpec<T>;
 	/**
 	 * 取值收敛：data.json 里可能是旧版本没有的字段或手工改坏的值。
 	 * 读（getControlValue）与写（setControlValue）都过这一套，免得下拉框显示成空白。

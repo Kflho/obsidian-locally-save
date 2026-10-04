@@ -4,6 +4,7 @@ import type LocallySavePlugin from '../main';
 import { DEFAULT_SETTINGS } from './model';
 import type { PluginSettings } from './model';
 import { FIELD_INDEX, SETTINGS_SECTIONS } from './fields';
+import { placeholderOf } from './fields/types';
 import type { ActionSpec, FieldSpec } from './fields';
 
 /**
@@ -118,16 +119,19 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			}
 			case 'text': {
 				const value = this.getControlValue(field.key);
+				// 灰底提示可能是动态的（"留空＝跟着目标文件夹走"这类）
+				const placeholder = placeholderOf(field.control, settings);
 				setting.addText(text => text
-					.setPlaceholder(field.control.type === 'text' ? field.control.placeholder : '')
+					.setPlaceholder(placeholder)
 					.setValue(typeof value === 'string' ? value : '')
 					.onChange(write));
 				return;
 			}
 			case 'textarea': {
 				const value = this.getControlValue(field.key);
+				const placeholder = placeholderOf(field.control, settings);
 				setting.addTextArea(text => text
-					.setPlaceholder(field.control.type === 'textarea' ? field.control.placeholder : '')
+					.setPlaceholder(placeholder)
 					.setValue(typeof value === 'string' ? value : '')
 					.onChange(write));
 				return;
@@ -181,8 +185,10 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			key: field.key,
 			defaultValue: DEFAULT_SETTINGS[field.key],
 			...(field.control.type === 'dropdown' ? { options: field.control.options } : {}),
-			...(field.control.type === 'text' ? { placeholder: field.control.placeholder } : {}),
-			...(field.control.type === 'textarea' ? { placeholder: field.control.placeholder, rows: field.control.rows } : {}),
+			...(field.control.type === 'text' ? { placeholder: placeholderOf(field.control, settings()) } : {}),
+			...(field.control.type === 'textarea'
+				? { placeholder: placeholderOf(field.control, settings()), rows: field.control.rows }
+				: {}),
 			...(field.disabled ? { disabled: () => field.disabled?.(settings()) === true } : {}),
 		};
 		const definition = {

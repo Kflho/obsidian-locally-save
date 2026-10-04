@@ -355,6 +355,11 @@ check(
 );
 check('目标文件夹也没填 → 空串（调用方要提示去填）', bundleBaseDir(base, ''), '');
 check(
+	'对话框里把输入框清空 → 回落到默认，而不是"没填路径"',
+	bundleBaseDir({ ...base, bundleDir: '' }, 'D:/vault-copy'),
+	'D:/vault-copy/.lsave/bundles',
+);
+check(
 	'完整包与改动包分两个目录',
 	[bundleDirForMode('D:/x', 'full'), bundleDirForMode('D:/x', 'changes')],
 	['D:/x/full', 'D:/x/changes'],

@@ -27,7 +27,10 @@ const MAX_ROWS = 200;
 export class ExportBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
 	private mode: 'full' | 'changes';
+	/** 用户自己填的值（可能为空 ＝ 用默认） */
 	private outDir: string;
+	/** 留空时会用的默认位置：显示成灰底提示，而不是预先填进输入框 */
+	private defaultDir: string;
 	private statusEl!: HTMLElement;
 	private whereEl!: HTMLElement;
 
@@ -35,8 +38,15 @@ export class ExportBundleModal extends Modal {
 		super(app);
 		this.plugin = plugin;
 		this.mode = plugin.settings.bundleMode;
-		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
-		this.outDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		// 只显示"用户自己填的"；留空就是留空，别把默认值预先填进去 ——
+		// 那样用户一删就变成"没填路径"，还得自己猜默认在哪儿
+		this.outDir = plugin.settings.bundleDir.trim();
+		this.defaultDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+	}
+
+	/** 此刻实际会用的根目录：填了用填的，留空就跟着目标文件夹走 */
+	private effectiveDir(): string {
+		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.outDir }, this.plugin.settings.targetDir);
 	}
 
 	onOpen(): void {
@@ -66,9 +76,9 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('留空＝跟着同步目标文件夹走；完整包与改动包分别放在它的 full 与 changes 子目录里')
+			.setDesc('留空＝跟着目标文件夹走（灰字就是那个位置）；完整包与更新包分别放在它的 full 与 changes 子目录里')
 			.addText(text => text
-				.setPlaceholder('例如 D:\\传输')
+				.setPlaceholder(this.defaultDir || '先填设置里的「目标文件夹」，或在这里指定一个路径')
 				.setValue(this.outDir)
 				.onChange(value => {
 					this.outDir = value.trim();
@@ -91,16 +101,20 @@ export class ExportBundleModal extends Modal {
 
 	/** 让用户看清"这个包会落到哪个目录" */
 	private renderWhere(): void {
-		if (!this.outDir) {
-			this.whereEl.setText('还没填文件夹：先在设置里填「目标文件夹」，或在这里填一个路径。');
+		const base = this.effectiveDir();
+		if (!base) {
+			this.whereEl.setText('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个路径。');
 			return;
 		}
-		this.whereEl.setText(`会写到：${bundleDirForMode(this.outDir, this.mode)}`);
+		const hint = this.outDir === '' ? '（留空＝跟着目标文件夹）' : '';
+		this.whereEl.setText(`会写到：${bundleDirForMode(base, this.mode)}${hint}`);
 	}
 
 	private async run(): Promise<void> {
-		if (!this.outDir) {
-			new Notice('请先填同步包文件夹（留空则需要在设置里填目标文件夹）');
+		// 留空 ＝ 用默认（跟着目标文件夹走），不是"没填路径"
+		const outDir = this.effectiveDir();
+		if (!outDir) {
+			new Notice('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个同步包文件夹');
 			return;
 		}
 		this.statusEl.setText('正在导出……');
@@ -111,7 +125,7 @@ export class ExportBundleModal extends Modal {
 				vaultRoot: this.plugin.vaultRoot(),
 				vaultName: this.plugin.vaultName(),
 				stateFile: this.plugin.stateFile(),
-				outDir: this.outDir,
+				outDir,
 				configDir: this.plugin.configDir(),
 				onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file }),
 			});
@@ -152,7 +166,10 @@ export class ExportBundleModal extends Modal {
  */
 export class ApplyBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
+	/** 用户自己填的值（可能为空 ＝ 用默认） */
 	private dir: string;
+	/** 留空时会用的默认位置：显示成灰底提示 */
+	private defaultDir: string;
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
 	/** 应用方式：默认最保守的「所有都保留」 */
@@ -172,8 +189,9 @@ export class ApplyBundleModal extends Modal {
 	constructor(app: App, plugin: LocallySavePlugin, initialPath?: string) {
 		super(app);
 		this.plugin = plugin;
-		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
-		this.dir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		// 只显示"用户自己填的"，留空就是留空（灰字提示默认位置）
+		this.dir = plugin.settings.bundleDir.trim();
+		this.defaultDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
 		this.keepBackup = plugin.settings.deletedToTrash;
 		// 配了副本就默认顺手同步 —— 不然备份会在应用完包之后悄悄落后一截
 		this.alsoSyncCopy = plugin.settings.targetDir.trim() !== '';
@@ -199,11 +217,14 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('留空＝跟着同步目标文件夹走。会列出它的 full 与 changes 两个子目录里的包')
+			.setDesc('留空＝跟着目标文件夹走（灰字就是那个位置）。会列出它的 full 与 changes 两个子目录里的包')
 			.addText(text => text
-				.setPlaceholder('例如 D:\\传输')
+				.setPlaceholder(this.defaultDir || '先填设置里的「目标文件夹」，或在这里指定一个路径')
 				.setValue(this.dir)
-				.onChange(value => { this.dir = value.trim(); }))
+				.onChange(value => {
+					this.dir = value.trim();
+					void this.refresh();
+				}))
 			.addExtraButton(button => button
 				.setIcon('refresh-cw')
 				.setTooltip('重新列出')
@@ -291,18 +312,24 @@ export class ApplyBundleModal extends Modal {
 		}
 	}
 
+	/** 此刻实际要去找的根目录：填了用填的，留空就跟着目标文件夹走 */
+	private effectiveDir(): string {
+		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir }, this.plugin.settings.targetDir);
+	}
+
 	private async refresh(): Promise<void> {
 		this.listEl.empty();
-		if (!this.dir) {
-			this.listEl.setText('（没填文件夹，可直接在下面粘包文件路径）');
+		const base = this.effectiveDir();
+		if (!base) {
+			this.listEl.setText('（还没法确定位置：可先在设置里填「目标文件夹」，或在下面直接粘包文件路径）');
 			return;
 		}
 
 		// 两个子目录都看，列表里标出包来自哪一类
 		const found: { file: string; label: string; size: number; mtime: number }[] = [];
-		for (const dir of bundleDirsToScan(this.dir)) {
+		for (const dir of bundleDirsToScan(base)) {
 			const segments = dir.split(/[/\\]/);
-			const sub = dir === this.dir ? '' : `${segments[segments.length - 1] ?? ''}/`;
+			const sub = dir === base ? '' : `${segments[segments.length - 1] ?? ''}/`;
 			for (const item of await listFiles(dir)) {
 				if (!item.name.endsWith('.lsave')) continue;
 				found.push({
