@@ -104,8 +104,13 @@ export interface PluginSettings {
 	bundleVerify: boolean;
 	/** 把 .lsave 拖到 Obsidian 窗口上时，自动打开"应用同步包"对话框 */
 	dropBundleToApply: boolean;
-	/** 打开"应用同步包"对话框时铺满整个窗口（长报告、长列表不用在小盒子里滚） */
-	bundleDialogFullscreen: boolean;
+	/**
+	 * 打开"应用同步包"对话框时，把 **Obsidian 窗口本身**顶到最大并叫到前台。
+	 *
+	 * 应用一个包要跑"扫仓库 + 校验 + 写文件"，这期间界面只有一句"正在……"：
+	 * 窗口小、或者还在后面，看着就像卡死了。
+	 */
+	bundleWindowMaximize: boolean;
 	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
 	rememberFingerprints: boolean;
 	/** 每次同步成功后，把这一次的改动导成一个包（几乎不额外花时间） */
@@ -146,7 +151,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	bundleDir: '',
 	bundleVerify: true,
 	dropBundleToApply: true,
-	bundleDialogFullscreen: true,
+	bundleWindowMaximize: true,
 	rememberFingerprints: true,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
@@ -236,7 +241,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
-		bundleDialogFullscreen: coerceBoolean(raw.bundleDialogFullscreen, DEFAULT_SETTINGS.bundleDialogFullscreen),
+		bundleWindowMaximize: coerceBoolean(raw.bundleWindowMaximize, DEFAULT_SETTINGS.bundleWindowMaximize),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),

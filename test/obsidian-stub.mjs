@@ -12,7 +12,15 @@
  * 这里有兜底，源码里就不用为了测试写 `typeof window` 判断。
  */
 if (typeof globalThis.window === 'undefined') {
-	globalThis.window = { setInterval: () => 0, clearInterval: () => {} };
+	globalThis.window = {
+		setInterval: () => 0,
+		clearInterval: () => {},
+		// 窗口最大化的兜底路径：Electron 的渲染进程支持 moveTo/resizeTo，
+		// 测试里记下来供断言（真实环境里这两个是真的会动窗口的）
+		screen: { availWidth: 1920, availHeight: 1080 },
+		moveTo: (x, y) => { globalThis.window.movedTo = [x, y]; },
+		resizeTo: (width, height) => { globalThis.window.resizedTo = [width, height]; },
+	};
 }
 
 /** Obsidian 提供的当前窗口文档（插件用它挂全局拖放） */

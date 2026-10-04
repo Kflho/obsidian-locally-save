@@ -5,10 +5,9 @@
  * 让用户配好的快捷键失效，所以这里钉死。
  */
 import type { PluginManifest } from "obsidian";
-import { App, Modal, Notice } from "obsidian";
+import { App, Notice } from "obsidian";
 import LocallySavePlugin from "../src/main";
 import { ApplyBundleModal } from "../src/ui/bundle-modal";
-import { FULLSCREEN_MODAL_CLASS } from "../src/ui/modal-layout";
 
 /** 替身 Notice 记下的消息（真实类型里没有 messages，这里显式取一次） */
 const noticeLog = (Notice as unknown as { messages: string[] }).messages;
@@ -126,28 +125,42 @@ for (const item of stub.protocolHandlers) {
 	}
 }
 
-// 2d. 打开包时铺满窗口：默认开着（长报告挤在小盒子里看着就像卡住了）
-// 替身把建过的弹窗按顺序记下来（真实类型里没有这个字段，显式取一次）
-const modalInstances = (Modal as unknown as { instances: { modalEl: unknown }[] }).instances;
-/** 替身元素的类集合（真实类型是 HTMLElement，没有 classes） */
-const classList = (el: unknown) => (el as { classes: Set<string> }).classes;
-const applyModal = modalInstances.at(-1);
-checkTrue('协议打开出来的确实是应用对话框', applyModal !== undefined, '一个弹窗都没建');
-checkTrue(
-	'默认铺满窗口',
-	applyModal !== undefined && classList(applyModal.modalEl).has(FULLSCREEN_MODAL_CLASS),
-	JSON.stringify([...classList(applyModal?.modalEl)]),
-);
-// 关掉之后不该再铺满（同一个开关，对话框里改完立刻生效）
-plugin.settings.bundleDialogFullscreen = false;
-const smallModal = new ApplyBundleModal(new App(), plugin);
-smallModal.open();
-checkTrue(
-	'关掉开关后不再铺满',
-	!classList(smallModal.modalEl).has(FULLSCREEN_MODAL_CLASS),
-	JSON.stringify([...classList(smallModal.modalEl)]),
-);
-plugin.settings.bundleDialogFullscreen = true;
+// 2d. 打开包时把 **Obsidian 窗口本身**顶到最大 + 叫到前台
+// （不是把对话框撑满窗口 —— 用户要的是窗口最大化）
+const stubWindow = window as unknown as {
+	require?: unknown;
+	resizedTo?: [number, number];
+	movedTo?: [number, number];
+};
+check('默认会把窗口拉满（走 @electron/remote 不可用时的兜底路径）', stubWindow.resizedTo, [1920, 1080]);
+check('顺便挪到左上角', stubWindow.movedTo, [0, 0]);
+
+// 有 @electron/remote 时优先用它（更规矩：走 BrowserWindow.maximize）
+const fakeWindowState = { maximized: false, calls: 0 };
+stubWindow.require = (name: string) => {
+	check('只问 @electron/remote', name, '@electron/remote');
+	return {
+		getCurrentWindow: () => ({
+			isMaximized: () => fakeWindowState.maximized,
+			isFullScreen: () => false,
+			isMinimized: () => false,
+			maximize: () => { fakeWindowState.calls++; fakeWindowState.maximized = true; },
+		}),
+	};
+};
+new ApplyBundleModal(new App(), plugin).open();
+check('走 BrowserWindow.maximize()', fakeWindowState.calls, 1);
+new ApplyBundleModal(new App(), plugin).open();
+check('已经最大化了就不再点一次（免得窗口来回跳）', fakeWindowState.calls, 1);
+
+// 关掉开关：不碰窗口，但仍然只把 Obsidian 叫到前台
+fakeWindowState.calls = 0;
+plugin.settings.bundleWindowMaximize = false;
+stubWindow.resizedTo = undefined;
+new ApplyBundleModal(new App(), plugin).open();
+check('关掉之后不动窗口', [fakeWindowState.calls, stubWindow.resizedTo], [0, undefined]);
+plugin.settings.bundleWindowMaximize = true;
+delete stubWindow.require;
 
 // 2e. 进度更新要节流：每个文件写一次 DOM，一万个文件就够把界面拖顿
 const barEl = stub.statusBarItems[0] as { text: string };
