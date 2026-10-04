@@ -8,6 +8,7 @@ import { STATE_FILE_NAME, loadState } from './sync/state';
 import { statusBarText } from './sync/summary';
 import { applyBundleAction, exportBundleAction, syncNow } from './ui/actions';
 import { registerBundleDropTarget } from './ui/drop-watch';
+import { registerProtocolHandler } from './ui/protocol';
 import { SyncStatusBar } from './ui/progress';
 import { pickIcon } from './ui/ribbon';
 import { createLogger } from './utils/log';
@@ -73,6 +74,9 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		registerCommands(this);
 		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
 		registerBundleDropTarget(this);
+		// 用 Obsidian 直接打开包：obsidian://locally-save?path=…
+		// （配合设置里那个"关联 .lsave"，双击文件就能应用）
+		registerProtocolHandler(this);
 		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 
 		// 一个固定节拍管两种自动同步（定时 / 保存后），

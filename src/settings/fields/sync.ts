@@ -13,6 +13,8 @@ import type { PluginSettings } from '../model';
 import { bundleBaseDir } from '../../bundle/paths';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
+import { associationSupported } from '../../ui/associate';
+import { AssociateModal } from '../../ui/associate-modal';
 import type { FieldSection } from './types';
 
 /**
@@ -170,13 +172,28 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '应用一个包',
-					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西）。'
-						+ '**应用方式在对话框里当场选**：所有都保留 / 清老的 / 强制应用 —— '
-						+ '后两种只对完整副本开放，而且真要删东西时会再确认一次。这一步只读，不碰你的文件',
+					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西）；'
+						+ '冲突与删除默认跟随设置，也可以在对话框里临时覆盖。这一步只读，不碰你的文件',
 					button: '打开同步包并应用…',
 					cta: true,
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleTarget(settings),
+				},
+			],
+		},
+		{
+			heading: '同步包：用 Obsidian 直接打开',
+			// 这一组也没有设置项：都是"点一下做一件事"的按钮
+			fields: [],
+			actions: [
+				{
+					name: '把 .lsave 关联到 Obsidian',
+					desc: '双击 .lsave 就用 Obsidian 打开并弹出应用对话框。'
+						+ '做法是往当前用户注册表写一条关联（**不需要管理员权限**，只动 HKCU）。'
+						+ '注意：单纯"用 Obsidian 打开"是通不了的 —— 必须让它调起 obsidian:// 链接，插件才收得到',
+					button: '设置关联',
+					run: plugin => { new AssociateModal(plugin.app).open(); },
+					disabled: () => !associationSupported(),
 				},
 				{
 					name: '不知道怎么用？',

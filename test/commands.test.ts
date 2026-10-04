@@ -46,6 +46,7 @@ type Stub = {
 	saved: unknown[];
 	stubData: unknown;
 	domEvents: { name: string; options?: { capture?: boolean } }[];
+	protocolHandlers: { action: string; handler: (params: Record<string, string>) => void }[];
 };
 
 /** 造一个插件：stubData 就是喂给 loadData() 的 data.json 内容 */
@@ -110,6 +111,18 @@ checkTrue(
 	dropHandlers.every(event => event.options?.capture === true),
 	JSON.stringify(dropHandlers.map(event => event.options)),
 );
+
+// 2c. 用 Obsidian 直接打开包：注册了 obsidian:// 协议，而且点了不炸
+check('注册了协议 action', stub.protocolHandlers.map(item => item.action), ['locally-save']);
+for (const item of stub.protocolHandlers) {
+	try {
+		item.handler({ path: 'D:\\传输\\a.lsave' });
+		item.handler({});
+		checkTrue(`协议 ${item.action} 能处理（带路径 / 不带路径）`, true, '');
+	} catch (error) {
+		checkTrue(`协议 ${item.action} 能处理`, false, String(error));
+	}
+}
 
 // 3. 没设置目标文件夹时，报错要说得像人话（而不是抛个栈）
 let message = '';
