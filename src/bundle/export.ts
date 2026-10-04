@@ -32,6 +32,14 @@ export interface ExportOptions {
 	vaultRoot: string;
 	vaultName: string;
 	stateFile: string;
+	/**
+	 * 导哪种包：`full` 完整副本 / `changes` 更新包。
+	 *
+	 * 从前是从设置里读一个"默认类型"下拉框，但那是**互斥**的语义 ——
+	 * 用户要的是"完整包和更新包各是一个独立选项，可以都要"。
+	 * 所以改成由调用方明确指定，一次调用导一种，要两种就调两次。
+	 */
+	mode: 'full' | 'changes';
 	/** 同步包文件夹；实际会写进它的 `full` / `changes` 子目录 */
 	outDir: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
@@ -66,8 +74,7 @@ function safeName(name: string): string {
 
 export async function exportBundle(options: ExportOptions): Promise<ExportOutcome> {
 	const started = Date.now();
-	const { settings } = options;
-	const mode = settings.bundleMode;
+	const { settings, mode } = options;
 	const exclude = excludePatterns(settings.excludePatterns, options.configDir);
 
 	const state = await loadState(options.stateFile);

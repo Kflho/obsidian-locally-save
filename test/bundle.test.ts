@@ -70,15 +70,8 @@ const log = createLogger(() => 'silent');
 const settings = (overrides: Partial<PluginSettings> = {}): PluginSettings =>
 	({ ...DEFAULT_SETTINGS, ...overrides });
 
-function exportOptions(root: string, stateFile: string, overrides: Partial<PluginSettings> = {}): ExportOptions {
-	return {
-		settings: settings(overrides),
-		log,
-		vaultRoot: root,
-		vaultName: '我的笔记',
-		stateFile,
-		outDir: OUT,
-	};
+function exportOptions(root: string, stateFile: string, mode: 'full' | 'changes' = 'full'): ExportOptions {
+	return { settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: OUT };
 }
 
 /**
@@ -136,7 +129,7 @@ check('应用后记下了包 ID（用于漏包检测）', stateB.lastBundleId, e
 // 3. A 改一个、删一个 → 导出「仅改动」
 write(A, 'notes/a.md', 'AAA-CHANGED');
 fs.rmSync(abs(A, 'notes/b.md'));
-const changed = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+const changed = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('增量包导出成功', changed.file !== null, changed.reason ?? '没有导出文件');
 const FILE_CHANGES = changed.file as string;
 check('增量包只装改动过的文件', changed.entryCount, 1);
@@ -161,11 +154,11 @@ check('删除进了回收目录', fs.existsSync(path.join(B, '.trash', 'locally-
 // （修改时间要拉开：大小相同、又在 2 秒容差内的话，会被当成"没改过"）
 const T3 = Date.now();
 write(A, 'notes/a.md', 'AAA-V3', T3);
-const third = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+const third = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('第三个包导出成功（B 故意不应用）', third.file !== null, third.reason ?? '');
 write(A, 'notes/a.md', 'AAA-V4', T3 + 60_000);
 write(A, 'notes/new.md', 'NEW', T3 + 60_000);
-const fourth = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+const fourth = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('第四个包导出成功', fourth.file !== null, fourth.reason ?? '');
 checkTrue('同秒内连导两个包不会互相覆盖', third.file !== fourth.file, `都写到了 ${third.file}`);
 check('更新包以完整包为基准累积', fourth.cumulative, true);
@@ -195,7 +188,7 @@ check('全部条目都被跳过', again.report.skips, 2);
 // 5b. 真·本地改动还是要留冲突副本（上一条不能把这条也放过）
 write(B, 'notes/a.md', 'B 自己改的', Date.now() + 300_000);
 write(A, 'notes/a.md', 'AAA-V5', T3 + 600_000);
-const fifth = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+const fifth = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('第五个包导出成功', fifth.file !== null, fifth.reason ?? '');
 plan = await planBundleApply(applyOptions(B, STATE_B, fifth.file as string));
 check('本地真改过的 → 冲突', plan.report.conflicts, 1);
@@ -207,7 +200,7 @@ checkTrue('本地那份留成冲突副本', hasConflictCopy(B, 'notes'), '没找
 const anchorReset = await exportBundle(exportOptions(A, STATE_A));
 checkTrue('重新导完整包', anchorReset.file !== null, anchorReset.reason ?? '');
 check('新完整包是全量的（不是累积）', anchorReset.cumulative, false);
-const afterReset = await exportBundle(exportOptions(A, STATE_A, { bundleMode: 'changes' }));
+const afterReset = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 check('刚导完完整包 → 更新包没有内容可装', afterReset.file, null);
 checkTrue('并说明原因', (afterReset.reason ?? '').includes('没有任何变化'), afterReset.reason ?? '');
 
@@ -215,7 +208,7 @@ checkTrue('并说明原因', (afterReset.reason ?? '').includes('没有任何变
 const fresh = path.join(ROOT, 'state-fresh.json');
 let noAnchor = '';
 try {
-	await exportBundle(exportOptions(A, fresh, { bundleMode: 'changes' }));
+	await exportBundle(exportOptions(A, fresh, 'changes'));
 } catch (error) {
 	noAnchor = error instanceof Error ? error.message : String(error);
 }

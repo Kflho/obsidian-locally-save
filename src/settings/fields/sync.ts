@@ -133,27 +133,14 @@ export const SYNC_SECTION: FieldSection = {
 		},
 		{
 			heading: '同步包：手动导出',
-			fields: [
-				{
-					key: 'bundleMode',
-					name: '手动导出的默认类型',
-					desc: '命令「导出同步包…」打开时默认选哪个。'
-						+ '**完整副本**＝整个仓库，是更新包的基准（对方必须先应用它）；'
-						+ '**更新包**＝自上次完整副本以来累积的全部改动，直接应用最新的那一个即可，跳过中间几个也不会少内容',
-					control: {
-						type: 'dropdown',
-						options: {
-							full: '完整副本（整个仓库）',
-							changes: '更新包（自上次完整副本以来累积）',
-						},
-					},
-					coerce: value => coerceChoice(value, ['full', 'changes'] as const, DEFAULT_SETTINGS.bundleMode),
-				},
-			],
+			// 这一组没有设置项：导哪种包是"这一次要怎么导"的选择，
+			// 放在对话框里两个独立开关上（不是互斥的下拉框）
+			fields: [],
 			actions: [
 				{
 					name: '导出到文件',
-					desc: '把仓库或只把改动打包成一个 .lsave 文件，拷到别的机器上用下面的按钮应用',
+					desc: '把仓库打包成 .lsave 文件，拷到别的机器上用下面的按钮应用。'
+						+ '对话框里**完整副本与更新包是两个独立开关**，可以都要（都勾时先导更新包、再导完整包）',
 					button: '导出同步包…',
 					cta: true,
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
