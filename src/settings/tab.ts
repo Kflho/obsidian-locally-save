@@ -1,6 +1,6 @@
 import { PluginSettingTab, Setting } from 'obsidian';
 import type { App, SettingDefinitionItem } from 'obsidian';
-import type NewPlugin from '../main';
+import type LocallySavePlugin from '../main';
 import { DEFAULT_SETTINGS } from './model';
 import type { PluginSettings } from './model';
 import { FIELD_INDEX, SETTINGS_SECTIONS } from './fields';
@@ -24,14 +24,14 @@ import type { FieldSpec } from './fields';
  * 「功能分页 → 子分组」，所以子分组自己造一个 h4，用 classes 控制样式（见 styles.css）。
  */
 function addSubHeading(containerEl: HTMLElement, text: string) {
-	const wrapper = containerEl.createDiv({ cls: 'new-plugin-settings-subheading' });
+	const wrapper = containerEl.createDiv({ cls: 'locally-save-settings-subheading' });
 	wrapper.createEl('h4', { text });
 }
 
-export class NewPluginSettingTab extends PluginSettingTab {
-	plugin: NewPlugin;
+export class LocallySaveSettingTab extends PluginSettingTab {
+	plugin: LocallySavePlugin;
 
-	constructor(app: App, plugin: NewPlugin) {
+	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}

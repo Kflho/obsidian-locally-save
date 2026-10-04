@@ -1,5 +1,7 @@
+import { AUTO_SECTION } from './auto';
 import { GENERAL_SECTION } from './general';
 import { INTERFACE_SECTION } from './interface';
+import { BUNDLE_SECTION, SYNC_SECTION } from './sync';
 import type { FieldSection, FieldSpec } from './types';
 
 /**
@@ -15,6 +17,9 @@ import type { FieldSection, FieldSpec } from './types';
  */
 export const SETTINGS_SECTIONS: FieldSection[] = [
 	GENERAL_SECTION,
+	SYNC_SECTION,
+	AUTO_SECTION,
+	BUNDLE_SECTION,
 	INTERFACE_SECTION,
 ];
 

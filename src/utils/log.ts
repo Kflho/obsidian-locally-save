@@ -19,7 +19,7 @@ export interface Logger {
 }
 
 /** 日志前缀：一眼看出是哪个插件打的 */
-const PREFIX = '[New Plugin]';
+const PREFIX = '[Locally Save]';
 
 export function createLogger(getLevel: () => LogLevel): Logger {
 	const write = (

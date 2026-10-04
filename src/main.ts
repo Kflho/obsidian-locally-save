@@ -1,6 +1,6 @@
 import { Notice, Plugin } from 'obsidian';
 import { registerCommands } from './commands';
-import { NewPluginSettingTab, settingsFrom } from './settings';
+import { LocallySaveSettingTab, settingsFrom } from './settings';
 import type { PluginSettings } from './settings';
 import { MainModal } from './ui/main-modal';
 import { createLogger } from './utils/log';
@@ -13,7 +13,7 @@ import { createLogger } from './utils/log';
  *
  * 这套结构继承自 js_02（note-tidy）：入口保持精简，功能一律下沉到模块。
  */
-export default class NewPlugin extends Plugin {
+export default class LocallySavePlugin extends Plugin {
 	settings!: PluginSettings;
 	/** 跟着设置走的日志器（见 utils/log.ts） */
 	readonly log = createLogger(() => this.settings.logLevel);
@@ -29,11 +29,11 @@ export default class NewPlugin extends Plugin {
 			if (this.isActive()) new MainModal(this.app, this).open();
 		});
 		this.statusBarEl = this.addStatusBarItem();
-		this.statusBarEl.addClass('new-plugin-status');
+		this.statusBarEl.addClass('locally-save-status');
 		this.refreshEntryPoints();
 
 		registerCommands(this);
-		this.addSettingTab(new NewPluginSettingTab(this.app, this));
+		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 
 		if (this.settings.startupNotice) {
 			new Notice(`${this.settings.greeting}（${this.manifest.name} v${this.manifest.version}）`);
@@ -68,8 +68,8 @@ export default class NewPlugin extends Plugin {
 
 	/** 按设置显示 / 隐藏两个入口，并刷新状态栏文字 */
 	private refreshEntryPoints(): void {
-		this.ribbonEl?.toggleClass('new-plugin-hidden', this.settings.ribbonIcon === false);
-		this.statusBarEl?.toggleClass('new-plugin-hidden', this.settings.showStatusBar === false);
+		this.ribbonEl?.toggleClass('locally-save-hidden', this.settings.ribbonIcon === false);
+		this.statusBarEl?.toggleClass('locally-save-hidden', this.settings.showStatusBar === false);
 		this.statusBarEl?.setText(`${this.manifest.name}：${this.settings.enabled ? '已启用' : '已停用'}`);
 	}
 }

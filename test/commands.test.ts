@@ -6,7 +6,7 @@
  */
 import type { App, PluginManifest } from "obsidian";
 import { Notice } from "obsidian";
-import NewPlugin from "../src/main";
+import LocallySavePlugin from "../src/main";
 import { DEFAULT_SETTINGS } from "../src/settings";
 
 /** 替身 Notice 记下的消息（真实类型里没有 messages，这里显式取一次） */
@@ -30,8 +30,8 @@ function check(name: string, actual: unknown, expected: unknown): void {
 
 // ---------------------------------------------------------------- 测试替身
 const MANIFEST = {
-	id: 'new-plugin',
-	name: 'New Plugin',
+	id: 'locally-save',
+	name: 'Locally Save',
 	version: '0.1.0',
 	minAppVersion: '1.7.0',
 	description: 'test',
@@ -48,8 +48,8 @@ type Stub = {
 };
 
 /** 造一个插件：stubData 就是喂给 loadData() 的 data.json 内容 */
-function createPlugin(data: unknown = null): { plugin: NewPlugin; stub: Stub } {
-	const plugin = new NewPlugin({} as App, MANIFEST);
+function createPlugin(data: unknown = null): { plugin: LocallySavePlugin; stub: Stub } {
+	const plugin = new LocallySavePlugin({} as App, MANIFEST);
 	const stub = plugin as unknown as Stub;
 	stub.stubData = data;
 	return { plugin, stub };
@@ -70,8 +70,8 @@ check("加载时按设置弹提示", noticeLog.length, 1);
 checkTrue("提示文案来自设置", noticeLog[0]?.includes('你好') === true, `实际：${noticeLog[0]}`);
 
 // 2. 状态栏文字跟着设置走
-check("状态栏显示插件名与状态", stub.statusBarItems[0]?.text, 'New Plugin：已启用');
-check("默认不隐藏入口", [...(stub.statusBarItems[0]?.classes ?? [])].includes('new-plugin-hidden'), false);
+check("状态栏显示插件名与状态", stub.statusBarItems[0]?.text, 'Locally Save：已启用');
+check("默认不隐藏入口", [...(stub.statusBarItems[0]?.classes ?? [])].includes('locally-save-hidden'), false);
 
 // 3. 命令真的能跑（「启用 / 停用」会改状态，留到下一步单独测）
 for (const command of stub.commands.filter(c => c.id !== 'toggle-enabled')) {
@@ -88,7 +88,7 @@ const toggle = stub.commands.find(c => c.id === 'toggle-enabled');
 await toggle?.callback?.();
 check("停用后设置翻转", plugin.settings.enabled, false);
 check("翻转后存盘", (stub.saved.at(-1) as { enabled: boolean })?.enabled, false);
-check("状态栏文字跟着变", stub.statusBarItems[0]?.text, 'New Plugin：已停用');
+check("状态栏文字跟着变", stub.statusBarItems[0]?.text, 'Locally Save：已停用');
 
 // 5. 总开关关掉后，入口不干活但会说明原因
 noticeLog.length = 0;
@@ -100,7 +100,7 @@ for (const [key, hidden] of [['ribbonIcon', 'ribbon'], ['showStatusBar', 'status
 	const { plugin: p, stub: s } = createPlugin({ logLevel: 'silent', startupNotice: false, [key]: false });
 	await p.onload();
 	const el = hidden === 'ribbon' ? s.ribbonItems[0]?.el : s.statusBarItems[0];
-	checkTrue(`关掉 ${key} 后对应入口被隐藏`, el?.classes.has('new-plugin-hidden') === true, '没有加上隐藏类');
+	checkTrue(`关掉 ${key} 后对应入口被隐藏`, el?.classes.has('locally-save-hidden') === true, '没有加上隐藏类');
 }
 
 // 7. 关掉启动提示就不弹通知

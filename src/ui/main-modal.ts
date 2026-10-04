@@ -1,6 +1,6 @@
 import { Modal } from 'obsidian';
 import type { App } from 'obsidian';
-import type NewPlugin from '../main';
+import type LocallySavePlugin from '../main';
 import { LOG_LEVEL_OPTIONS } from '../settings';
 
 /**
@@ -10,9 +10,9 @@ import { LOG_LEVEL_OPTIONS } from '../settings';
  * 换成真正要展示的内容即可（`ui/` 下的每个窗口一个文件）。
  */
 export class MainModal extends Modal {
-	private plugin: NewPlugin;
+	private plugin: LocallySavePlugin;
 
-	constructor(app: App, plugin: NewPlugin) {
+	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
 		this.plugin = plugin;
 	}
@@ -39,7 +39,7 @@ export class MainModal extends Modal {
 
 		contentEl.createEl('p', {
 			text: '这是空白模板留下的示例窗口，功能定了以后替换 UI/main-modal.ts。',
-			cls: 'new-plugin-modal-hint',
+			cls: 'locally-save-modal-hint',
 		});
 	}
 

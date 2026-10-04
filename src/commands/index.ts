@@ -1,5 +1,5 @@
 import { Notice } from 'obsidian';
-import type NewPlugin from '../main';
+import type LocallySavePlugin from '../main';
 import { MainModal } from '../ui/main-modal';
 
 /**
@@ -8,7 +8,7 @@ import { MainModal } from '../ui/main-modal';
  * **命令 ID 一旦发布就是稳定接口**，改名会让用户的快捷键失效 —— 别改。
  * 一条命令一个函数，实现放各自模块里，这里只做接线。
  */
-export function registerCommands(plugin: NewPlugin): void {
+export function registerCommands(plugin: LocallySavePlugin): void {
 	plugin.addCommand({
 		id: 'open-main-modal',
 		name: '打开示例窗口',

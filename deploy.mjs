@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 
 /** 本机 vault 里的插件目录，插件 ID 就是文件夹名（与 manifest.json 的 id 保持一致）。 */
 const DEFAULT_PLUGIN_DIR =
-	"D:\\data\\online\\software\\common\\obsidian\\.obsidian\\plugins\\new-plugin";
+	"D:\\data\\online\\software\\common\\obsidian\\.obsidian\\plugins\\locally-save";
 
 /** 需要同步过去的运行用文件；main.js 由 esbuild 产出，另两个是仓库里的源文件。 */
 const ARTIFACTS = ["main.js", "manifest.json", "styles.css"];

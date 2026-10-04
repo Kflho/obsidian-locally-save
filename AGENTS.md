@@ -1,6 +1,6 @@
 # Obsidian plugin —— 本仓库约定（改代码前先读）
 
-本仓库是 **js_03** 的新插件（`manifest.json` 里的 id 暂为占位值 `new-plugin`，功能待定）。
+本仓库是 **js_03** 的新插件（`manifest.json` 里的 id 暂为占位值 `locally-save`，功能待定）。
 
 骨架有两条来源：**官方空白模板**（obsidian-sample-plugin）与 **js_02（note-tidy）**。
 从 js_02 继承来的、必须照着走的东西都在下面。

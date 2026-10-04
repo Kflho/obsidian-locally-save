@@ -18,6 +18,6 @@ export {
 	settingsFrom,
 } from './model';
 export type { LogLevel, PluginSettings } from './model';
-export { NewPluginSettingTab } from './tab';
+export { LocallySaveSettingTab } from './tab';
 export { ALL_FIELDS, FIELD_INDEX, SETTINGS_SECTIONS } from './fields';
 export type { ControlSpec, FieldGroup, FieldSection, FieldSpec } from './fields';
