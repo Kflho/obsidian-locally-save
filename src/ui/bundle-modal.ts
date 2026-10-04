@@ -14,7 +14,7 @@ import { dirExists, listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { pickBundleFromDrop } from './drop';
-import { focusWindow, setModalFullscreen } from './modal-layout';
+import { bringWindowForward, focusWindow } from './modal-layout';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
@@ -255,22 +255,15 @@ export class ApplyBundleModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
-		// 双击 .lsave 进来的：Obsidian 可能还在别的窗口后面，先叫到前台
-		focusWindow();
-		// 铺满窗口（默认开）：长报告 + 长列表在小盒子里滚，看着就像"卡住了"
-		setModalFullscreen(this, this.plugin.settings.bundleDialogFullscreen);
+		// 双击 .lsave 进来的：Obsidian 可能还在别的窗口后面；顺便把窗口顶到最大，
+		// 别让"应用要跑一会儿"看起来像卡死（想关掉的话：设置里的「打开包时最大化窗口」）
+		if (this.plugin.settings.bundleWindowMaximize) bringWindowForward();
+		else focusWindow();
 		contentEl.createEl('h2', { text: '打开同步包' });
 		contentEl.createEl('p', {
 			text: '选一个 .lsave 文件，这里会先算一遍"应用之后会变成什么样"，确认无误再动手。',
 			cls: 'locally-save-hint',
 		});
-
-		new Setting(contentEl)
-			.setName('铺满窗口')
-			.setDesc('长报告与文件列表一眼看到底（这一项与设置里的是同一个开关，改完立刻生效）')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.bundleDialogFullscreen)
-				.onChange(value => { void this.setFullscreen(value); }));
 
 		// 拖放区：从资源管理器直接把包拖进来，等同于在下面粘路径
 		const dropZone = contentEl.createDiv({ cls: 'locally-save-drop' });
@@ -445,13 +438,6 @@ export class ApplyBundleModal extends Modal {
 			});
 			row.addEventListener('click', () => { void this.select(item.file); });
 		}
-	}
-
-	/** 开 / 关铺满：立刻见效，并记进设置（下次打开还按这个来） */
-	private async setFullscreen(on: boolean): Promise<void> {
-		this.plugin.settings.bundleDialogFullscreen = on;
-		setModalFullscreen(this, on);
-		await this.plugin.saveSettings();
 	}
 
 	/** 选中一个包：只读地算一遍，把报告画出来 */

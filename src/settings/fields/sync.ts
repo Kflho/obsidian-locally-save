@@ -169,12 +169,13 @@ export const SYNC_SECTION: FieldSection = {
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
 				},
 				{
-					key: 'bundleDialogFullscreen',
-					name: '打开包时铺满窗口',
-					desc: '把「应用同步包」对话框铺满整个 Obsidian 窗口：长报告与长列表一眼能看到底，'
-						+ '不用在小盒子里滚（那种"界面卡住了"的错觉多半就是这么来的）。对话框里也有同一个开关',
+					key: 'bundleWindowMaximize',
+					name: '打开包时最大化窗口',
+					desc: '双击 .lsave 或把它拖进 Obsidian 时，把 **Obsidian 窗口本身**顶到最大并叫到前台。'
+						+ '应用一个包要跑扫描、校验、写文件好几秒，这期间只有一句"正在……"：'
+						+ '窗口小、或者还在别的窗口后面，看着就像卡死了。不想让插件动你的窗口就关掉它',
 					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleDialogFullscreen),
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleWindowMaximize),
 				},
 			],
 			actions: [

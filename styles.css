@@ -25,26 +25,6 @@
 	margin-top: 0;
 }
 
-/* 铺满窗口（默认对"应用同步包"开着）。
-   默认尺寸的对话框里放长报告 + 长列表要一直滚，背景又被遮罩压暗 ——
-   用户很容易以为界面卡死了。铺满之后一屏看全，列表也不再限高。 */
-.modal.locally-save-fullscreen {
-	width: 96vw;
-	max-width: 96vw;
-	height: 92vh;
-	max-height: 92vh;
-}
-
-.modal.locally-save-fullscreen .modal-content {
-	height: 100%;
-	overflow-y: auto;
-}
-
-/* 铺满时列表跟着长：内容再多也在对话框里滚，不会把按钮顶出屏幕 */
-.modal.locally-save-fullscreen .locally-save-list {
-	max-height: none;
-}
-
 .locally-save-hint,
 .locally-save-path {
 	color: var(--text-muted);
