@@ -44,7 +44,10 @@ const context = await esbuild.context({
 		"@lezer/common",
 		"@lezer/highlight",
 		"@lezer/lr",
-		...builtinModules],
+		// Node 内置模块：插件是桌面端专属（isDesktopOnly），同步到仓库之外的文件夹必须用 fs。
+		// 两份都要列：builtinModules 里是不带前缀的 `fs`，而源码里写的是 `node:fs`。
+		...builtinModules,
+		...builtinModules.map(module => `node:${module}`)],
 	format: "cjs",
 	target: "es2018",
 	logLevel: "info",

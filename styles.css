@@ -20,8 +20,113 @@
 	display: none;
 }
 
-/* 示例窗口里的说明文字 */
-.locally-save-modal-hint {
+/* ---------------------------------------------------------------- 弹窗 */
+.locally-save-modal h2 {
+	margin-top: 0;
+}
+
+.locally-save-hint,
+.locally-save-path {
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+}
+
+/* 警告：会删东西、漏了包、血脉不一致这类要人停一下看的内容 */
+.locally-save-warn {
+	color: var(--text-warning);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-summary {
+	font-weight: var(--font-semibold);
+}
+
+/* 同步预览 / 同步包列表：一行一个文件 */
+.locally-save-list {
+	max-height: 40vh;
+	overflow-y: auto;
+	margin: 0.5em 0 1em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.locally-save-row {
+	display: flex;
+	gap: 0.75em;
+	align-items: baseline;
+	padding: 0.35em 0.6em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-row:last-child {
+	border-bottom: none;
+}
+
+.locally-save-row.is-bundle {
+	cursor: pointer;
+}
+
+.locally-save-row.is-bundle:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+/* 左侧的色条：一眼区分新增 / 修改 / 删除 / 移动 / 冲突 */
+.locally-save-row.is-add {
+	border-left: 3px solid var(--color-green);
+}
+
+.locally-save-row.is-modify {
+	border-left: 3px solid var(--color-blue);
+}
+
+.locally-save-row.is-delete {
+	border-left: 3px solid var(--color-red);
+}
+
+.locally-save-row.is-move {
+	border-left: 3px solid var(--color-purple);
+}
+
+.locally-save-row.is-conflict {
+	border-left: 3px solid var(--color-orange);
+}
+
+.locally-save-action {
+	flex: 0 0 5em;
+	color: var(--text-muted);
+}
+
+.locally-save-file {
+	flex: 1 1 auto;
+	word-break: break-all;
+}
+
+.locally-save-reason {
+	flex: 0 1 auto;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-more {
+	padding: 0.35em 0.6em;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+}
+
+/* 同步包报告区 */
+.locally-save-report h3 {
+	margin: 1em 0 0.3em;
+	font-size: var(--font-ui-medium);
+}
+
+.locally-save-facts {
+	margin: 0.2em 0 0.6em;
+	padding-left: 1.2em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-facts li {
+	margin: 0.15em 0;
 }
