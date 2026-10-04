@@ -1,9 +1,10 @@
 import path from 'node:path';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
+import { toNative } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
 import { DEFAULT_MTIME_TOLERANCE_MS, planSync, rebuildState } from './diff';
-import { ensureDir, scanTree } from './disk';
+import { ensureDir, moveToTrash, removeFile, scanTree, statFile } from './disk';
 import { parsePatterns } from './exclude';
 import { executePlan } from './execute';
 import type { ExecuteResult } from './execute';
@@ -190,4 +191,43 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 function countTouched(result: ExecuteResult): number {
 	return result.uploaded + result.downloaded + result.deletedLocal
 		+ result.deletedRemote + result.conflicts + result.moved;
+}
+
+/**
+ * 把一批路径从同步目标里也删掉，并把它们从基准里划掉。
+ *
+ * 用在「应用同步包之后顺便同步到副本」：包里删掉的文件，副本里也该没。
+ * 不这么做的话，光靠常规同步会把它们**还原回仓库** ——
+ * 副本里还留着它、基准里也有它，而「同步删除」一旦关着，
+ * 引擎就会把"本地缺了这个文件"当成"该从副本取回"。
+ *
+ * 划掉基准记录之后，下次同步看到的是"两边都没有"，什么都不做 ✓。
+ */
+export async function removeFromTarget(
+	host: SyncHost,
+	targetDir: string,
+	paths: string[],
+	useTrash: boolean,
+): Promise<number> {
+	if (paths.length === 0) return 0;
+	const stateFile = host.stateFile();
+	const state = await loadState(stateFile);
+	const baseline = { ...targetBaseline(state, targetDir) };
+	const stamp = formatStamp(Date.now());
+	let removed = 0;
+
+	for (const rel of paths) {
+		const abs = toNative(targetDir, rel);
+		if (await statFile(abs)) {
+			if (useTrash) await moveToTrash(abs, `${targetDir}/.lsave/trash`, rel, stamp);
+			else await removeFile(abs);
+			removed++;
+		}
+		delete baseline[rel];
+	}
+
+	setTargetBaseline(state, targetDir, baseline, Date.now());
+	await saveState(stateFile, state);
+	host.log.debug(`已把 ${paths.length} 个路径从副本里清掉（实际删除 ${removed} 个）`);
+	return removed;
 }

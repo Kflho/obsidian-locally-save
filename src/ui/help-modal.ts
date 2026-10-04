@@ -78,6 +78,19 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
+		contentEl.createEl('h3', { text: '应用完，本地副本要不要跟上？' });
+		contentEl.createEl('p', {
+			text: '对话框里有一项「应用后顺便同步到本地副本」（填了目标文件夹时默认开着）：'
+				+ '应用完再跑一次正常同步，把这次的改动推到副本。'
+				+ '不这么做的话，备份会在应用完包之后悄悄落后一截 —— 你以为它是新的，其实不是。',
+			cls: 'locally-save-hint',
+		});
+		contentEl.createEl('p', {
+			text: '顺序上有个讲究：包里删掉的文件，会先从副本里也清掉、再把基准划掉，然后才同步。'
+				+ '否则常规同步会把它们当成"本地缺了、该从副本取回"，刚删掉的文件又长回仓库。',
+			cls: 'locally-save-hint',
+		});
+
 		contentEl.createEl('h3', { text: '会不会把我的东西弄丢' });
 		const safe = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		safe.createEl('li', {

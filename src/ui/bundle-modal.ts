@@ -8,6 +8,8 @@ import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/pat
 import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent } from 'obsidian';
 import { listFiles } from '../sync/disk';
+import { removeFromTarget } from '../sync/runner';
+import { summarizeOutcome } from './sync-modal';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
@@ -153,6 +155,8 @@ export class ApplyBundleModal extends Modal {
 	/** 应用方式：默认最保守的「所有都保留」 */
 	private mode: ApplyMode = 'keep-all';
 	private keepBackup: boolean;
+	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
+	private alsoSyncCopy: boolean;
 	private modeDropdown: DropdownComponent | null = null;
 	private listEl!: HTMLElement;
 	private reportEl!: HTMLElement;
@@ -164,6 +168,8 @@ export class ApplyBundleModal extends Modal {
 		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
 		this.dir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
 		this.keepBackup = plugin.settings.deletedToTrash;
+		// 配了副本就默认顺手同步 —— 不然备份会在应用完包之后悄悄落后一截
+		this.alsoSyncCopy = plugin.settings.targetDir.trim() !== '';
 		this.current = null;
 	}
 
@@ -229,6 +235,18 @@ export class ApplyBundleModal extends Modal {
 					this.keepBackup = value;
 					void this.replan();
 				}));
+
+		// 应用完顺手带上本地副本：不然后备会在应用包之后悄悄落后一截
+		const target = this.plugin.settings.targetDir.trim();
+		new Setting(contentEl)
+			.setName('应用后顺便同步到本地副本')
+			.setDesc(target
+				? `应用完再跑一次正常同步，把这次的改动推到「${target}」；包删掉的文件也会从副本里清掉`
+				: '还没设置「目标文件夹」，这一项用不上（设置 → 本地同步 → 目标文件夹）')
+			.addToggle(toggle => toggle
+				.setValue(this.alsoSyncCopy)
+				.setDisabled(!target)
+				.onChange(value => { this.alsoSyncCopy = value; }));
 
 		this.listEl = contentEl.createDiv({ cls: 'locally-save-list' });
 		this.reportEl = contentEl.createDiv({ cls: 'locally-save-report' });
@@ -458,7 +476,11 @@ export class ApplyBundleModal extends Modal {
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
 			if (result.deleted > 0) parts.push(`删除 ${result.deleted}`);
 			if (result.failed.length > 0) parts.push(`失败 ${result.failed.length}`);
-			new Notice(`同步包已应用：${parts.join('、')}`, 8000);
+
+			const copyNote = await this.syncCopyIfWanted(plan);
+			if (copyNote) parts.push(copyNote);
+
+			new Notice(`同步包已应用：${parts.join('、')}`, 9000);
 			this.close();
 		} catch (error) {
 			this.plugin.reportProgress(null);
@@ -472,6 +494,40 @@ export class ApplyBundleModal extends Modal {
 	onClose(): void {
 		this.plugin.reportProgress(null);
 		this.contentEl.empty();
+	}
+
+	/**
+	 * 应用完把本地副本也带上。
+	 *
+	 * 两步走，顺序要紧：
+	 * 1. 先把「这次删掉的路径」从副本里也清掉，并把它们从基准里划掉 ——
+	 *    不这么做的话，接下来那次常规同步会把它们当成"本地缺了、该从副本取回"，
+	 *    于是**刚删掉的文件又长回仓库**（「同步删除」关着时必然如此）；
+	 * 2. 再跑一次正常同步，把新增 / 修改推上去。
+	 */
+	private async syncCopyIfWanted(plan: ApplyPlan): Promise<string> {
+		const target = this.plugin.settings.targetDir.trim();
+		if (!this.alsoSyncCopy || !target) return '';
+
+		try {
+			const removed = [
+				...plan.extra,
+				...plan.deletes.filter(item => item.action === 'delete').map(item => item.path),
+			];
+			await removeFromTarget(this.plugin, target, removed, this.plugin.settings.deletedToTrash);
+
+			const outcome = await this.plugin.runSync();
+			if (!outcome) return '副本同步被跳过（上一次同步还在跑）';
+			if (this.plugin.settings.showLastSyncInStatusBar) {
+				this.plugin.statusBar.setSummary('同步包已应用 · 副本已同步');
+			}
+			return `副本已同步（${summarizeOutcome(outcome)}）`;
+		} catch (error) {
+			// 包已经应用成功了，副本没跟上只是"备份旧一点"，不该让前者看起来失败
+			new Notice(`同步包已应用，但同步到本地副本失败：${describe(error)}`, 9000);
+			this.plugin.log.error('应用后同步副本失败', error);
+			return '副本同步失败';
+		}
 	}
 }
 
