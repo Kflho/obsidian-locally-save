@@ -34,6 +34,7 @@ export class BundleHelpModal extends Modal {
 		});
 		steps.createEl('li', {
 			text: '在那台机器上应用：**直接把 .lsave 拖到 Obsidian 窗口上**，会自动打开应用对话框并填好路径；'
+				+ '在设置里点一次「设置关联」之后，**双击 .lsave 也能直接打开**；'
 				+ '也可以点下面的「打开同步包并应用…」再选文件 → 先看报告 → 再点应用',
 		});
 

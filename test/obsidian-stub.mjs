@@ -167,6 +167,9 @@ function makeEl() {
 		createDiv(options) {
 			return this.createEl("div", options);
 		},
+		createSpan(options) {
+			return this.createEl("span", options);
+		},
 		addEventListener(name, handler) { listeners.push({ name, handler }); },
 		removeEventListener(name, handler) {
 			const index = listeners.findIndex(item => item.name === name && item.handler === handler);
@@ -201,6 +204,7 @@ export class Plugin {
 		this.stubData = null;
 		this.saved = [];
 		this.domEvents = [];
+		this.protocolHandlers = [];
 	}
 	addCommand(command) {
 		this.commands.push(command);
@@ -227,6 +231,10 @@ export class Plugin {
 		const ref = { el, name, handler, options };
 		this.domEvents.push(ref);
 		return ref;
+	}
+	/** 记下注册的 obsidian:// 协议 action */
+	registerObsidianProtocolHandler(action, handler) {
+		this.protocolHandlers.push({ action, handler });
 	}
 	registerInterval() {}
 	register() {}
