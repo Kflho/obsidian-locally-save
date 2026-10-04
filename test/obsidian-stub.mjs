@@ -94,10 +94,11 @@ export class Notice {
 }
 Notice.messages = [];
 
-/** 设置项替身：声明式路径用不到它，这里只为 import 能成立 */
+/** 设置项替身：旧版 DOM 路径与按钮渲染用得到（声明式路径不碰它） */
 export class Setting {
 	constructor(containerEl) {
 		this.containerEl = containerEl;
+		this.buttons = [];
 	}
 	setName() { return this; }
 	setDesc() { return this; }
@@ -107,6 +108,28 @@ export class Setting {
 	addText() { return this; }
 	addTextArea() { return this; }
 	addDropdown() { return this; }
+	/** 按钮：真的执行回调，测试才能核对"按钮文字对不对、点了会不会炸" */
+	addButton(build) {
+		return this.addComponent(build);
+	}
+	addExtraButton(build) {
+		return this.addComponent(build);
+	}
+	addComponent(build) {
+		const button = {
+			text: '',
+			cta: false,
+			disabled: false,
+			setButtonText(text) { this.text = text; return this; },
+			setCta() { this.cta = true; return this; },
+			setDisabled(value) { this.disabled = value; return this; },
+			setTooltip() { return this; },
+			onClick(handler) { this.handler = handler; return this; },
+		};
+		build?.(button);
+		this.buttons.push(button);
+		return this;
+	}
 }
 
 export class PluginSettingTab {

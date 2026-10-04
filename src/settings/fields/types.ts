@@ -1,3 +1,4 @@
+import type LocallySavePlugin from '../../main';
 import type { PluginSettings } from '../model';
 
 /**
@@ -53,6 +54,29 @@ export interface FieldSpec<T = PluginSettings> {
 export interface FieldGroup<T = PluginSettings> {
 	heading: string;
 	fields: FieldSpec<T>[];
+	/** 这一组底下的按钮（可选，排在设置项后面） */
+	actions?: ActionSpec<T>[];
+}
+
+/**
+ * 一个「动作」：不是设置项，而是一行按钮（导出同步包、打开包、看说明这类）。
+ *
+ * 单独一类而不是塞进 FieldSpec：动作没有 key、不存进 data.json，
+ * 也不参与"每个设置字段都必须有定义"的那套核对。
+ */
+export interface ActionSpec<T = PluginSettings> {
+	/** 行标题。声明式定义里 name 是必填的（设置搜索要用），所以这里也必须给 */
+	name: string;
+	/** 行说明 */
+	desc?: string;
+	/** 按钮上的字 */
+	button: string;
+	/** 主按钮（强调色） */
+	cta?: boolean;
+	/** 点了干什么 */
+	run: (plugin: LocallySavePlugin) => void;
+	/** 当前是否不可用（比如两个目录都没填时） */
+	disabled?: (settings: T) => boolean;
 }
 
 /**
