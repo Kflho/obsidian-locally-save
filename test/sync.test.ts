@@ -409,6 +409,41 @@ checkTrue(
 	describeRecord(persisted.lastSync as LastSyncRecord),
 );
 
+// 25. 关键回归：**一轮里不许"删父目录"和"建新子目录"同时发生**
+// （副本把「父目录」删了，而仓库这边刚往它里面加了「新子目录」：
+//   两个结论打架 —— 同时做就成了"第一轮删了又建、第二轮才稳定"，用户报过这个）
+fs.mkdirSync(abs(VAULT, '父目录'), { recursive: true });
+await runSync(host());
+check('先让两边都有它（同时进目录基准）', exists(TARGET, '父目录'), true);
+fs.rmdirSync(abs(TARGET, '父目录')); // 副本那边把它删了
+fs.mkdirSync(abs(VAULT, '父目录/新子目录'), { recursive: true }); // 仓库这边同时加了子目录
+outcome = await runSync(host());
+check('不删本地那个父目录（里面刚加了东西）', outcome.plan.removedFolders, []);
+check('而是把新子目录传过去', outcome.plan.folders, [{ path: '父目录/新子目录', side: 'remote' }]);
+check('一轮之后副本里就有它了', exists(TARGET, '父目录/新子目录'), true);
+outcome = await runSync(host());
+check(
+	'第二轮无事可做（不是"第二轮才同步成功"）',
+	outcome.plan.actions.length + outcome.plan.folders.length + outcome.plan.removedFolders.length,
+	0,
+);
+
+// 26. 反向同理：仓库把「父目录2」删了，副本那边刚往里加了子目录 → 也不许"删了又建"
+fs.mkdirSync(abs(VAULT, '父目录2'), { recursive: true });
+await runSync(host());
+fs.rmdirSync(abs(VAULT, '父目录2')); // 仓库这边删了它
+fs.mkdirSync(abs(TARGET, '父目录2/副本新子目录'), { recursive: true }); // 副本那边同时加了子目录
+outcome = await runSync(host());
+check('不删副本那个父目录（里面刚加了东西）', outcome.plan.removedFolders, []);
+check('而是把新子目录拉到本地', outcome.plan.folders, [{ path: '父目录2/副本新子目录', side: 'local' }]);
+check('一轮之后仓库里就有它了', exists(VAULT, '父目录2/副本新子目录'), true);
+outcome = await runSync(host());
+check(
+	'第二轮同样无事可做',
+	outcome.plan.actions.length + outcome.plan.folders.length + outcome.plan.removedFolders.length,
+	0,
+);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

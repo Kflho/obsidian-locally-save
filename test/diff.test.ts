@@ -332,6 +332,43 @@ check(
 	],
 );
 
+// 父子打架：对面把 A 删了（基准里有 A），而这边刚在 A 里加了 A/B（新出现的）
+// —— 不能"一边删 A、一边把 A/B 建过去"：执行顺序上必然打架，
+//    结果就是"第一轮删了又建、第二轮才稳定"
+check(
+	'父目录里还有"这次要留下"的子目录 → 父目录不删',
+	dirPlan({}, ['A', 'A/B'], {}, [], dirsInBase(['A'])).removedFolders,
+	[],
+);
+check(
+	'新加的子目录照旧传过去',
+	dirPlan({}, ['A', 'A/B'], {}, [], dirsInBase(['A'])).folders,
+	[{ path: 'A/B', side: 'remote' }],
+);
+check(
+	'反向也一样：副本那边 A 里有新子目录 → 本地不删 A',
+	dirPlan({}, [], {}, ['A', 'A/B'], dirsInBase(['A'])).removedFolders,
+	[],
+);
+check(
+	'反向的新子目录也照样建到本地',
+	dirPlan({}, [], {}, ['A', 'A/B'], dirsInBase(['A'])).folders,
+	[{ path: 'A/B', side: 'local' }],
+);
+check(
+	'底下没有要留下的东西时，父子一起删（深的在前）',
+	dirPlan({}, ['A', 'A/B'], {}, [], dirsInBase(['A', 'A/B'])).removedFolders,
+	[
+		{ path: 'A/B', side: 'local' },
+		{ path: 'A', side: 'local' },
+	],
+);
+check(
+	'子目录这次也要删、但再深一层有新东西 → 父目录照样不删',
+	dirPlan({}, ['A', 'A/B', 'A/B/C'], {}, [], dirsInBase(['A', 'A/B'])).removedFolders,
+	[],
+);
+
 // ---------------------------------------------------------------- 状态重建
 const rebuilt = rebuildState(
 	inventory({ 'a.md': [10, T], 'b.md': [20, T] }),

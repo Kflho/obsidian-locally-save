@@ -75,6 +75,11 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   `mirror` 删掉本地所有"包里没有"的空目录（它的承诺就是完全一致）、
   `bundle-wins` / `normal` 只删 `state.bundle.dirs` 里记过的（＝对方删过它，`normal` 还要看开关）。
   应用/导出后 `state.bundle.dirs` 只记**两边都见过**的目录。目录位置杵着同名文件时**报失败不硬来**。
+  **「删父目录」与「建新子目录」不许同时发生**（`removableDirs`）：对面把 `A` 删了、而你这边刚在 `A`
+  里加了 `A/B`（不在基准里）时，父目录必须留着 —— 一个目录能删，除「基准里有 ＋ 底下没文件」之外，
+  还得**底下的每个子目录也都能删**。否则一轮里「删 A」和「把 A/B 建过去」打架，用户看到的是
+  「第一次删了又建了一部分、第二次才彻底同步成功」（报过的 bug）。判断按**深的在前**递归做：
+  子目录的结论先算好，父目录再引用。
   报告里**文件与文件夹都要报**（包里几个、本地几个、一致几个、要建几个、要删几个、留着几个）——
   只报文件的话，用户永远不知道目录这边差多少。
 - **目录 / 文件冲突**（本地同路径是文件夹、包里是文件）：`normal` 档报成明确失败、**不动那个文件夹**；
@@ -113,7 +118,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 509 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 524 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

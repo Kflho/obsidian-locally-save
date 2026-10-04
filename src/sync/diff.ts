@@ -272,15 +272,23 @@ export function planSync(
 	// （＝对面把它删掉了）。两条都要有 —— 只建的话，空文件夹删了会被对面重新建回来，
 	// 用户会看到"我明明删了它，它又回来了"。
 	//
-	// 删除的安全性靠三件事叠起来，缺一不可：
+	// 删除的安全性靠四件事叠起来，缺一不可：
 	// 1. **基准检查**（`baseDirs`）：只有两边都有过的目录才谈得上"被某一侧删了"，
 	//    新出现的目录一律只建不删（与文件的规矩完全一致）；
 	// 2. **方向**：改本地要"允许下载"、改副本要"允许上传"，和文件删除同一条线；
-	// 3. **只走 rmdir**：非空目录必然失败（见 disk.ts 的 removeEmptyDir），
+	// 3. **底下不能有"这次要留下"的子目录**（`removableDirs`）：对面把 `A` 删了，
+	//    而你这边刚在 `A` 里加了 `A/B` —— 这时候"删 A"和"把 A/B 建过去"是打架的，
+	//    同时做就会"第一轮删了又建、第二轮才对上"。父目录留着，让新内容说了算；
+	// 4. **只走 rmdir**：非空目录必然失败（见 disk.ts 的 removeEmptyDir），
 	//    所以就算清单里漏看了文件（比如被排除规则挡住），最坏也只是"没删掉"。
 	const folders: { path: string; side: 'local' | 'remote' }[] = [];
 	const removedFolders: { path: string; side: 'local' | 'remote' }[] = [];
 	const baseDirs = options.baseDirs ?? new Set<string>();
+	const localDirs = local.dirs ?? new Set<string>();
+	const remoteDirs = remote.dirs ?? new Set<string>();
+	// "这一侧有、对面没有"：建与删都只看这些
+	const missingRemote = new Set([...localDirs].filter(dir => !remoteDirs.has(dir)));
+	const missingLocal = new Set([...remoteDirs].filter(dir => !localDirs.has(dir)));
 	// 里面有文件的目录不归目录规则管：那里的东西由文件规则自己决定
 	const filledLocal = dirsContainingFiles(local);
 	const filledRemote = dirsContainingFiles(remote);
@@ -297,26 +305,22 @@ export function planSync(
 			dir = dirnameRel(dir);
 		}
 	}
-	for (const dir of local.dirs ?? []) {
-		if ((remote.dirs ?? new Set<string>()).has(dir)) continue;
-		if (baseDirs.has(dir)) {
-			// 副本那边没有、基准里有 → 副本把它删了 → 本地跟着删
-			if (options.propagateDeletions && allowsDownload && !filledLocal.has(dir)) {
-				removedFolders.push({ path: dir, side: 'local' });
-			}
-			continue;
-		}
+	// 删：副本那边删了 → 本地跟着删（反过来同理）
+	if (options.propagateDeletions) {
+		removedFolders.push(
+			...removableDirs(localDirs, missingRemote, filledLocal, baseDirs, allowsDownload)
+				.map(path => ({ path, side: 'local' as const })),
+			...removableDirs(remoteDirs, missingLocal, filledRemote, baseDirs, allowsUpload)
+				.map(path => ({ path, side: 'remote' as const })),
+		);
+	}
+	// 建：新出现的目录（对面没有、基准里也没有）
+	for (const dir of localDirs) {
+		if (!missingRemote.has(dir) || baseDirs.has(dir)) continue;
 		if (allowsUpload && !implied.remote.has(dir)) folders.push({ path: dir, side: 'remote' });
 	}
-	for (const dir of remote.dirs ?? []) {
-		if ((local.dirs ?? new Set<string>()).has(dir)) continue;
-		if (baseDirs.has(dir)) {
-			// 本地这边没有、基准里有 → 本地把它删了 → 副本跟着删
-			if (options.propagateDeletions && allowsUpload && !filledRemote.has(dir)) {
-				removedFolders.push({ path: dir, side: 'remote' });
-			}
-			continue;
-		}
+	for (const dir of remoteDirs) {
+		if (!missingLocal.has(dir) || baseDirs.has(dir)) continue;
 		if (allowsDownload && !implied.local.has(dir)) folders.push({ path: dir, side: 'local' });
 	}
 	folders.sort(byPath);
@@ -325,6 +329,48 @@ export function planSync(
 	removedFolders.sort((a, b) => byDepthDesc(a.path, b.path));
 
 	return { actions, unchanged, summary: summarize(actions), moves: moves.length, folders, removedFolders };
+}
+
+/**
+ * 挑出**这一侧真的能跟着对面删掉**的目录（深的在前）。
+ *
+ * 四个条件全满足才算：
+ * - `missing`：这一侧有、对面没有（否则没什么好删的）；
+ * - `baseDirs`：基准里记过（＝两边都有过）—— 新出现的一律只建不删；
+ * - `filled`：底下没有文件（有文件就交给文件规则，别在这里抢着删）；
+ * - **底下的每个子目录也都能删**：子目录这次要留下（比如是刚新建、还没来得及同步的），
+ *   父目录就必须留下。不然会出现"对面把 A 删了、你这边刚加了 A/B"时
+ *   一边删 A、一边把 A/B 建过去 —— 执行顺序上必然打架，第一轮白折腾、第二轮才稳定。
+ */
+function removableDirs(
+	here: Set<string>,
+	missing: Set<string>,
+	filled: Set<string>,
+	baseDirs: Set<string>,
+	allowed: boolean,
+): string[] {
+	if (!allowed) return [];
+	const children = childDirs(here);
+	const removable = new Set<string>();
+	// 深的先来：判断父目录时，子目录的结论已经算好了
+	for (const dir of [...here].sort(byDepthDesc)) {
+		if (!missing.has(dir) || !baseDirs.has(dir) || filled.has(dir)) continue;
+		if (!(children.get(dir) ?? []).every(child => removable.has(child))) continue;
+		removable.add(dir);
+	}
+	return [...removable].sort(byDepthDesc);
+}
+
+/** 目录 → 它的直接子目录（用来判断"父目录里还有没有要留下的东西"） */
+function childDirs(dirs: Set<string>): Map<string, string[]> {
+	const map = new Map<string, string[]>();
+	for (const dir of dirs) {
+		const parent = dirnameRel(dir);
+		const list = map.get(parent);
+		if (list) list.push(dir);
+		else map.set(parent, [dir]);
+	}
+	return map;
 }
 
 /** 路径排序用**码位**比较而不是 localeCompare：结果与系统语言无关，测试与 CI 才稳 */
