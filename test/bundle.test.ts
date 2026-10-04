@@ -11,7 +11,7 @@ import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
-import { readBundleInfo, verifyBundle } from '../src/bundle/format';
+import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
@@ -742,6 +742,46 @@ const wResult = await executeBundlePlan(wPlan, applyOptions(W, STATE_W, R_FILE, 
 check('被排除的文件没被删', read(W, '有隐藏东西的/desktop.ini'), 'x');
 check('文件夹也还在', exists(W, '有隐藏东西的'), true);
 check('而且不算失败', wResult.failed.map(item => item.path), []);
+
+// 24. 旧版本导的包（头部没记空文件夹）→ 文件夹**只建不删**
+// 它没法表达"我这边有哪些空文件夹"，拿它反推"本地多出来的都该删"会删错
+const legacyFile = path.join(OUT, 'legacy.lsave');
+const legacySource = path.join(ROOT, 'legacy-source.md');
+fs.writeFileSync(legacySource, 'LEGACY');
+const legacyStat = fs.statSync(legacySource);
+await writeBundle(
+	legacyFile,
+	{
+		format: BUNDLE_FORMAT,
+		version: BUNDLE_VERSION,
+		bundleId: '00000000-0000-4000-8000-000000000001',
+		parentBundleId: null,
+		created: Date.now(),
+		mode: 'full',
+		vault: '旧版仓库',
+		lineage: 'legacy-lineage',
+		source: { copyId: 'legacy-copy', generation: 0 },
+		baseGeneration: null,
+		targetGeneration: 1,
+		deleted: [],
+		// 故意**不写** emptyDirs：这就是旧版本导出来的样子
+	},
+	[{ path: 'legacy.md', abs: legacySource, size: legacyStat.size, mtime: legacyStat.mtimeMs }],
+);
+
+const X = path.join(ROOT, 'machineX');
+const STATE_X = path.join(ROOT, 'state-x.json');
+fs.mkdirSync(X, { recursive: true });
+fs.mkdirSync(abs(X, '本机空目录'), { recursive: true });
+const legacyPlan = await planBundleApply(applyOptions(X, STATE_X, legacyFile, { strictness: 'mirror' }));
+check('认出来了：旧包没记空文件夹', legacyPlan.report.bundleDirsUnknown, true);
+check('于是文件夹一个都不删（哪怕选了强制一致）', legacyPlan.foldersToRemove, []);
+check('文件照旧写入', await (async () => {
+	await executeBundlePlan(legacyPlan, applyOptions(X, STATE_X, legacyFile, { strictness: 'mirror' }));
+	return read(X, 'legacy.md');
+})(), 'LEGACY');
+check('本机那个空目录还在', exists(X, '本机空目录'), true);
+check('新版包不会被误判成旧包', (await planBundleApply(applyOptions(X, STATE_X, R_FILE))).report.bundleDirsUnknown, false);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

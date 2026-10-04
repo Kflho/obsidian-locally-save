@@ -582,7 +582,8 @@ export class ApplyBundleModal extends Modal {
 		// 文件夹也要说清楚：只报文件的话，用户永远不知道目录这边差多少
 		add(`文件夹：包里 ${report.bundleDirCount} 个 · 本地 ${report.localDirCount} 个`
 			+ ` · 两边都有 ${report.foldersInSync} 个`
-			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`);
+			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`
+			+ `${report.bundleDirsUnknown ? '（旧版包没记空文件夹，只能数到有文件的那些）' : ''}`);
 
 		// 防呆第二层：改动包说清它不能干什么
 		if (report.bundle.mode !== 'full') {
@@ -603,6 +604,16 @@ export class ApplyBundleModal extends Modal {
 				text: '它是**累积**的：包含自对方上次导出完整副本以来的全部改动，'
 					+ '所以永远只需要应用最新的这一个 —— 跳过中间几个也不会少内容、不会留下冲突副本。',
 				cls: 'locally-save-hint',
+			});
+		}
+
+		// 旧版本导的包：它没记空文件夹，所以这次目录只建不删（否则会删错）
+		if (report.bundleDirsUnknown) {
+			this.reportEl.createEl('p', {
+				text: '⚠ 这个包是**旧版本**导出的（头部没记空文件夹）：文件夹这次**只建不删** —— '
+					+ '它没法说明自己有哪些空文件夹，反推"本地多出来的都该删"会删错。'
+					+ '想连文件夹一起彻底对齐，让对方用新版重新导一份完整副本。',
+				cls: 'locally-save-warn',
 			});
 		}
 
