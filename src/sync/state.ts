@@ -182,8 +182,13 @@ export function cachedHash(state: PluginState, path: string, record: FileRecord)
 }
 
 export function rememberHash(state: PluginState, path: string, record: FileRecord, hash: string): void {
-	state.hashes[path] = { size: record.size, mtime: record.mtime, hash };
+	// 指纹缓存只用来**区分**文件，不做密码学用途，所以存 16 位（64 bit）就够：
+	// 一万个文件的碰撞概率约 10⁻¹²，而状态文件能小一大截（用户的仓库一万个文件时省 1.4 MB）
+	state.hashes[path] = { size: record.size, mtime: record.mtime, hash: hash.slice(0, HASH_KEEP) };
 }
+
+/** 指纹缓存里保留多少位十六进制字符 */
+export const HASH_KEEP = 16;
 
 /** 清掉已经不在仓库里的指纹，别让状态文件无限长大 */
 export function pruneHashes(state: PluginState, present: Set<string>): void {
