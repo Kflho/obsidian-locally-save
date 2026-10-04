@@ -10,7 +10,7 @@ import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/pat
 import type { BundleMode } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
-import { listFiles } from '../sync/disk';
+import { dirExists, listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { pickBundleFromDrop } from './drop';
@@ -226,6 +226,8 @@ export class ApplyBundleModal extends Modal {
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
 	private pathInput: TextComponent | null = null;
+	/** 列表刷新的序号：防止乱序返回把列表写花 */
+	private refreshToken = 0;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
@@ -379,15 +381,27 @@ export class ApplyBundleModal extends Modal {
 		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir }, this.plugin.settings.targetDir);
 	}
 
+	/**
+	 * 重新列一遍包。
+	 *
+	 * 带一个序号：改文件夹时每敲一个字都会触发一次，异步读目录会**乱序返回** ——
+	 * 没有这个守卫的话，列表可能显示的是上一个目录的结果（用户看到的"错乱"就是这么来的）。
+	 */
 	private async refresh(): Promise<void> {
+		const token = ++this.refreshToken;
 		this.listEl.empty();
+
 		const base = this.effectiveDir();
 		if (!base) {
 			this.listEl.setText('（还没法确定位置：可先在设置里填「目标文件夹」，或在下面直接粘包文件路径）');
 			return;
 		}
+		// 把"这个目录不存在"和"这个目录里没有包"分开说 —— 路径打错时前者更有用
+		if (!await dirExists(base) && !await dirExists(this.dir)) {
+			this.listEl.setText(`这个文件夹不存在：${base}（检查一下路径，或者直接在下面粘包文件路径）`);
+			return;
+		}
 
-		// 两个子目录都看，列表里标出包来自哪一类
 		const found: { file: string; label: string; size: number; mtime: number }[] = [];
 		for (const dir of bundleDirsToScan(base)) {
 			const segments = dir.split(/[/\\]/);
@@ -404,8 +418,19 @@ export class ApplyBundleModal extends Modal {
 		}
 		found.sort((a, b) => b.mtime - a.mtime);
 
+		// 有更新的刷新在跑：这次的结果作废
+		if (token !== this.refreshToken) return;
+
 		if (found.length === 0) {
-			this.listEl.setText('这些文件夹里没有 .lsave 文件');
+			// 别让"列表空着"和"下面显示着某个包的报告"看起来自相矛盾
+			this.listEl.createDiv({ text: '这个文件夹里没有 .lsave 文件', cls: 'locally-save-hint' });
+			if (this.current) {
+				this.listEl.createDiv({
+					text: '当前正在检查的是（拖进来的 / 上面填的）：',
+					cls: 'locally-save-hint',
+				});
+				this.listEl.createDiv({ text: this.current, cls: 'locally-save-path' });
+			}
 			return;
 		}
 		for (const item of found.slice(0, MAX_BUNDLES)) {

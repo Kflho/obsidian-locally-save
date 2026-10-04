@@ -428,23 +428,38 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 
 	options.onProgress?.(done, total, '');
 
-	// 认祖归宗 + 世代对齐，并把"上次导出的样子"更新成当前仓库，
-	// 这样紧接着导出「更新包」时不会把刚同步来的内容又装一遍
+	// 认祖归宗 + 世代对齐
 	const state = await loadState(options.stateFile);
 	state.lineage = plan.info.header.lineage;
 	state.generation = plan.info.header.targetGeneration;
 	state.lastBundleId = plan.info.header.bundleId;
-	const inventory = await scanTree(options.vaultRoot, {
-		exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
-		skipTopLevelDirs: [VAULT_TRASH_DIR],
-	});
+
+	// 基准的正确含义是**"两边上次达成一致的样子"**，所以只能记两边都见过的东西：
+	// - 包里有的 → 真的写成了包里的样子才记（冲突没写成的、失败的都不记）
+	// - 包里点名删的 → 划掉
+	// - 其余（我独有的、对方从没见过的文件）→ **保持原样**，绝不能记进去
+	//
+	// 以前这里图省事写成"当前仓库的完整清单"，于是把我独有的文件也记进了基准；
+	// 下次一应用，它们就成了"基准里有、包里没有" → 被当成"对方删过它"而删掉。
+	// （用户的报障：第一次不删、第二次才删。）
+	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	for (const entry of plan.info.header.entries) {
+		const current = await statFile(toNative(options.vaultRoot, entry.path));
+		const agreed = current
+			&& current.size === entry.size
+			&& Math.abs(current.mtime - entry.mtime) <= TOLERANCE;
+		if (agreed) baseline[entry.path] = { size: entry.size, mtime: entry.mtime };
+		else delete baseline[entry.path];
+	}
+	for (const item of plan.info.header.deleted) delete baseline[item.path];
+
 	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
-	// 所以基准与中间版本记录一起重置；应用更新包则保留原来的基准
+	// 所以中间版本记录重置；应用更新包则保留
 	const isFull = plan.info.header.mode === 'full';
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
-		files: Object.fromEntries(inventory.files),
-		fullFiles: isFull ? Object.fromEntries(inventory.files) : (state.bundle?.fullFiles ?? null),
+		files: baseline,
+		fullFiles: isFull ? { ...baseline } : (state.bundle?.fullFiles ?? null),
 		fullGeneration: isFull
 			? plan.info.header.targetGeneration
 			: (state.bundle?.fullGeneration ?? null),
