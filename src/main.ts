@@ -5,8 +5,9 @@ import type { PluginSettings } from './settings';
 import { runSync as runSyncEngine } from './sync/runner';
 import type { SyncHost, SyncOutcome, SyncProgress, SyncRunOptions } from './sync/runner';
 import { STATE_FILE_NAME } from './sync/state';
-import { syncNow } from './ui/actions';
+import { applyBundleAction, exportBundleAction, syncNow } from './ui/actions';
 import { SyncStatusBar } from './ui/progress';
+import { pickIcon } from './ui/ribbon';
 import { createLogger } from './utils/log';
 import { toNative } from './utils/paths';
 
@@ -33,13 +34,36 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 	/** 保存事件攒到的"脏"时间：停下来多久之后才真的同步 */
 	private saveDirtyAt = 0;
 	private pendingSaveSync = false;
-	private ribbonEl: HTMLElement | null = null;
+	/**
+	 * 左侧栏的三个图标：同步、导出包、应用包。
+	 * 都先建好、再按设置切显隐 —— 改开关立刻生效，不用重载插件。
+	 */
+	private ribbonSyncEl: HTMLElement | null = null;
+	private ribbonExportEl: HTMLElement | null = null;
+	private ribbonApplyEl: HTMLElement | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
 		this.statusBar = new SyncStatusBar(this.addStatusBarItem());
-		this.ribbonEl = this.addRibbonIcon('hard-drive', '立即同步到本地副本', () => { void syncNow(this); });
+
+		// 左侧栏三个入口。图标名用运行时清单挑（类型上 IconName 就是 string，
+		// 写错了只会静默显示成空白方块，见 ui/ribbon.ts）
+		this.ribbonSyncEl = this.addRibbonIcon(
+			pickIcon(['refresh-cw', 'hard-drive', 'save']),
+			'Locally Save：立即同步到本地副本',
+			() => { void syncNow(this); },
+		);
+		this.ribbonExportEl = this.addRibbonIcon(
+			pickIcon(['package', 'archive', 'download']),
+			'Locally Save：导出同步包',
+			() => { exportBundleAction(this); },
+		);
+		this.ribbonApplyEl = this.addRibbonIcon(
+			pickIcon(['package-open', 'import', 'upload']),
+			'Locally Save：打开同步包并应用',
+			() => { applyBundleAction(this); },
+		);
 		this.refreshEntryPoints();
 
 		registerCommands(this);
@@ -151,9 +175,11 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		}
 	}
 
-	/** 按设置显示 / 隐藏左侧栏图标与状态栏那一格 */
+	/** 按设置显示 / 隐藏三个左侧栏图标与状态栏那一格 */
 	private refreshEntryPoints(): void {
-		this.ribbonEl?.toggleClass('locally-save-hidden', this.settings.ribbonIcon === false);
+		this.ribbonSyncEl?.toggleClass('locally-save-hidden', this.settings.ribbonSyncIcon === false);
+		this.ribbonExportEl?.toggleClass('locally-save-hidden', this.settings.ribbonExportIcon === false);
+		this.ribbonApplyEl?.toggleClass('locally-save-hidden', this.settings.ribbonApplyIcon === false);
 		this.statusBar?.setVisible(this.settings.showStatusBar);
 	}
 }

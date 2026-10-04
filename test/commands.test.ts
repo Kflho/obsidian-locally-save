@@ -71,7 +71,16 @@ check("命令 ID 是稳定接口", stub.commands.map(c => c.id), [
 	'toggle-enabled',
 ]);
 check("每条命令都有名字", stub.commands.filter(c => !c.name).length, 0);
-check("左侧栏图标", stub.ribbonItems.map(item => item.icon), ['hard-drive']);
+check(
+	"左侧栏三个图标：同步 / 导出包 / 应用包",
+	stub.ribbonItems.map(item => item.icon),
+	['refresh-cw', 'package', 'package-open'],
+);
+checkTrue(
+	"每个左侧栏图标都有说明文字",
+	stub.ribbonItems.every(item => item.title.includes('Locally Save')),
+	stub.ribbonItems.map(item => item.title).join(' | '),
+);
 check("状态栏占一格", stub.statusBarItems.length, 1);
 check("状态栏初始文案", stub.statusBarItems[0]?.text, '尚未同步');
 check("设置面板已挂上", stub.settingTabs.length, 1);
@@ -125,12 +134,46 @@ check("脏数据回落默认值", dirty.settings.enabled, true);
 check("脏日志级别回落默认值", dirty.settings.logLevel, 'error');
 check("脏同步方向回落默认值", dirty.settings.syncDirection, 'both');
 
-// 9. 入口显隐跟着设置走
-for (const [key, target] of [['ribbonIcon', 'ribbon'], ['showStatusBar', 'status']] as const) {
+// 9. 左侧栏图标点了不能炸（导出 / 应用那两个会开对话框）
+for (const item of stub.ribbonItems) {
+	try {
+		item.callback();
+		checkTrue(`左侧栏「${item.title}」能点`, true, '');
+	} catch (error) {
+		checkTrue(`左侧栏「${item.title}」能点`, false, String(error));
+	}
+}
+
+// 10. 入口显隐跟着设置走：三个图标 + 状态栏各管各的
+const ribbonTargets = [
+	['ribbonSyncIcon', 'ribbon', 0],
+	['ribbonExportIcon', 'ribbon', 1],
+	['ribbonApplyIcon', 'ribbon', 2],
+	['showStatusBar', 'status', 0],
+] as const;
+for (const [key, target, index] of ribbonTargets) {
 	const { plugin: p, stub: s } = createPlugin({ logLevel: 'silent', startupNotice: false, [key]: false });
 	await p.onload();
-	const el = target === 'ribbon' ? s.ribbonItems[0]?.el : s.statusBarItems[0];
+	const el = target === 'ribbon' ? s.ribbonItems[index]?.el : s.statusBarItems[index];
 	checkTrue(`关掉 ${key} 后对应入口被隐藏`, el?.classes.has('locally-save-hidden') === true, '没有加上隐藏类');
+	// 关掉一个入口，其余入口（三个图标 + 状态栏）都不该被连累
+	const others = [
+		...s.ribbonItems.map((item, i) => ({
+			title: item.title,
+			hidden: item.el.classes.has('locally-save-hidden'),
+			shouldBeOff: target === 'ribbon' && i === index,
+		})),
+		...s.statusBarItems.map((item, i) => ({
+			title: `状态栏${i}`,
+			hidden: item.classes.has('locally-save-hidden'),
+			shouldBeOff: target === 'status' && i === index,
+		})),
+	].filter(entry => !entry.shouldBeOff);
+	checkTrue(
+		`关掉 ${key} 不影响别的入口`,
+		others.every(entry => !entry.hidden),
+		`被连累的：${others.filter(entry => entry.hidden).map(entry => entry.title).join(' / ')}`,
+	);
 }
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
