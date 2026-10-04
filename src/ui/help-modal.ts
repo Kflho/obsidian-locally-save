@@ -96,6 +96,30 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
+		contentEl.createEl('h3', { text: '应用时按什么规则处理' });
+		contentEl.createEl('p', {
+			text: '和本地副本同步**同一套规则**（就是设置里那两个开关），没有"三种模式"那种死板的东西：',
+			cls: 'locally-save-hint',
+		});
+		const rules = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		rules.createEl('li', { text: '两边都改过 → 按「两边都改了怎么办」：默认留两份，**新的那份占原名**，旧的存成冲突副本' });
+		rules.createEl('li', { text: '本地有、包里没有、但基准里也有 → 对方删过它 → 按「同步删除」处理（关掉就取回来）' });
+		rules.createEl('li', { text: '本地有、包里没有、基准里也没有 → 我独有的文件 → **一律保留**' });
+		rules.createEl('li', { text: '对方改了名 → 本地跟着改名，不重传内容' });
+		contentEl.createEl('p', {
+			text: '对话框里可以临时覆盖冲突与删除这两条（默认「跟随设置」）。真要删东西之前还会再弹一次确认框。',
+			cls: 'locally-save-hint',
+		});
+
+		contentEl.createEl('h3', { text: '.lsave 不是 Obsidian 能打开的格式' });
+		contentEl.createEl('p', {
+			text: '同步包是本插件自己的容器格式。**别**用 Obsidian 双击它 —— 那样只会被当成未知文件塞进仓库。'
+				+ '正确用法是把包**拖到 Obsidian 窗口上**，或者在这里选它。'
+				+ '插件读包只看绝对路径，跟你系统里 .lsave 关联到哪个程序完全无关；'
+				+ '默认排除规则里也有 *.lsave，万一包进了仓库也不会跟着同步出去。',
+			cls: 'locally-save-hint',
+		});
+
 		contentEl.createEl('h3', { text: '会不会把我的东西弄丢' });
 		const safe = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		safe.createEl('li', {
