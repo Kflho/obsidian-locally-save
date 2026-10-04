@@ -1,0 +1,10 @@
+{
+	"id": "new-plugin",
+	"name": "New Plugin",
+	"version": "0.1.0",
+	"minAppVersion": "1.7.0",
+	"description": "TODO：一句话说明这个插件做什么（提交社区前必须换掉）。",
+	"author": "KahoTAT",
+	"authorUrl": "https://github.com/Kflho",
+	"isDesktopOnly": false
+}

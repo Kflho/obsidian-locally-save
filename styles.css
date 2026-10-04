@@ -1,0 +1,27 @@
+/* 设置面板里的小标题（Obsidian 的 Setting.setHeading() 只有一级，
+   这里的分组层级用 h4 自己造，见 src/settings/tab.ts 的 addSubHeading） */
+.new-plugin-settings-subheading h4 {
+	margin: 1.5em 0 0.5em;
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+/* 状态栏里那格插件状态文字 */
+.new-plugin-status {
+	color: var(--text-muted);
+}
+
+/* 按设置隐藏的入口（左侧栏图标 / 状态栏文字）。
+   用类切换而不是拆掉元素：开关一改立刻生效，不用重载插件 */
+.new-plugin-hidden {
+	display: none;
+}
+
+/* 示例窗口里的说明文字 */
+.new-plugin-modal-hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
