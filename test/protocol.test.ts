@@ -40,33 +40,48 @@ check('不是合法编码时原样返回', normalizeProtocolPath('D:\\100%\\a.ls
 check('链接用了约定的 action', bundleLink('D:\\a.lsave').startsWith(`obsidian://${PROTOCOL_ACTION}?`), true);
 checkTrue(
 	'链接里的路径是编码过的（空格、反斜杠都不会破坏 URI）',
-	bundleLink('C:\\My Notes\\a.lsave').includes('C%3A%5CMy%20Notes%5Ca.lsave'),
+	bundleLink('C:\\My Notes\\a.lsave').includes('bundle=C%3A%5CMy%20Notes%5Ca.lsave'),
 	bundleLink('C:\\My Notes\\a.lsave'),
 );
 checkTrue(
+	'**不用 `path` 当参数名** —— Obsidian 会拿它去找"哪个 vault 包含这个路径"，我们的包在仓库外，会直接报 vault 找不到',
+	!bundleLink('D:\\a.lsave').includes('path='),
+	bundleLink('D:\\a.lsave'),
+);
+checkTrue(
+	'带上 vault 参数（Obsidian 靠它决定把 URI 交给哪个 vault）',
+	bundleLink('D:\\a.lsave', '我的笔记').includes('vault=%E6%88%91%E7%9A%84%E7%AC%94%E8%AE%B0'),
+	bundleLink('D:\\a.lsave', '我的笔记'),
+);
+checkTrue(
 	'链接能被解析回来',
-	decodeURIComponent(bundleLink('D:\\备份\\a.lsave').split('path=')[1] ?? '') === 'D:\\备份\\a.lsave',
+	decodeURIComponent(bundleLink('D:\\备份\\a.lsave').split('bundle=')[1] ?? '') === 'D:\\备份\\a.lsave',
 	'',
 );
 
 // -------------------------------------------------------------------- 文件关联
 checkTrue(
 	'关联命令调起的是 URI，而不是把路径丢给 Obsidian.exe',
-	openCommandLine('C:\\App\\Obsidian.exe').includes('obsidian://'),
-	openCommandLine('C:\\App\\Obsidian.exe'),
+	openCommandLine('C:\\App\\Obsidian.exe', '我的笔记').includes('obsidian://'),
+	openCommandLine('C:\\App\\Obsidian.exe', '我的笔记'),
 );
 checkTrue(
 	'而且带上了裸的 %1（编码成 %251 的话系统就换不出路径了）',
-	openCommandLine('C:\\App\\Obsidian.exe').includes('path=%1"'),
-	openCommandLine('C:\\App\\Obsidian.exe'),
+	openCommandLine('C:\\App\\Obsidian.exe', 'v').includes('bundle=%1"'),
+	openCommandLine('C:\\App\\Obsidian.exe', 'v'),
+);
+checkTrue(
+	'关联里也带 vault（少了它 Obsidian 会报 "Unable to find a vault for the URL"）',
+	openCommandLine('C:\\App\\Obsidian.exe', '我的笔记').includes('vault='),
+	openCommandLine('C:\\App\\Obsidian.exe', '我的笔记'),
 );
 checkTrue(
 	'可执行文件路径带引号（Program Files 里有空格）',
-	openCommandLine('C:\\Program Files\\Obsidian\\Obsidian.exe').startsWith('"C:\\Program Files'),
+	openCommandLine('C:\\Program Files\\Obsidian\\Obsidian.exe', 'v').startsWith('"C:\\Program Files'),
 	'',
 );
 
-const install = installCommands('C:\\App\\Obsidian.exe');
+const install = installCommands('C:\\App\\Obsidian.exe', '我的笔记');
 checkTrue('装关联动了三处（扩展名 / ProgID / 打开命令）', install.length === 3, `实际 ${install.length}`);
 checkTrue('全都走 HKCU（不需要管理员权限）', install.every(c => c.args.some(a => a.startsWith('HKCU\\'))), '');
 checkTrue('用的是 reg.exe', install.every(c => c.file === 'reg.exe'), '');

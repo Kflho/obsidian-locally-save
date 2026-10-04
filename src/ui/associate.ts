@@ -32,20 +32,21 @@ export function associationSupported(): boolean {
 /**
  * 调起 URI 的命令行。
  *
- * `%1` 由 Windows 换成被双击的文件路径 —— 所以这里**必须写裸的 `%1`**，
- * 不能过 `encodeURIComponent`（那会变成 `%251`，系统就换不出路径了）。
- * 路径本身不需要编码：`normalizeProtocolPath` 两种都认。
+ * 两处不能错：
+ * - `%1` **必须写裸的**，不能过 `encodeURIComponent`（那会变成 `%251`，系统就换不出路径了）；
+ * - **必须带上 `vault=`** —— Obsidian 靠它决定把 URI 交给哪个 vault（插件属于某个 vault）。
+ *   参数名也**不能叫 `path`**（详见 protocol.ts 的注释，那是踩过的坑）。
  */
-export function openCommandLine(execPath: string): string {
-	return `"${execPath}" "obsidian://${PROTOCOL_ACTION}?path=%1"`;
+export function openCommandLine(execPath: string, vaultName: string): string {
+	return `"${execPath}" "obsidian://${PROTOCOL_ACTION}?vault=${encodeURIComponent(vaultName)}&bundle=%1"`;
 }
 
 /** 装上关联要跑的命令 */
-export function installCommands(execPath: string): AssociationCommand[] {
+export function installCommands(execPath: string, vaultName: string): AssociationCommand[] {
 	return [
 		{ file: 'reg.exe', args: ['add', EXT_KEY, '/ve', '/d', PROGID, '/f'] },
 		{ file: 'reg.exe', args: ['add', PROGID_KEY, '/ve', '/d', 'Locally Save 同步包', '/f'] },
-		{ file: 'reg.exe', args: ['add', COMMAND_KEY, '/ve', '/d', openCommandLine(execPath), '/f'] },
+		{ file: 'reg.exe', args: ['add', COMMAND_KEY, '/ve', '/d', openCommandLine(execPath, vaultName), '/f'] },
 	];
 }
 

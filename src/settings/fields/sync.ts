@@ -190,9 +190,10 @@ export const SYNC_SECTION: FieldSection = {
 					name: '把 .lsave 关联到 Obsidian',
 					desc: '双击 .lsave 就用 Obsidian 打开并弹出应用对话框。'
 						+ '做法是往当前用户注册表写一条关联（**不需要管理员权限**，只动 HKCU）。'
-						+ '注意：单纯"用 Obsidian 打开"是通不了的 —— 必须让它调起 obsidian:// 链接，插件才收得到',
+						+ '注意：单纯"用 Obsidian 打开"是通不了的 —— 必须让它调起 obsidian:// 链接'
+						+ '（而且链接里要写明 vault，插件才收得到）',
 					button: '设置关联',
-					run: plugin => { new AssociateModal(plugin.app).open(); },
+					run: plugin => { new AssociateModal(plugin.app, plugin.app.vault.getName()).open(); },
 					disabled: () => !associationSupported(),
 				},
 				{

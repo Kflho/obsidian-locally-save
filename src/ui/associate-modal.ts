@@ -11,7 +11,14 @@ import { bundleLink } from './protocol';
  * 让人对着命令点"确定"，而不是点一个黑盒按钮。
  */
 export class AssociateModal extends Modal {
+	/** 当前 vault 名：必须写进 URI，Obsidian 靠它决定交给哪个 vault */
+	private vaultName: string;
 	private statusEl: HTMLElement | null = null;
+
+	constructor(app: App, vaultName: string) {
+		super(app);
+		this.vaultName = vaultName;
+	}
 
 	onOpen(): void {
 		const { contentEl } = this;
@@ -25,10 +32,14 @@ export class AssociateModal extends Modal {
 		contentEl.createEl('p', {
 			text: '注意：单纯把 .lsave「用 Obsidian 打开」是**通不了**的 —— Obsidian 收到一个陌生路径只会'
 				+ '当成未知文件，压根到不了插件。唯一能到插件的通路是 URI 协议，'
-				+ '所以关联要指向 obsidian:// 链接：',
+				+ '而且链接里必须写明交给哪个 vault（插件属于某个 vault）：',
 			cls: 'locally-save-hint',
 		});
-		contentEl.createEl('p', { text: bundleLink('%1'), cls: 'locally-save-path' });
+		contentEl.createEl('p', { text: bundleLink('%1', this.vaultName), cls: 'locally-save-path' });
+		contentEl.createEl('p', {
+			text: `这次会关联到 vault「${this.vaultName}」。换 vault 或者改过仓库文件夹名的话，重新点一次即可。`,
+			cls: 'locally-save-hint',
+		});
 
 		if (!associationSupported()) {
 			contentEl.createEl('p', {
@@ -50,7 +61,7 @@ export class AssociateModal extends Modal {
 
 		contentEl.createEl('h3', { text: '要跑的命令' });
 		const list = contentEl.createDiv({ cls: 'locally-save-list' });
-		for (const command of installCommands(process.execPath)) {
+		for (const command of installCommands(process.execPath, this.vaultName)) {
 			list.createDiv({
 				text: `${command.file} ${command.args.join(' ')}`,
 				cls: 'locally-save-row',
@@ -75,7 +86,7 @@ export class AssociateModal extends Modal {
 	private async install(): Promise<void> {
 		this.statusEl?.setText('正在写注册表……');
 		try {
-			await applyFileAssociation();
+			await applyFileAssociation(this.vaultName);
 			this.statusEl?.setText('设置完成：现在双击 .lsave 就会用 Obsidian 打开并弹出应用对话框');
 			new Notice('已把 .lsave 关联到 Obsidian：双击即可打开同步包', 8000);
 		} catch (error) {
