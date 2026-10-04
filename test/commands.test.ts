@@ -5,8 +5,10 @@
  * 让用户配好的快捷键失效，所以这里钉死。
  */
 import type { PluginManifest } from "obsidian";
-import { App, Notice } from "obsidian";
+import { App, Modal, Notice } from "obsidian";
 import LocallySavePlugin from "../src/main";
+import { ApplyBundleModal } from "../src/ui/bundle-modal";
+import { FULLSCREEN_MODAL_CLASS } from "../src/ui/modal-layout";
 
 /** 替身 Notice 记下的消息（真实类型里没有 messages，这里显式取一次） */
 const noticeLog = (Notice as unknown as { messages: string[] }).messages;
@@ -123,6 +125,40 @@ for (const item of stub.protocolHandlers) {
 		checkTrue(`协议 ${item.action} 能处理`, false, String(error));
 	}
 }
+
+// 2d. 打开包时铺满窗口：默认开着（长报告挤在小盒子里看着就像卡住了）
+// 替身把建过的弹窗按顺序记下来（真实类型里没有这个字段，显式取一次）
+const modalInstances = (Modal as unknown as { instances: { modalEl: unknown }[] }).instances;
+/** 替身元素的类集合（真实类型是 HTMLElement，没有 classes） */
+const classList = (el: unknown) => (el as { classes: Set<string> }).classes;
+const applyModal = modalInstances.at(-1);
+checkTrue('协议打开出来的确实是应用对话框', applyModal !== undefined, '一个弹窗都没建');
+checkTrue(
+	'默认铺满窗口',
+	applyModal !== undefined && classList(applyModal.modalEl).has(FULLSCREEN_MODAL_CLASS),
+	JSON.stringify([...classList(applyModal?.modalEl)]),
+);
+// 关掉之后不该再铺满（同一个开关，对话框里改完立刻生效）
+plugin.settings.bundleDialogFullscreen = false;
+const smallModal = new ApplyBundleModal(new App(), plugin);
+smallModal.open();
+checkTrue(
+	'关掉开关后不再铺满',
+	!classList(smallModal.modalEl).has(FULLSCREEN_MODAL_CLASS),
+	JSON.stringify([...classList(smallModal.modalEl)]),
+);
+plugin.settings.bundleDialogFullscreen = true;
+
+// 2e. 进度更新要节流：每个文件写一次 DOM，一万个文件就够把界面拖顿
+const barEl = stub.statusBarItems[0] as { text: string };
+plugin.statusBar.showProgress({ done: 1, total: 100, path: 'a.md' });
+const firstTick = barEl.text;
+plugin.statusBar.showProgress({ done: 2, total: 100, path: 'b.md' });
+check('接得太近的两次进度只写一次 DOM', barEl.text === firstTick, true);
+plugin.statusBar.showProgress({ done: 100, total: 100, path: 'z.md' });
+check('最后那一次一定要写（否则进度永远停在 1/100）', barEl.text, '同步中 100/100');
+plugin.statusBar.showProgress(null);
+checkTrue('收工后回到结果文案', barEl.text !== '同步中 100/100', barEl.text);
 
 // 3. 没设置目标文件夹时，报错要说得像人话（而不是抛个栈）
 let message = '';

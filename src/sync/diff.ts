@@ -1,5 +1,5 @@
 import type { DiffOptions, FileRecord, Inventory, SyncAction, SyncPlan } from './types';
-import { dirnameRel } from '../utils/paths';
+import { byDepthDesc, dirnameRel } from '../utils/paths';
 
 /**
  * 同步计划的算法：**纯函数**，不碰磁盘，所以能用测试把每种组合都钉死。
@@ -320,7 +320,9 @@ export function planSync(
 		if (allowsDownload && !implied.local.has(dir)) folders.push({ path: dir, side: 'local' });
 	}
 	folders.sort(byPath);
-	removedFolders.sort(byPath);
+	// 删目录必须**深的先删**：父子都在清单里时，先删父目录会被"非空"挡住，
+	// 一轮只清掉最深的一层（"应用一次删不干净、每次多删几个"就是这个）
+	removedFolders.sort((a, b) => byDepthDesc(a.path, b.path));
 
 	return { actions, unchanged, summary: summarize(actions), moves: moves.length, folders, removedFolders };
 }

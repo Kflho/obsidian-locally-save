@@ -66,6 +66,14 @@ export class SyncPreviewModal extends Modal {
 			if (dirParts.length > 0) {
 				contentEl.createEl('p', { text: dirParts.join(' · '), cls: 'locally-save-summary' });
 			}
+			// 删不掉的文件夹：说清原因，别让用户以为"插件删不干净"
+			if (this.outcome.keptFolders.length > 0) {
+				contentEl.createEl('p', {
+					text: `${this.outcome.keptFolders.length} 个文件夹删不掉：清单里看着是空的，磁盘上还有东西 ——`
+						+ `多半是被排除规则挡住的文件（比如 *.lsave、desktop.ini），只删真空的，没有动它`,
+					cls: 'locally-save-warn',
+				});
+			}
 
 			const list = contentEl.createDiv({ cls: 'locally-save-list' });
 			for (const action of plan.actions.slice(0, MAX_ROWS)) {

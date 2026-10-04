@@ -339,6 +339,39 @@ outcome = await runSync(host({ syncDirection: 'upload' }));
 check('仅上传：不删仓库里的目录', exists(VAULT, '仅上传别删我'), true);
 check('仅上传：也不把空目录重新推回副本（与文件规则一致）', exists(TARGET, '仅上传别删我'), false);
 
+// 23b. 嵌套的空目录树：**一轮就要删干净**
+// （父目录排在子目录前面的话，rmdir 会被"非空"挡住，一轮只清掉最深的一层）
+fs.mkdirSync(abs(VAULT, '树/子/孙'), { recursive: true });
+await runSync(host());
+check('三层都传过去了', [exists(TARGET, '树'), exists(TARGET, '树/子'), exists(TARGET, '树/子/孙')], [true, true, true]);
+fs.rmSync(abs(VAULT, '树'), { recursive: true });
+outcome = await runSync(host());
+check('计划里三层都要删', outcome.plan.removedFolders.map(item => item.path), ['树/子/孙', '树/子', '树']);
+check('一轮就删干净（不留空壳）', exists(TARGET, '树'), false);
+check('计数也对得上', outcome.result?.foldersRemoved, 3);
+outcome = await runSync(host());
+check('再同步一轮无事可做', outcome.plan.removedFolders.length + outcome.plan.folders.length, 0);
+// 23c. 目录里只有**被排除规则挡住**的东西（清单看不见、磁盘上有）：
+//      删不掉就如实报出来 —— 不能"每轮列着几十个、实际只删掉十几个"
+write(VAULT, '藏着东西的/desktop.ini', 'x');
+await runSync(host());
+check('副本那边把这个目录建出来了（那边是空的）', exists(TARGET, '藏着东西的'), true);
+fs.rmdirSync(abs(TARGET, '藏着东西的'));
+outcome = await runSync(host());
+check('清单里本来要删它，但按磁盘复核后不该列进去', outcome.plan.removedFolders, []);
+check('而是单独报成"删不掉"', outcome.keptFolders, ['藏着东西的']);
+check('这一轮没有可执行的动作（它是"删不掉"而不是"失败"）', outcome.result, null);
+check('目录连同被排除的那个文件都还在', read(VAULT, '藏着东西的/desktop.ini'), 'x');
+const keptRecord = (await loadState(STATE)).lastSync as LastSyncRecord;
+checkTrue(
+	'一句话总结里说清了原因',
+	describeRecord(keptRecord).includes('没删掉'),
+	describeRecord(keptRecord),
+);
+outcome = await runSync(host());
+check('下一轮还是如实说"删不掉"', outcome.keptFolders, ['藏着东西的']);
+check('而不是偷偷把它建回副本（用户明明删过它）', exists(TARGET, '藏着东西的'), false);
+
 // 23. 目录里有东西时，目录规则不许插手 —— 结果由文件规则决定（rmdir 也不会碰非空目录）
 fs.mkdirSync(abs(VAULT, '有内容的目录'), { recursive: true });
 write(VAULT, '有内容的目录/x.md', 'X');

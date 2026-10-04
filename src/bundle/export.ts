@@ -58,6 +58,10 @@ export interface ExportOutcome {
 	reason?: string;
 	entryCount: number;
 	deletedCount: number;
+	/** 包里一共有多少个文件夹（含空文件夹） */
+	dirCount: number;
+	/** 其中空文件夹几个（这些是"不记就传不过去"的那些） */
+	emptyDirCount: number;
 	payloadBytes: number;
 	durationMs: number;
 	header: BundleHeader | null;
@@ -130,6 +134,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			reason: '自上次完整副本以来没有任何变化，不需要导出',
 			entryCount: 0,
 			deletedCount: 0,
+			dirCount: 0,
+			emptyDirCount: 0,
 			payloadBytes: 0,
 			durationMs: Date.now() - started,
 			header: null,
@@ -244,6 +250,9 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		file,
 		entryCount: sources.length,
 		deletedCount: deleted.length,
+		// 包里的目录 = 记着的空文件夹 ＋ 有文件那些目录（它们由文件写入顺带建出来）
+		dirCount: covered.size + emptyDirs.length,
+		emptyDirCount: emptyDirs.length,
 		payloadBytes: header.payloadBytes,
 		durationMs: Date.now() - started,
 		header,

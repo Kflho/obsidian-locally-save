@@ -14,6 +14,7 @@ import { dirExists, listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { pickBundleFromDrop } from './drop';
+import { focusWindow, setModalFullscreen } from './modal-layout';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
@@ -175,11 +176,10 @@ export class ExportBundleModal extends Modal {
 					continue;
 				}
 				anySuccess = true;
-				const dirs = outcome.header?.emptyDirs?.length ?? 0;
 				notes.push(
-					`${label} ${outcome.entryCount} 个文件`
-					+ `${dirs > 0 ? `、${dirs} 个空文件夹` : ''}、${formatBytes(outcome.payloadBytes)}`
-					+ `（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`,
+					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
+					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
+					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`,
 				);
 			} catch (error) {
 				this.plugin.reportProgress(null);
@@ -232,6 +232,8 @@ export class ApplyBundleModal extends Modal {
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
 	private backupToggle: { setDisabled(disabled: boolean): unknown } | null = null;
+	/** 应用方式下拉的 select 元素：更新包时要把那两个破坏性选项真的灰掉 */
+	private strictnessSelect: HTMLSelectElement | null = null;
 	private listEl!: HTMLElement;
 	private reportEl!: HTMLElement;
 	private applyButton: { setDisabled(disabled: boolean): unknown } | null = null;
@@ -253,11 +255,22 @@ export class ApplyBundleModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
+		// 双击 .lsave 进来的：Obsidian 可能还在别的窗口后面，先叫到前台
+		focusWindow();
+		// 铺满窗口（默认开）：长报告 + 长列表在小盒子里滚，看着就像"卡住了"
+		setModalFullscreen(this, this.plugin.settings.bundleDialogFullscreen);
 		contentEl.createEl('h2', { text: '打开同步包' });
 		contentEl.createEl('p', {
 			text: '选一个 .lsave 文件，这里会先算一遍"应用之后会变成什么样"，确认无误再动手。',
 			cls: 'locally-save-hint',
 		});
+
+		new Setting(contentEl)
+			.setName('铺满窗口')
+			.setDesc('长报告与文件列表一眼看到底（这一项与设置里的是同一个开关，改完立刻生效）')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.bundleDialogFullscreen)
+				.onChange(value => { void this.setFullscreen(value); }));
 
 		// 拖放区：从资源管理器直接把包拖进来，等同于在下面粘路径
 		const dropZone = contentEl.createDiv({ cls: 'locally-save-drop' });
@@ -298,17 +311,20 @@ export class ApplyBundleModal extends Modal {
 		new Setting(contentEl)
 			.setName('应用方式')
 			.setDesc('默认与本地副本同步同一套规则；对面大删大改过、想让这台机器跟包一模一样时往上调')
-			.addDropdown(dropdown => dropdown
-				.addOptions({
-					normal: STRICTNESS_LABELS.normal,
-					'bundle-wins': STRICTNESS_LABELS['bundle-wins'],
-					mirror: STRICTNESS_LABELS.mirror,
-				})
-				.setValue(this.strictness)
-				.onChange(value => {
-					this.strictness = value === 'bundle-wins' || value === 'mirror' ? value : 'normal';
-					void this.replan();
-				}));
+			.addDropdown(dropdown => {
+				dropdown
+					.addOptions({
+						normal: STRICTNESS_LABELS.normal,
+						'bundle-wins': STRICTNESS_LABELS['bundle-wins'],
+						mirror: STRICTNESS_LABELS.mirror,
+					})
+					.setValue(this.strictness)
+					.onChange(value => {
+						this.strictness = value === 'bundle-wins' || value === 'mirror' ? value : 'normal';
+						void this.replan();
+					});
+				this.strictnessSelect = dropdown.selectEl;
+			});
 
 		new Setting(contentEl)
 			.setName('覆盖 / 删掉的先进回收目录')
@@ -431,6 +447,13 @@ export class ApplyBundleModal extends Modal {
 		}
 	}
 
+	/** 开 / 关铺满：立刻见效，并记进设置（下次打开还按这个来） */
+	private async setFullscreen(on: boolean): Promise<void> {
+		this.plugin.settings.bundleDialogFullscreen = on;
+		setModalFullscreen(this, on);
+		await this.plugin.saveSettings();
+	}
+
 	/** 选中一个包：只读地算一遍，把报告画出来 */
 	private async select(file: string): Promise<void> {
 		this.current = file;
@@ -511,6 +534,9 @@ export class ApplyBundleModal extends Modal {
 				keepBackup: this.keepBackup,
 			});
 			this.plan = plan;
+			// 更新包不开放破坏性方式：把那两个选项**真的灰掉**（引擎层还会再兜一道，
+			// 见 planBundleApply）；之前选过的话切回默认并重算一遍
+			this.guardStrictness(plan.info.header.mode);
 			// 强制两档下回收目录是强制开的（界面上灰掉，别让人以为能关）
 			this.backupToggle?.setDisabled(this.strictness !== 'normal');
 			this.renderReport(plan);
@@ -518,6 +544,27 @@ export class ApplyBundleModal extends Modal {
 		} catch (error) {
 			this.reportEl.empty();
 			this.reportEl.setText(`打不开这个包：${describe(error)}`);
+		}
+	}
+
+	/**
+	 * 更新包不开放「清老的 / 强制应用」：把那两个选项真的灰掉。
+	 *
+	 * 光写警告不算数（用户可能先选了方式、再换包）；这里连选项一起禁掉，
+	 * 之前选过的话切回默认并重算 —— 引擎层还有一道兜底（`strictnessDowngraded`）。
+	 */
+	private guardStrictness(mode: 'full' | 'changes'): void {
+		const full = mode === 'full';
+		const select = this.strictnessSelect;
+		if (select) {
+			for (const option of Array.from(select.options)) {
+				if (option.value !== 'normal') option.disabled = !full;
+			}
+		}
+		if (!full && this.strictness !== 'normal') {
+			this.strictness = 'normal';
+			if (select) select.value = 'normal';
+			void this.replan();
 		}
 	}
 
@@ -532,13 +579,20 @@ export class ApplyBundleModal extends Modal {
 		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '仅改动'}`
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
-		if (report.bundle.emptyDirCount > 0) {
-			add(`包里带着 ${report.bundle.emptyDirCount} 个空文件夹`
-				+ `${report.foldersToCreate > 0 ? `（本地要补建 ${report.foldersToCreate} 个）` : '（本地都已经有了）'}`);
-		}
+		// 文件夹也要说清楚：只报文件的话，用户永远不知道目录这边差多少
+		add(`文件夹：包里 ${report.bundleDirCount} 个 · 本地 ${report.localDirCount} 个`
+			+ ` · 两边都有 ${report.foldersInSync} 个`
+			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`);
 
 		// 防呆第二层：改动包说清它不能干什么
 		if (report.bundle.mode !== 'full') {
+			if (report.strictnessDowngraded) {
+				this.reportEl.createEl('p', {
+					text: '⚠ 你选的「清老的 / 强制应用」只对**完整副本**开放，这次已自动改用默认方式：'
+						+ '更新包里只装了变过的文件，拿它清理会把仓库里其余文件全删掉。',
+					cls: 'locally-save-warn',
+				});
+			}
 			this.reportEl.createEl('p', {
 				text: '⚠ 这是「更新包」：里面只装了自完整副本以来变过的文件。所以「清老的」与「强制应用」都用不了 ——'
 					+ ' 对着它清理会把仓库里其余文件全删掉（那两个选项已灰掉）。'
@@ -552,10 +606,11 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
-		// 同步程度：接收方最关心的一个数
+		// 同步程度：接收方最关心的一个数（文件与文件夹分开说，别只报文件）
 		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
-			text: `${report.synchronized} / ${report.bundle.entryCount} 个文件已经和本地一致`,
+			text: `${report.synchronized} / ${report.bundle.entryCount} 个文件已经和本地一致`
+				+ `；文件夹 ${report.foldersInSync} / ${report.bundleDirCount} 个已经在两边都有`,
 			cls: 'locally-save-hint',
 		});
 
@@ -574,8 +629,9 @@ export class ApplyBundleModal extends Modal {
 		if (report.keptDeletes > 0) line(`包里要求删、但本地改过所以保留的：${report.keptDeletes} 个`);
 		if (report.extraDeletes > 0) line(`本地有、包里没有、且对方删过的：${report.extraDeletes} 个`);
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个（直接改名，不重传内容）`);
-		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个空文件夹`);
+		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹（包里有的目录，本地还没有）`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹（包里没有它们）`);
+		if (report.foldersKept > 0) line(`留着 ${report.foldersKept} 个本地文件夹：清单里看着是空的，磁盘上还有东西（多半是被排除规则挡住的文件，只删真空的）`);
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });

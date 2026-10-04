@@ -4,13 +4,14 @@ import type { Logger } from '../utils/log';
 import { toNative } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
 import { DEFAULT_MTIME_TOLERANCE_MS, planSync, rebuildDirs, rebuildState } from './diff';
-import { ensureDir, moveToTrash, pruneEmptyDirsDetailed, removeFile, scanTree, statFile } from './disk';
+import { ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirsDetailed, removeFile, scanTree, statFile } from './disk';
 import { parsePatterns } from './exclude';
 import { executePlan } from './execute';
 import type { ExecuteResult } from './execute';
 import { loadState, saveState, setTargetBaseline, targetBaseline, targetDirs } from './state';
 import { recordFromOutcome } from './summary';
 import type { Inventory, SyncDirection, SyncPlan } from './types';
+import { byDepthDesc } from '../utils/paths';
 
 /**
  * 同步的总调度：扫描 → 比对 → 执行 → 重建基准。
@@ -59,6 +60,11 @@ export interface SyncOutcome {
 	dryRun: boolean;
 	/** 这一轮真正动过的文件数（0 ＝ 两边本来就一致） */
 	changed: number;
+	/**
+	 * 本该删、却删不掉的文件夹（清单里看着是空的，磁盘上还有被排除规则挡住的东西）。
+	 * 界面要如实说一句 —— 不然用户只看到"每轮都在删、就是删不干净"。
+	 */
+	keptFolders: string[];
 	/**
 	 * 收工后仓库的样子。
 	 * 「同步后自动留改动包」直接复用它，省掉一次全库遍历 —— 那次遍历本来就要做，
@@ -129,6 +135,19 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		baseDirs: targetDirs(state, targetDir),
 	});
 
+	// 要删的空目录是按**扫描清单**算的，而清单看不见被排除规则挡住的东西
+	// （*.lsave、desktop.ini…）—— 执行前按磁盘复核一次：删不掉的从清单里摘出来，
+	// 如实报给用户，而不是每轮都"列着几十个、实际只删掉十几个"。
+	const localDirs = planned.removedFolders.filter(item => item.side === 'local').map(item => item.path);
+	const remoteDirs = planned.removedFolders.filter(item => item.side === 'remote').map(item => item.path);
+	const localPick = await pickRemovableEmptyDirs(vaultRoot, localDirs);
+	const remotePick = await pickRemovableEmptyDirs(targetDir, remoteDirs);
+	planned.removedFolders = [
+		...localPick.removable.map(path => ({ path, side: 'local' as const })),
+		...remotePick.removable.map(path => ({ path, side: 'remote' as const })),
+	];
+	const keptFolders = [...localPick.kept, ...remotePick.kept].sort(byDepthDesc);
+
 	host.log.debug(
 		`比对完成：本地 ${local.files.size} 个文件、副本 ${remote.files.size} 个，` +
 		`待处理 ${planned.actions.length} 项，未变 ${planned.unchanged} 项`,
@@ -144,6 +163,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 			durationMs: Date.now() - started,
 			dryRun: true,
 			changed: 0,
+			keptFolders,
 			localInventory: local,
 		};
 	}
@@ -176,7 +196,11 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		targetDir,
 		rebuildState(localAfter, remoteAfter, DEFAULT_MTIME_TOLERANCE_MS),
 		Date.now(),
-		rebuildDirs(localAfter, remoteAfter),
+		// 删不掉的目录也算"两边都见过"：不这么记的话，下一轮会把它当成"新出现的目录"
+		// 重新建到对面去 —— 用户明明删过它，看到它自己回来只会更糊涂。
+		// 记进基准之后，下一轮仍是"对面没了 → 该删但我删不掉"，如实再报一次（也自愈：
+		// 用户哪天把里面那个被排除的文件清掉，下一轮就删成了）
+		[...new Set([...rebuildDirs(localAfter, remoteAfter), ...localPick.kept, ...remotePick.kept])].sort(),
 	);
 	const outcome: SyncOutcome = {
 		targetDir,
@@ -187,6 +211,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 		durationMs: Date.now() - started,
 		dryRun: false,
 		changed: result ? countTouched(result) : 0,
+		keptFolders,
 		localInventory: localAfter,
 	};
 

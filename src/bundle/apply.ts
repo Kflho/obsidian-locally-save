@@ -3,12 +3,13 @@ import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync } from '../sync/diff';
-import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
+import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
-import { dirnameRel, toNative } from '../utils/paths';
+import { byDepthDesc, dirnameRel, toNative } from '../utils/paths';
+import { YIELD_EVERY, yieldToUi } from '../utils/async';
 import type { PluginSettings } from '../settings/model';
 import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../sync/types';
 
@@ -131,6 +132,11 @@ export interface ApplyReport {
 	forced: boolean;
 	/** 本次用的强硬程度 */
 	strictness: ApplyStrictness;
+	/**
+	 * 请求的强硬程度被降级了（更新包 + 强制/清老的 → 默认档）。
+	 * 界面上要说明白：不然用户以为自己选了"完全一致"，实际没生效。
+	 */
+	strictnessDowngraded: boolean;
 	/** 本地停在"对方发过的中间版本"上、直接覆盖的数量 */
 	historyMatches: number;
 	/** 要删的本地文件总数 */
@@ -145,10 +151,18 @@ export interface ApplyReport {
 	syncPercent: number;
 	/** 会认出来的移动（改名/挪目录） */
 	moves: number;
-	/** 这次要在仓库里补建几个文件夹（空文件夹；已有的不算） */
+	/** 这次要在仓库里补建几个文件夹（包里有的目录，本地还没有） */
 	foldersToCreate: number;
 	/** 这次要删掉几个本地空文件夹（包里没有它） */
 	foldersToRemove: number;
+	/** 想删却删不掉的本地文件夹：清单里看不到东西、磁盘上还有（被排除规则挡住的文件） */
+	foldersKept: number;
+	/** 包里一共有多少个文件夹（含空文件夹，以及"有文件的"那些目录） */
+	bundleDirCount: number;
+	/** 本地仓库现在有多少个文件夹 */
+	localDirCount: number;
+	/** 两边都有的文件夹数（＝ 已经一致的） */
+	foldersInSync: number;
 }
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
@@ -206,7 +220,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (!ok) throw new Error('同步包校验失败：文件可能在传输中损坏了，请重新拷一份再试');
 	}
 
-	const strictness: ApplyStrictness = options.strictness ?? 'normal';
+	const requested = options.strictness ?? 'normal';
+	// **更新包不开放破坏性方式**（引擎层兜底，不只界面提示）：
+	// 更新包里只装了变过的文件，"清老的 / 强制应用"会把它没提到的文件全当成"该删"，
+	// 一次就把仓库清空。所以不是完整副本时一律降级成 normal，并在报告里标出来。
+	const strictness: ApplyStrictness = header.mode === 'full' ? requested : 'normal';
+	const strictnessDowngraded = strictness !== requested;
 	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
 	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
 	const conflictStrategy = strictness === 'normal'
@@ -433,21 +452,30 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// 执行时只走 `rmdir`（非空必然失败），所以判断错了也只会"没删掉"，不会连带删掉有内容的目录。
 	const bundleDirs = dirsInBundle(header);
 	const foldersToRemove: string[] = [];
+	/** 想删却删不掉的：清单里看着是空的，磁盘上还有东西（被排除规则挡住的文件） */
+	const foldersKept: string[] = [];
 	{
 		const baseDirs = new Set(state.bundle?.dirs ?? []);
 		const filled = dirsContainingFiles(local);
+		const candidates: string[] = [];
 		for (const dir of local.dirs) {
 			if (bundleDirs.has(dir)) continue;
 			if (filled.has(dir)) continue; // 里面有文件：交给文件规则，别在这里抢着删
 			if (strictness === 'mirror') {
-				foldersToRemove.push(dir);
+				candidates.push(dir);
 				continue;
 			}
 			if (!baseDirs.has(dir)) continue;
 			if (strictness === 'normal' && !propagateDeletions) continue;
-			foldersToRemove.push(dir);
+			candidates.push(dir);
 		}
-		foldersToRemove.sort();
+		// 清单说"这个目录下没有文件"，不等于磁盘上真的空：被排除规则挡住的东西
+		// （*.lsave、desktop.ini…）在清单里根本看不见，而 rmdir 照样会失败。
+		// 所以按**磁盘**问一遍，并且从深到浅累计（父目录要等子目录都能删才算能删）——
+		// 不然就是"列着几十个、每轮只删掉十几个"那种查不出的怪现象。
+		const picked = await pickRemovableEmptyDirs(options.vaultRoot, candidates);
+		foldersToRemove.push(...picked.removable);
+		foldersKept.push(...picked.kept);
 	}
 
 	const report: ApplyReport = {
@@ -472,6 +500,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		propagateDeletions,
 		keepBackup,
 		strictness,
+		strictnessDowngraded,
 		forced: strictness !== 'normal',
 		adds,
 		overwrites,
@@ -485,9 +514,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
 		moves,
-		// 本地还没有的才算"要补建"：包会把空文件夹全带一遍，建已有的目录是空操作
-		foldersToCreate: (header.emptyDirs ?? []).filter(dir => !local.dirs.has(dir)).length,
+		// 本地还没有的目录都算"要补建"：有文件的那些会随文件写入顺带建出来，
+		// 空文件夹靠执行阶段显式建（`header.emptyDirs`）
+		foldersToCreate: [...bundleDirs].filter(dir => !local.dirs.has(dir)).length,
 		foldersToRemove: foldersToRemove.length,
+		foldersKept: foldersKept.length,
+		bundleDirCount: bundleDirs.size,
+		localDirCount: local.dirs.size,
+		foldersInSync: [...bundleDirs].filter(dir => local.dirs.has(dir)).length,
 	};
 
 	return { info, report, actions, foldersToRemove, options: { conflictStrategy, propagateDeletions, keepBackup } };
@@ -629,6 +663,9 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		} catch (error) {
 			result.failed.push({ path: action.path, error: describe(error) });
 		}
+		// 长循环里让一步：几百个文件的包应用下来，界面得有机会重绘
+		// （否则进度条不动、点什么都没反应，看起来就是"卡死了"）
+		if (done > 0 && done % YIELD_EVERY === 0) await yieldToUi();
 	}
 
 	options.onProgress?.(done, total, '');
@@ -659,7 +696,8 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 包里没有的本地空目录（强制档全删、默认档只删"对方删过的"）。
 	// 放在文件动作之后：被文件删除腾空的目录这时候才可能真的空。
 	// 仍然只走 rmdir —— 非空目录删不动，所以这一批不会碰到有内容的目录。
-	for (const dir of plan.foldersToRemove ?? []) {
+	// **深的先删**：父目录要等子目录没了才可能是空的（这里再排一次，不依赖上游顺序）
+	for (const dir of [...(plan.foldersToRemove ?? [])].sort(byDepthDesc)) {
 		if (await removeEmptyDir(toNative(options.vaultRoot, dir))) result.foldersRemoved++;
 	}
 
@@ -730,6 +768,7 @@ async function extractEntry(file: string, info: BundleInfo, entry: BundleEntry, 
 	const destination = await fs.promises.open(target, 'w');
 	const buffer = Buffer.alloc(CHUNK);
 	let read = 0;
+	let chunks = 0;
 	try {
 		while (read < entry.size) {
 			const want = Math.min(CHUNK, entry.size - read);
@@ -737,6 +776,8 @@ async function extractEntry(file: string, info: BundleInfo, entry: BundleEntry, 
 			if (bytesRead <= 0) break;
 			await destination.write(buffer, 0, bytesRead);
 			read += bytesRead;
+			// 单个大文件（几百 MB 的附件）也不能一口气读到黑：中途让出事件循环
+			if (++chunks % YIELD_EVERY === 0) await yieldToUi();
 		}
 		if (read !== entry.size) {
 			throw new Error(`${entry.path} 在包里不完整（读出 ${read}/${entry.size} 字节）`);
