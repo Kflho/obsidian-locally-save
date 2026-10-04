@@ -95,9 +95,11 @@ export const BUNDLE_SECTION: FieldSection = {
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: `导出的 ${BUNDLE_EXTENSION} 文件放哪儿（填绝对路径）。留空则每次导出时手动填路径`,
+					desc: `导出的 ${BUNDLE_EXTENSION} 文件放哪儿（填绝对路径）。留空则每次导出时手动填路径；`
+						+ '「同步后自动留一个改动包」也往这里放',
 					control: { type: 'text', placeholder: 'D:\\传输' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
+					rerenderOnChange: true,
 				},
 				{
 					key: 'bundleMode',
@@ -118,6 +120,16 @@ export const BUNDLE_SECTION: FieldSection = {
 					desc: '给文件算 sha256 并记下来（按大小与修改时间缓存，改过的才算）。作用是：世代对不上时能靠"内容"而不是"时间"判断本地有没有改过，合并更准。第一次导出会多花一两秒读一遍全库',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.rememberFingerprints),
+				},
+				{
+					key: 'autoExportBundle',
+					name: '同步后自动留一个改动包',
+					desc: '每次同步成功后，顺手把这次的改动导成一个包放进上面的文件夹（没有改动就不导）。'
+						+ '用的是同步刚扫完的结果，几乎不额外花时间；包很小，随时可以拷走。'
+						+ '自动留的包**只含改动**——完整副本请用命令手动导出',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportBundle),
+					disabled: settings => settings.bundleDir.trim() === '',
 				},
 			],
 		},

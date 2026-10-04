@@ -72,5 +72,7 @@ export default defineConfig(
 		"versions.json",
 		"main.js",
 		"test/.build",
+		// 开发用的一次性工具脚本（不进 main.js，也没什么好守的规矩）
+		"tools/**",
 	]),
 );

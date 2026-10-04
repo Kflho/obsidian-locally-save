@@ -108,6 +108,8 @@ export interface PluginSettings {
 	bundleVerify: boolean;
 	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
 	rememberFingerprints: boolean;
+	/** 每次同步成功后，顺手把这次的改动导成一个包放到同步包文件夹里 */
+	autoExportBundle: boolean;
 
 	// ------------------------------------------------------------ 界面
 	/** 在左侧栏放一个插件图标 */
@@ -140,6 +142,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	bundleDeleteMissing: false,
 	bundleVerify: true,
 	rememberFingerprints: true,
+	// 默认关：会往磁盘写文件的事，得用户自己点头
+	autoExportBundle: false,
 
 	ribbonIcon: true,
 	showStatusBar: true,
@@ -225,6 +229,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 		bundleDeleteMissing: coerceBoolean(raw.bundleDeleteMissing, DEFAULT_SETTINGS.bundleDeleteMissing),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
+		autoExportBundle: coerceBoolean(raw.autoExportBundle, DEFAULT_SETTINGS.autoExportBundle),
 
 		ribbonIcon: coerceBoolean(raw.ribbonIcon, DEFAULT_SETTINGS.ribbonIcon),
 		showStatusBar: coerceBoolean(raw.showStatusBar, DEFAULT_SETTINGS.showStatusBar),

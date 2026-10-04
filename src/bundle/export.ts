@@ -8,6 +8,7 @@ import { excludePatterns } from '../sync/runner';
 import { fingerprint } from '../sync/hash-cache';
 import { VAULT_TRASH_DIR } from '../sync/runner';
 import { cachedHash, copyRef, loadState, pruneHashes, saveState } from '../sync/state';
+import type { Inventory } from '../sync/types';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
 import { toNative } from '../utils/paths';
@@ -34,6 +35,11 @@ export interface ExportOptions {
 	outDir: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
+	/**
+	 * 已经扫好的仓库清单。
+	 * 同步刚扫完的话直接传进来复用 —— 少一次全库遍历，自动留包就几乎不花时间。
+	 */
+	inventory?: Inventory;
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
@@ -62,7 +68,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const exclude = excludePatterns(settings.excludePatterns, options.configDir);
 
 	const state = await loadState(options.stateFile);
-	const inventory = await scanTree(options.vaultRoot, { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
+	const inventory = options.inventory
+		?? await scanTree(options.vaultRoot, { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
 	const previous = state.bundle?.files ?? {};
 
 	// 挑出要装进包的文件
