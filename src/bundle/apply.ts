@@ -3,7 +3,7 @@ import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
 import { DEFAULT_MTIME_TOLERANCE_MS, planSync } from '../sync/diff';
-import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, scanTree, statFile } from '../sync/disk';
+import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pruneEmptyDirs, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
 import { formatStamp } from '../utils/format';
@@ -112,6 +112,8 @@ export interface ApplyReport {
 		created: number;
 		entryCount: number;
 		deletedCount: number;
+		/** 包里带着的空文件夹总数（有文件的目录不算，它们会随文件写入被顺带建出来） */
+		emptyDirCount: number;
 		payloadBytes: number;
 	};
 	/** 本次实际采用的策略（界面回显：是跟随设置还是临时覆盖） */
@@ -143,6 +145,8 @@ export interface ApplyReport {
 	syncPercent: number;
 	/** 会认出来的移动（改名/挪目录） */
 	moves: number;
+	/** 这次要在仓库里补建几个文件夹（空文件夹；已有的不算） */
+	foldersToCreate: number;
 }
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
@@ -170,6 +174,10 @@ export interface ApplyResult {
 	conflicts: number;
 	deleted: number;
 	moved: number;
+	/** 新建的目录（包里记着的空文件夹） */
+	foldersCreated: number;
+	/** 删空之后顺手收拾掉的空目录 */
+	foldersRemoved: number;
 	bytesWritten: number;
 	failed: { path: string; error: string }[];
 	conflictCopies: string[];
@@ -227,6 +235,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const entriesByPath = new Map(header.entries.map(entry => [entry.path, entry]));
 	const remote: Inventory = {
 		files: new Map(header.entries.map(entry => [entry.path, { size: entry.size, mtime: entry.mtime }])),
+		dirs: new Set(header.emptyDirs ?? []),
 	};
 
 	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
@@ -251,7 +260,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		})
 		// 强制档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
 		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
-		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0 };
+		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [] };
 
 	// ------------------------------------------------- 比对结果 → 落地动作
 	const actions: ApplyAction[] = [];
@@ -423,6 +432,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			created: header.created,
 			entryCount: header.entries.length,
 			deletedCount: header.deleted.length,
+			emptyDirCount: (header.emptyDirs ?? []).length,
 			payloadBytes: header.payloadBytes,
 		},
 		conflictStrategy,
@@ -442,6 +452,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
 		moves,
+		// 本地还没有的才算"要补建"：包会把空文件夹全带一遍，建已有的目录是空操作
+		foldersToCreate: (header.emptyDirs ?? []).filter(dir => !local.dirs.has(dir)).length,
 	};
 
 	return { info, report, actions, options: { conflictStrategy, propagateDeletions, keepBackup } };
@@ -477,6 +489,8 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		conflicts: 0,
 		deleted: 0,
 		moved: 0,
+		foldersCreated: 0,
+		foldersRemoved: 0,
 		bytesWritten: 0,
 		failed: [],
 		conflictCopies: [],
@@ -565,6 +579,29 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	}
 
 	options.onProgress?.(done, total, '');
+
+	// 包里记着的**空文件夹**建出来：有文件的目录会随着文件写入被 ensureDir 顺带建出来，
+	// 空的没有"顺带"可搭，不建就永远传不过来
+	for (const dir of plan.info.header.emptyDirs ?? []) {
+		try {
+			const abs = toNative(options.vaultRoot, dir);
+			// 同名文件挡路：不删不挪（目录 / 文件冲突要不要强推是 normal 与强制档的区别，不是"建目录"这一步说了算）
+			if (await statFile(abs)) {
+				result.failed.push({ path: dir, error: '要建文件夹的位置是一个同名文件，没有动它' });
+				continue;
+			}
+			await ensureDir(abs);
+			result.foldersCreated++;
+		} catch (error) {
+			result.failed.push({ path: dir, error: describe(error) });
+		}
+	}
+
+	// 收尾：把"被删空 / 挪空"的目录收拾掉，别留一串空壳
+	result.foldersRemoved += await pruneEmptyDirs(options.vaultRoot, [
+		...plan.actions.filter(action => action.kind === 'delete').map(action => action.path),
+		...plan.actions.flatMap(action => (action.kind === 'rename' && action.from ? [action.from] : [])),
+	]);
 
 	// 认祖归宗 + 世代对齐
 	const state = await loadState(options.stateFile);

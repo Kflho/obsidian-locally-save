@@ -1,4 +1,5 @@
 import type { DiffOptions, FileRecord, Inventory, SyncAction, SyncPlan } from './types';
+import { dirnameRel } from '../utils/paths';
 
 /**
  * 同步计划的算法：**纯函数**，不碰磁盘，所以能用测试把每种组合都钉死。
@@ -267,7 +268,54 @@ export function planSync(
 		}
 	}
 
-	return { actions, unchanged, summary: summarize(actions), moves: moves.length };
+	// 目录也要跟着走：只比文件的话，空文件夹永远传不过去（它里面没有文件可复制）。
+	//
+	// 目录**只建不删**，这是故意的：空目录留着不碍事，删错了却是整片内容消失；
+	// 而且目录没有"大小 + 修改时间"能做基准检查，三方比对那套保护在目录上根本不成立。
+	// 真正被删空 / 挪空的目录，由执行阶段顺着被删文件的父路径顺手收拾（pruneEmptyDirs）。
+	const folders: { path: string; side: 'local' | 'remote' }[] = [];
+	// 已经在往某侧写文件的目录会被顺带建出来（copyFilePreservingMtime 里有 ensureDir），
+	// 不必再单独立一条 —— 否则界面上会把同一个目录报两遍
+	const implied: Record<'local' | 'remote', Set<string>> = { local: new Set(), remote: new Set() };
+	for (const action of actions) {
+		const side = receivingSide(action);
+		if (!side) continue;
+		let dir = dirnameRel(action.path);
+		while (dir) {
+			if (implied[side].has(dir)) break;
+			implied[side].add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+	for (const dir of local.dirs ?? []) {
+		if (allowsUpload && !(remote.dirs ?? new Set<string>()).has(dir) && !implied.remote.has(dir)) {
+			folders.push({ path: dir, side: 'remote' });
+		}
+	}
+	for (const dir of remote.dirs ?? []) {
+		if (allowsDownload && !(local.dirs ?? new Set<string>()).has(dir) && !implied.local.has(dir)) {
+			folders.push({ path: dir, side: 'local' });
+		}
+	}
+	folders.sort((a, b) => a.path.localeCompare(b.path));
+
+	return { actions, unchanged, summary: summarize(actions), moves: moves.length, folders };
+}
+
+/** 这个动作往哪一侧写数据（建目录要跟着它走）；删除与不写数据的不算 */
+function receivingSide(action: SyncAction): 'local' | 'remote' | null {
+	switch (action.kind) {
+		case 'upload':
+		case 'rename-remote':
+			return 'remote';
+		case 'download':
+		case 'rename-local':
+			return 'local';
+		case 'conflict':
+			return action.winner === 'local' ? 'remote' : 'local';
+		default:
+			return null;
+	}
 }
 
 /** 各类变更的数量：预览窗口、通知、同步包报告都用它说人话 */

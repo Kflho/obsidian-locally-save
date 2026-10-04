@@ -175,8 +175,10 @@ export class ExportBundleModal extends Modal {
 					continue;
 				}
 				anySuccess = true;
+				const dirs = outcome.header?.emptyDirs?.length ?? 0;
 				notes.push(
-					`${label} ${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
+					`${label} ${outcome.entryCount} 个文件`
+					+ `${dirs > 0 ? `、${dirs} 个空文件夹` : ''}、${formatBytes(outcome.payloadBytes)}`
 					+ `（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`,
 				);
 			} catch (error) {
@@ -530,6 +532,10 @@ export class ApplyBundleModal extends Modal {
 		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '仅改动'}`
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
+		if (report.bundle.emptyDirCount > 0) {
+			add(`包里带着 ${report.bundle.emptyDirCount} 个空文件夹`
+				+ `${report.foldersToCreate > 0 ? `（本地要补建 ${report.foldersToCreate} 个）` : '（本地都已经有了）'}`);
+		}
 
 		// 防呆第二层：改动包说清它不能干什么
 		if (report.bundle.mode !== 'full') {
@@ -568,6 +574,7 @@ export class ApplyBundleModal extends Modal {
 		if (report.keptDeletes > 0) line(`包里要求删、但本地改过所以保留的：${report.keptDeletes} 个`);
 		if (report.extraDeletes > 0) line(`本地有、包里没有、且对方删过的：${report.extraDeletes} 个`);
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个（直接改名，不重传内容）`);
+		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个空文件夹`);
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
@@ -648,12 +655,17 @@ export class ApplyBundleModal extends Modal {
 			});
 			this.plugin.reportProgress(null);
 			this.plugin.settings.showLastSyncInStatusBar
-				&& this.plugin.statusBar.setSummary(`同步包已应用（写入 ${result.written}）`);
+				&& this.plugin.statusBar.setSummary(
+					`同步包已应用（写入 ${result.written}`
+					+ `${result.foldersCreated > 0 ? `、文件夹 ${result.foldersCreated}` : ''}）`,
+				);
 
 			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
 			if (result.deleted > 0) parts.push(`删除 ${result.deleted}`);
 			if (result.moved > 0) parts.push(`改名 ${result.moved}`);
+			if (result.foldersCreated > 0) parts.push(`新建文件夹 ${result.foldersCreated}`);
+			if (result.foldersRemoved > 0) parts.push(`清理空文件夹 ${result.foldersRemoved}`);
 			if (result.failed.length > 0) {
 				// 失败的要**列出来**，只说"失败 N 个"等于没说
 				const shown = result.failed.slice(0, 5).map(item => `${item.path}（${item.error}）`);

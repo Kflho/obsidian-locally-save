@@ -12,7 +12,7 @@ import { ApplyBundleModal } from './bundle-modal';
  * （`obsidian://…`），Obsidian 会把 URI 交给注册了对应 action 的插件处理。
  *
  * 所以这里的配合是：
- * - 插件注册 `obsidian://locally-save?path=<文件路径>`；
+ * - 插件注册 `obsidian://locally-save?vault=<vault 名>&bundle=<文件路径>`；
  * - 系统的文件关联指向"调起这个 URI"（见 `associate.ts`，在设置里一键设置）。
  *
  * 于是双击 `.lsave` → 系统调起 URI → Obsidian 转给插件 → 直接就打开了应用对话框。

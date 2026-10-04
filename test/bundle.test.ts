@@ -454,6 +454,7 @@ const reused = await exportBundle({
 	// 故意造一份"没看见 invisible.md"的清单：如果导出真的复用了它，那个文件就不该进包
 	inventory: {
 		files: new Map([['notes/a.md', { size: 3, mtime: fs.statSync(abs(E, 'notes/a.md')).mtimeMs }]]),
+		dirs: new Set(['notes']),
 	},
 });
 check('复用传入的清单：不在清单里的文件不进包', reused.entryCount, 1);
@@ -550,6 +551,53 @@ try {
 }
 await running;
 checkTrue('第二次应用被拦住', lockError.includes('还在进行中'), lockError || '（没拦住）');
+
+// 17. 空文件夹也要能过包传过去（只带文件的话，对面的空目录永远建不出来）
+const Q = path.join(ROOT, 'machineQ');
+const R = path.join(ROOT, 'machineR');
+const STATE_Q = path.join(ROOT, 'state-q.json');
+const STATE_R = path.join(ROOT, 'state-r.json');
+fs.mkdirSync(Q, { recursive: true });
+fs.mkdirSync(R, { recursive: true });
+write(Q, 'notes/keep.md', 'KEEP');
+fs.mkdirSync(abs(Q, '空目录/更深一层'), { recursive: true });
+fs.mkdirSync(abs(Q, 'notes/子目录'), { recursive: true });
+
+const qExport = await exportBundle(exportOptions(Q, STATE_Q));
+checkTrue('有空文件夹也照样导得出来', qExport.file !== null, qExport.reason ?? '没有导出文件');
+const qInfo = await readBundleInfo(qExport.file as string);
+check('包里记下了空文件夹（含嵌套的）', qInfo.header.emptyDirs, ['notes/子目录', '空目录', '空目录/更深一层']);
+check('有文件的目录不算「空文件夹」', (qInfo.header.emptyDirs ?? []).includes('notes'), false);
+
+const R_FILE = qExport.file as string;
+const qPlan = await planBundleApply(applyOptions(R, STATE_R, R_FILE));
+check('报告里说清了要补建几个文件夹', [qPlan.report.bundle.emptyDirCount, qPlan.report.foldersToCreate], [3, 3]);
+check('建文件夹不算文件条目', qPlan.report.adds, 1);
+const qResult = await executeBundlePlan(qPlan, applyOptions(R, STATE_R, R_FILE));
+check(
+	'应用后空文件夹都在',
+	[exists(R, '空目录'), exists(R, '空目录/更深一层'), exists(R, 'notes/子目录')],
+	[true, true, true],
+);
+check('结果里记了建了几个目录', qResult.foldersCreated, 3);
+check('应用过一次之后再打开这个包：不需要再补建', (await planBundleApply(
+	applyOptions(R, STATE_R, R_FILE),
+)).report.foldersToCreate, 0);
+
+// 18. 空文件夹的位置上杵着个同名文件 → 如实报出来，不硬来
+const S = path.join(ROOT, 'machineS');
+const STATE_S = path.join(ROOT, 'state-s.json');
+fs.mkdirSync(S, { recursive: true });
+write(S, '空目录', 'I AM A FILE');
+const sPlan = await planBundleApply(applyOptions(S, STATE_S, R_FILE));
+const sResult = await executeBundlePlan(sPlan, applyOptions(S, STATE_S, R_FILE));
+checkTrue(
+	'同名文件挡路 → 记成失败（而不是把它删掉腾位置）',
+	sResult.failed.some(item => item.error.includes('同名文件')),
+	JSON.stringify(sResult.failed),
+);
+check('那个文件原样还在', read(S, '空目录'), 'I AM A FILE');
+check('能建的目录照样建', exists(S, 'notes/子目录'), true);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

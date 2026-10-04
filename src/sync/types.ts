@@ -14,6 +14,13 @@ export interface FileRecord {
 /** 一次扫描的结果：仓库相对路径 → 形态 */
 export interface Inventory {
 	files: Map<string, FileRecord>;
+	/**
+	 * 这次扫描看到的**目录**（相对路径，不含根）。
+	 *
+	 * 为什么要单独记：只盯文件的话，**空文件夹永远不会被同步**，
+	 * 而且删光一个文件夹里的文件之后，两边的空壳都会留着。
+	 */
+	dirs: Set<string>;
 }
 
 /** 同步方向：双向 / 只往副本推 / 只从副本拉 */
@@ -89,6 +96,11 @@ export interface SyncPlan {
 	summary: Record<ChangeKind, number>;
 	/** 认出来的移动数量（含在 summary.move 里，单独留一份便于说明） */
 	moves: number;
+	/**
+	 * 要新建的目录。**空文件夹也要跟着走** —— 只同步文件的话，
+	 * 一个空文件夹永远传不过去（它里面没有文件可复制）。
+	 */
+	folders: { path: string; side: 'local' | 'remote' }[];
 }
 
 /** 动作类型的中文名，通知与预览窗口共用 */

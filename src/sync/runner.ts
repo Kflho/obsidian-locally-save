@@ -151,7 +151,10 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 	let localAfter = local;
 	let remoteAfter = remote;
 
-	if (planned.actions.length > 0) {
+	const folderCount = planned.folders?.length ?? 0;
+
+	// 只差文件夹也得跑：空文件夹没有文件动作可搭，漏掉这一步就永远传不过去
+	if (planned.actions.length > 0 || folderCount > 0) {
 		result = await executePlan(planned, {
 			vaultRoot,
 			targetRoot: targetDir,
@@ -196,7 +199,7 @@ export async function runSync(host: SyncHost, options: SyncRunOptions = {}): Pro
 /** 这一轮动过几个文件（同步结果 → 一个数） */
 function countTouched(result: ExecuteResult): number {
 	return result.uploaded + result.downloaded + result.deletedLocal
-		+ result.deletedRemote + result.conflicts + result.moved;
+		+ result.deletedRemote + result.conflicts + result.moved + result.foldersCreated;
 }
 
 /**

@@ -12,7 +12,7 @@ import { cachedHash, copyRef, loadState, pruneHashes, saveState } from '../sync/
 import type { Inventory, FileRecord } from '../sync/types';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
-import { toNative } from '../utils/paths';
+import { toNative, dirnameRel } from '../utils/paths';
 import type { PluginSettings } from '../settings/model';
 
 /**
@@ -179,6 +179,17 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const now = Date.now();
 	const bundleId = randomUUID();
 	const targetGeneration = state.generation + 1;
+	// 空目录：有文件的目录会随文件写入被顺带建出来，**空文件夹不记就永远传不过去**
+	const covered = new Set<string>();
+	for (const file of inventory.files.keys()) {
+		let dir = dirnameRel(file);
+		while (dir) {
+			if (covered.has(dir)) break;
+			covered.add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+	const emptyDirs = [...inventory.dirs].filter(dir => !covered.has(dir)).sort();
 	// 文件名带上包 ID 的前几位：时间戳只精确到秒，同一秒内连导两个会互相覆盖
 	const file = path.join(
 		bundleDirForMode(options.outDir, mode),
@@ -203,6 +214,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			baseGeneration: mode === 'changes' ? (state.bundle?.fullGeneration ?? state.generation) : null,
 			targetGeneration,
 			deleted,
+			emptyDirs,
 		},
 		sources,
 	);

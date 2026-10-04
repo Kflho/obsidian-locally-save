@@ -100,6 +100,13 @@ export interface BundleHeader {
 	targetGeneration: number;
 	entries: BundleEntry[];
 	deleted: BundleDeletedEntry[];
+	/**
+	 * 里面**没有任何文件**的目录（相对路径）。
+	 *
+	 * 只记空的就够了：有文件的目录会随着文件的写入被 `ensureDir` 顺带建出来；
+	 * 而一个空文件夹没有任何文件可以"顺带"，不记就永远传不过去。
+	 */
+	emptyDirs?: string[];
 	/** 负载总字节数 */
 	payloadBytes: number;
 }

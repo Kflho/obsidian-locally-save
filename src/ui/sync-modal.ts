@@ -28,6 +28,8 @@ export class SyncPreviewModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		const { plan } = this.outcome;
+		const folders = plan.folders ?? [];
+		const pending = plan.actions.length + folders.length;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '同步预览' });
@@ -38,17 +40,27 @@ export class SyncPreviewModal extends Modal {
 		});
 		contentEl.createEl('p', {
 			text: `本地 ${this.outcome.scannedLocal} 个文件 · 副本 ${this.outcome.scannedRemote} 个文件 · `
-				+ `一致 ${plan.unchanged} 个 · 待处理 ${plan.actions.length} 项`,
+				+ `一致 ${plan.unchanged} 个 · 待处理 ${pending} 项`,
 		});
 
-		if (plan.actions.length === 0) {
+		if (pending === 0) {
 			contentEl.createEl('p', { text: '两边已经一致，没有需要处理的内容。' });
 		} else {
 			const summary = Object.entries(plan.summary)
 				.filter(([, count]) => count > 0)
 				.map(([kind, count]) => `${CHANGE_LABELS[kind as keyof typeof CHANGE_LABELS]} ${count}`)
 				.join(' · ');
-			contentEl.createEl('p', { text: summary, cls: 'locally-save-summary' });
+			if (summary) contentEl.createEl('p', { text: summary, cls: 'locally-save-summary' });
+
+			// 空文件夹没有文件动作可搭，单列一行说清楚，否则"既要建文件夹又没有文件"会被当成没事干
+			const localDirs = folders.filter(folder => folder.side === 'local').length;
+			const remoteDirs = folders.length - localDirs;
+			const dirParts: string[] = [];
+			if (remoteDirs > 0) dirParts.push(`副本新建文件夹 ${remoteDirs}`);
+			if (localDirs > 0) dirParts.push(`本地新建文件夹 ${localDirs}`);
+			if (dirParts.length > 0) {
+				contentEl.createEl('p', { text: dirParts.join(' · '), cls: 'locally-save-summary' });
+			}
 
 			const list = contentEl.createDiv({ cls: 'locally-save-list' });
 			for (const action of plan.actions.slice(0, MAX_ROWS)) {
@@ -63,13 +75,22 @@ export class SyncPreviewModal extends Modal {
 					cls: 'locally-save-more',
 				});
 			}
+			for (const folder of folders.slice(0, MAX_ROWS)) {
+				const row = list.createDiv({ cls: 'locally-save-row is-add' });
+				row.createSpan({ text: '建文件夹', cls: 'locally-save-action' });
+				row.createSpan({ text: `${folder.path}/`, cls: 'locally-save-file' });
+				row.createSpan({
+					text: folder.side === 'remote' ? '副本里还没有' : '仓库里还没有',
+					cls: 'locally-save-reason',
+				});
+			}
 		}
 
 		new Setting(contentEl)
 			.addButton(button => button
 				.setButtonText('执行同步')
 				.setCta()
-				.setDisabled(plan.actions.length === 0)
+				.setDisabled(pending === 0)
 				.onClick(() => {
 					this.close();
 					this.onConfirm();
