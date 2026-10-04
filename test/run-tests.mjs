@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const entryPoints = [
+	"test/manifest.test.ts",
 	"test/exclude.test.ts",
 	"test/diff.test.ts",
 	"test/sync.test.ts",
