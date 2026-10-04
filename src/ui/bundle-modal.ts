@@ -1,15 +1,19 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { executeBundlePlan, planBundleApply } from '../bundle/apply';
-import type { ApplyPlan } from '../bundle/apply';
+import { executeBundlePlan, planBundleApply, APPLY_MODE_LABELS } from '../bundle/apply';
+import type { ApplyMode, ApplyPlan } from '../bundle/apply';
 import { exportBundle } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
+import { readBundleInfo } from '../bundle/format';
+import type { DropdownComponent } from 'obsidian';
 import { listFiles } from '../sync/disk';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 列表里最多列多少个包 */
 const MAX_BUNDLES = 20;
+/** 确认框里最多列多少个会被删的文件 */
+const MAX_ROWS = 200;
 
 /**
  * 导出同步包。
@@ -146,6 +150,10 @@ export class ApplyBundleModal extends Modal {
 	private dir: string;
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
+	/** 应用方式：默认最保守的「所有都保留」 */
+	private mode: ApplyMode = 'keep-all';
+	private keepBackup: boolean;
+	private modeDropdown: DropdownComponent | null = null;
 	private listEl!: HTMLElement;
 	private reportEl!: HTMLElement;
 	private applyButton: { setDisabled(disabled: boolean): unknown } | null = null;
@@ -155,6 +163,7 @@ export class ApplyBundleModal extends Modal {
 		this.plugin = plugin;
 		// 默认跟着同步目标走（设置里填了同步包文件夹就用填的）
 		this.dir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		this.keepBackup = plugin.settings.deletedToTrash;
 		this.current = null;
 	}
 
@@ -188,6 +197,37 @@ export class ApplyBundleModal extends Modal {
 				.onChange(value => {
 					const path = value.trim();
 					if (path) void this.select(path);
+				}));
+
+		// ---------------------------------------------------------- 应用方式
+		// 放在这儿而不是设置里：这是"这一次要怎么应用"的决定，每次搬包时的心态都不一样
+		new Setting(contentEl)
+			.setName('应用方式')
+			.setDesc('「清老的」与「强制应用」只能对着完整副本用 —— 改动包里只装了变过的文件，对着它清理会把仓库其余文件全删掉')
+			.addDropdown(dropdown => {
+				this.modeDropdown = dropdown;
+				dropdown
+					.addOptions({
+						'keep-all': APPLY_MODE_LABELS['keep-all'],
+						'delete-old': APPLY_MODE_LABELS['delete-old'],
+						force: APPLY_MODE_LABELS.force,
+					})
+					.setValue(this.mode)
+					.onChange(value => {
+						this.mode = value === 'delete-old' || value === 'force' ? value : 'keep-all';
+						void this.replan();
+					});
+			});
+
+		new Setting(contentEl)
+			.setName('覆盖 / 删掉的先进回收目录')
+			.setDesc('强制应用与清老的会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
+				+ '仍然捞得回来。关掉就是直接覆盖 / 删除')
+			.addToggle(toggle => toggle
+				.setValue(this.keepBackup)
+				.onChange(value => {
+					this.keepBackup = value;
+					void this.replan();
 				}));
 
 		this.listEl = contentEl.createDiv({ cls: 'locally-save-list' });
@@ -256,8 +296,30 @@ export class ApplyBundleModal extends Modal {
 		this.applyButton?.setDisabled(true);
 		this.reportEl.empty();
 		this.reportEl.setText('正在检查这个包……');
+		await this.replan();
+	}
 
+	/**
+	 * 重新算一遍（换包、换应用方式、换备份开关都要走这里）。
+	 *
+	 * 防呆的第一层：**改动包不能配破坏性的应用方式**。改动包里只装了变过的文件，
+	 * 对着它"清老的"或"强制应用"等于把仓库里其余文件全删掉 ——
+	 * 所以这两种方式只对完整副本开放，选了就自动切回来并说明原因。
+	 */
+	private async replan(): Promise<void> {
+		const file = this.current;
+		if (!file) return;
+		this.applyButton?.setDisabled(true);
 		try {
+			const info = await readBundleInfo(file);
+			const isFull = info.header.mode === 'full';
+			if (!isFull && this.mode !== 'keep-all') {
+				this.mode = 'keep-all';
+				this.modeDropdown?.setValue('keep-all');
+				new Notice('这是「仅改动」的包：已自动切回「所有都保留」。改动包不能强制应用或清理多余文件', 8000);
+			}
+			this.modeDropdown?.setDisabled(!isFull);
+
 			const plan = await planBundleApply({
 				settings: this.plugin.settings,
 				log: this.plugin.log,
@@ -265,13 +327,15 @@ export class ApplyBundleModal extends Modal {
 				stateFile: this.plugin.stateFile(),
 				file,
 				configDir: this.plugin.configDir(),
+				mode: this.mode,
+				keepBackup: this.keepBackup,
 			});
 			this.plan = plan;
 			this.renderReport(plan);
 			this.applyButton?.setDisabled(false);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.reportEl.setText(`打不开这个包：${message}`);
+			this.reportEl.empty();
+			this.reportEl.setText(`打不开这个包：${describe(error)}`);
 		}
 	}
 
@@ -287,6 +351,16 @@ export class ApplyBundleModal extends Modal {
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
 
+		// 防呆第二层：改动包说清它不能干什么
+		if (report.bundle.mode !== 'full') {
+			this.reportEl.createEl('p', {
+				text: '⚠ 这是「仅改动」的包：里面只装了变过的文件。所以「清老的」与「强制应用」都用不了 ——'
+					+ ' 对着它清理会把仓库里其余文件全删掉（那两个选项已灰掉）。'
+					+ '真要让仓库和某个状态完全一致，让对方导一份**完整副本**。',
+				cls: 'locally-save-warn',
+			});
+		}
+
 		// 同步程度：接收方最关心的一个数
 		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
@@ -298,6 +372,9 @@ export class ApplyBundleModal extends Modal {
 		const line = (text: string) => detail.createEl('li', { text });
 		line(`新增 ${report.adds} 个`);
 		line(`覆盖 ${report.overwrites} 个`);
+		if (report.forcedOverwrites > 0) {
+			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（强制应用：以包为准）`);
+		}
 		if (report.conflicts > 0) line(`本地也改过、会留冲突副本的：${report.conflicts} 个`);
 		if (report.deletes > 0) line(`删除 ${report.deletes} 个（本地未改动过的）`);
 		if (report.keptDeletes > 0) line(`包里要求删、但本地改过所以保留的：${report.keptDeletes} 个`);
@@ -305,16 +382,23 @@ export class ApplyBundleModal extends Modal {
 
 		// 走哪条路，以及为什么
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
+		this.reportEl.createEl('p', {
+			text: APPLY_MODE_LABELS[report.applyMode]
+				+ (report.keepBackup
+					? '。被覆盖 / 删掉的本地版本会先进回收目录（仓库/.trash/locally-save）'
+					: '。注意：被覆盖 / 删掉的本地版本**直接消失**（回收目录已关）'),
+			cls: report.keepBackup ? 'locally-save-hint' : 'locally-save-warn',
+		});
+
 		const mode = this.reportEl.createEl('p');
 		if (report.mode === 'fast') {
-			mode.setText('快速通道：两边是同一条血脉的同一世代，按包的清单直接写入。');
+			mode.setText('通道：快速 —— 两边是同一条血脉的同一世代，按包的清单直接写入。');
 		} else {
-			mode.setText('逐文件合并：世代对不上，会逐个文件确认"本地是不是还停在包的基准上"，'
-				+ '本地也改过的留成冲突副本，不会静默覆盖。');
+			mode.setText('通道：逐文件合并 —— 世代对不上，会逐个确认"本地是不是还停在包的基准上"，'
+				+ '本地也改过的留冲突副本。');
 		}
-		if (report.bundle.mode === 'full') {
-			this.reportEl.createEl('p', { text: '完整包：不需要校验世代，直接按内容比对。', cls: 'locally-save-hint' });
-		}
+		mode.addClass('locally-save-hint');
+
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
 				text: '注意：这个包来自另一条血脉（另一份独立的副本）。应用后会认祖，之后就能按世代快速同步了。',
@@ -340,6 +424,19 @@ export class ApplyBundleModal extends Modal {
 		const plan = this.plan;
 		const file = this.current;
 		if (!plan || !file) return;
+
+		// 防呆第三层：真要删文件 / 覆盖本地改动之前，把账摊开让人再点一次
+		if (isDestructive(plan)) {
+			new ConfirmApplyModal(this.app, plan, () => { void this.runApply(); }).open();
+			return;
+		}
+		await this.runApply();
+	}
+
+	private async runApply(): Promise<void> {
+		const plan = this.plan;
+		const file = this.current;
+		if (!plan || !file) return;
 		this.reportEl.setText('正在应用……');
 		try {
 			const result = await executeBundlePlan(plan, {
@@ -349,6 +446,8 @@ export class ApplyBundleModal extends Modal {
 				stateFile: this.plugin.stateFile(),
 				file,
 				configDir: this.plugin.configDir(),
+				mode: plan.options.mode,
+				keepBackup: plan.options.keepBackup,
 				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path }),
 			});
 			this.plugin.reportProgress(null);
@@ -372,6 +471,87 @@ export class ApplyBundleModal extends Modal {
 
 	onClose(): void {
 		this.plugin.reportProgress(null);
+		this.contentEl.empty();
+	}
+}
+
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** 这次应用会不会"动到本地已经有的东西"：删文件、覆盖本地改动 */
+function isDestructive(plan: ApplyPlan): boolean {
+	return plan.options.mode !== 'keep-all'
+		|| plan.extra.length > 0
+		|| plan.deletes.some(item => item.action === 'delete')
+		|| plan.report.forcedOverwrites > 0;
+}
+
+/**
+ * 应用前的确认框。
+ *
+ * 只在"真会动到本地已有的东西"时才弹（删文件 / 覆盖本地改动）——
+ * 平时应用一个纯新增的包不该被打断。弹的时候把账摊开：删几个、覆盖几个、去哪了。
+ */
+class ConfirmApplyModal extends Modal {
+	private plan: ApplyPlan;
+	private onConfirm: () => void;
+
+	constructor(app: App, plan: ApplyPlan, onConfirm: () => void) {
+		super(app);
+		this.plan = plan;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		const { report } = this.plan;
+		contentEl.empty();
+		contentEl.addClass('locally-save-modal');
+		contentEl.createEl('h2', { text: '确认应用：会动到本地已有的文件' });
+
+		const deleting = this.plan.deletes.filter(item => item.action === 'delete').map(item => item.path);
+		const paths = [...this.plan.extra, ...deleting];
+
+		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		facts.createEl('li', { text: `应用方式：${APPLY_MODE_LABELS[report.applyMode]}` });
+		if (report.forcedOverwrites > 0) {
+			facts.createEl('li', { text: `会覆盖 ${report.forcedOverwrites} 个本地改动过的文件` });
+		}
+		if (paths.length > 0) {
+			facts.createEl('li', { text: `会删除 ${paths.length} 个本地文件` });
+		}
+		facts.createEl('li', {
+			text: report.keepBackup
+				? '被覆盖 / 删掉的本地版本会先进回收目录（仓库/.trash/locally-save），还能捞回来'
+				: '⚠ 回收目录已关：被覆盖 / 删掉的本地版本会直接消失',
+		});
+
+		if (paths.length > 0) {
+			contentEl.createEl('h3', { text: '会被删掉的文件' });
+			const list = contentEl.createDiv({ cls: 'locally-save-list' });
+			for (const item of paths.slice(0, MAX_ROWS)) {
+				list.createDiv({ text: item, cls: 'locally-save-row is-delete' });
+			}
+			if (paths.length > MAX_ROWS) {
+				list.createDiv({ text: `…… 其余 ${paths.length - MAX_ROWS} 个已省略`, cls: 'locally-save-more' });
+			}
+		}
+
+		new Setting(contentEl)
+			.addButton(button => button
+				.setButtonText('取消')
+				.onClick(() => this.close()))
+			.addButton(button => button
+				.setButtonText('确认应用')
+				.setWarning()
+				.onClick(() => {
+					this.close();
+					this.onConfirm();
+				}));
+	}
+
+	onClose(): void {
 		this.contentEl.empty();
 	}
 }

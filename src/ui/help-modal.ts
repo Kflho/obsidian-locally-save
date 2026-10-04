@@ -56,11 +56,36 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
+		contentEl.createEl('h3', { text: '三种应用方式（在对话框里当场选）' });
+		const modes = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		modes.createEl('li', {
+			text: '所有都保留（默认）：只应用包里有的，本地多出来的文件一个不动；本地也改过的留成冲突副本',
+		});
+		modes.createEl('li', {
+			text: '清老的：额外把本地那些"比包旧"的多余文件删掉（比包新的不动 —— 那多半是你刚写的）',
+		});
+		modes.createEl('li', {
+			text: '强制应用：让仓库与包完全一致 —— 本地改动一律被覆盖、多余文件全删，不管新旧',
+		});
+		contentEl.createEl('p', {
+			text: '后两种只对完整副本开放：改动包里只装了变过的文件，对着它清理会把仓库里其余文件全删掉。'
+				+ '所以选中改动包时，那两个选项会灰掉，并自动切回「所有都保留」。',
+			cls: 'locally-save-warn',
+		});
+		contentEl.createEl('p', {
+			text: '另外，真要删文件或覆盖本地改动之前，还会再弹一次确认框，'
+				+ '把"删哪几个、覆盖了几个本地改动、东西去哪儿了"摊开给你看。',
+			cls: 'locally-save-hint',
+		});
+
 		contentEl.createEl('h3', { text: '会不会把我的东西弄丢' });
 		const safe = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		safe.createEl('li', { text: '本地也改过的文件：留成「冲突副本」，两份都在，新的那份占原名' });
-		safe.createEl('li', { text: '包里要求删、但本地改过的：**不删**（删除必须过基准检查，没有例外）' });
-		safe.createEl('li', { text: '完整包应用时"删除多余文件"：只删比包旧的，比包新的不动 —— 那多半是这边刚写的' });
+		safe.createEl('li', {
+			text: '默认（所有都保留）：本地也改过的文件留成「冲突副本」，两份都在；包里要求删、但本地改过的不删',
+		});
+		safe.createEl('li', {
+			text: '清老的 / 强制应用：被覆盖或被删掉的本地版本会先进回收目录（仓库/.trash/locally-save），仍然捞得回来',
+		});
 		safe.createEl('li', { text: '包在传输中弄坏了：尾部有整段负载的校验和，对不上直接拒绝，不会写进仓库' });
 
 		contentEl.createEl('h3', { text: '为什么有时提示"漏了包"' });

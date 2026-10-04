@@ -15,20 +15,36 @@ import type { PluginSettings } from '../settings/model';
  * 应用同步包 —— **先算后做**两步走。
  *
  * `planBundleApply()` 只读不写：把包和本地逐条比一遍，给出报告
- * （会新增几个、覆盖几个、跳过几个、冲突几个、要不要删文件），
+ * （会新增几个、覆盖几个、跳过几个、冲突几个、要删哪些），
  * 接收方看过之后再 `executeBundlePlan()` 真正落盘。
  * 所以"打开包"这一步是安全的，可以随便点。
  *
- * 两条路径：
- * - **快速通道**（血脉一致 + 世代对得上）：信任包的清单，逐条写入；
- * - **降级合并**（世代对不上 / 漏了包）：逐文件看本地是不是还停在包的 base 上，
- *   停在 base 上才敢覆盖；本地也改过的留成冲突副本。**不拒绝服务，也不静默丢数据**。
+ * 三种应用方式（在应用对话框里当场选，不藏在设置里）：
  *
- * 删除一律要过 base 检查（没有例外）：本地改过的文件不删，只登记为"保留"。
+ * | 模式 | 本地也改过的文件 | 本地多出来的文件 | 包里要求删的 |
+ * |---|---|---|---|
+ * | `keep-all` 所有都保留 | 留冲突副本，两份都在 | 保留 | 过基准检查才删 |
+ * | `delete-old` 清老的 | 同上 | 只删比包旧的 | 同上 |
+ * | `force` 强制应用 | 直接覆盖 | 全删，不管新旧 | 直接删 |
+ *
+ * **后两种只对完整副本开放**：改动包里没有的东西太多了，对着它清老的或镜像
+ * 会把整个仓库清空。引擎这边直接拒绝，界面那边也会把选项灰掉。
+ *
+ * 被覆盖 / 被删掉的本地版本**先进回收目录**（`仓库/.trash/locally-save/时间戳/`），
+ * 所以"强制一致"之后仍然捞得回来 —— 那个目录不参与同步，不影响一致性。
  */
 
 const TOLERANCE = DEFAULT_MTIME_TOLERANCE_MS;
 const CHUNK = 4 * 1024 * 1024;
+
+export type ApplyMode = 'keep-all' | 'delete-old' | 'force';
+
+/** 界面上给这三种模式的说法 */
+export const APPLY_MODE_LABELS: Record<ApplyMode, string> = {
+	'keep-all': '所有都保留：只应用包里有的，本地多出来的不动',
+	'delete-old': '清老的：删掉本地那些比包旧的多余文件',
+	force: '强制应用：让仓库与包完全一致（本地改动覆盖、多余文件全删）',
+};
 
 export interface ApplyOptions {
 	settings: PluginSettings;
@@ -39,18 +55,22 @@ export interface ApplyOptions {
 	file: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
+	/** 应用方式，默认 `keep-all`（最保守） */
+	mode?: ApplyMode;
+	/** 被覆盖 / 删掉的本地版本先进回收目录（默认跟随设置里的「删除前先备份」） */
+	keepBackup?: boolean;
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
-/** 应用前的体检报告：接收方靠它判断"这次能同步到什么程度" */
+/** 应用前的体检报告：接收方靠它判断"这次能同步到什么程度、会动哪些东西" */
 export interface ApplyReport {
-	/** 走哪条路 */
+	/** 走的哪条通道：快速（血脉世代一致）还是逐文件合并 */
 	mode: 'fast' | 'merge';
 	sameLineage: boolean;
 	sameGeneration: boolean;
 	/** 包链对不上：对方上次导出的是别人 */
 	parentMatches: boolean;
-	/** 包的世代与本地差多少（漏了几个包） */
+	/** 本地落后几代（正数＝漏了包） */
 	generationGap: number | null;
 	bundle: {
 		id: string;
@@ -61,16 +81,22 @@ export interface ApplyReport {
 		deletedCount: number;
 		payloadBytes: number;
 	};
+	/** 这次用的应用方式 */
+	applyMode: ApplyMode;
+	/** 被覆盖 / 删掉的本地版本会不会进回收目录 */
+	keepBackup: boolean;
 	/** 逐条分类 */
 	adds: number;
 	overwrites: number;
 	skips: number;
 	conflicts: number;
-	/** 包里要求删除、且本地确实停在 base 上的 */
+	/** 强制应用时：本地改过、但照样被覆盖掉的数量 */
+	forcedOverwrites: number;
+	/** 包里要求删除、且本地确实停在基准上的 */
 	deletes: number;
-	/** 包里要求删除、但本地改过所以不删的 */
+	/** 包里要求删除、但本地改过所以不删的（强制应用时不会有） */
 	keptDeletes: number;
-	/** 完整包里没有、而且比包旧的本地文件（开了"删除多余文件"才会删） */
+	/** 本地多出来、这次要删的 */
 	extraDeletes: number;
 	/** 本地与包已经完全一致的条目数 */
 	synchronized: number;
@@ -81,10 +107,12 @@ export interface ApplyReport {
 export interface ApplyPlan {
 	info: BundleInfo;
 	report: ApplyReport;
-	entries: { entry: BundleEntry; action: 'write' | 'skip' | 'conflict' }[];
+	entries: { entry: BundleEntry; action: 'write' | 'skip' | 'conflict'; backup: boolean }[];
 	deletes: { path: string; action: 'delete' | 'skip' }[];
-	/** 完整包 + 开启删除时，本地多出来要删的文件 */
+	/** 本地多出来、这次要删的文件 */
 	extra: string[];
+	/** 执行阶段照着做的几个策略 */
+	options: { mode: ApplyMode; keepBackup: boolean };
 }
 
 export interface ApplyResult {
@@ -99,17 +127,28 @@ export interface ApplyResult {
 }
 
 function matchesBase(local: { size: number; mtime: number }, entry: BundleEntry): boolean {
-	if (entry.baseSize === undefined || entry.baseMtime === undefined) {
-		// 包里没给基准（例如对方导出时这个文件还不存在）：认不出来，保守处理
-		return false;
-	}
+	if (entry.baseSize === undefined || entry.baseMtime === undefined) return false;
 	return local.size === entry.baseSize && Math.abs(local.mtime - entry.baseMtime) <= TOLERANCE;
+}
+
+function sameAsEntry(local: { size: number; mtime: number }, entry: BundleEntry): boolean {
+	return local.size === entry.size && Math.abs(local.mtime - entry.mtime) <= TOLERANCE;
 }
 
 /** 只读地算一遍：包与本地差在哪儿、能同步到什么程度 */
 export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan> {
 	const info = await readBundleInfo(options.file);
 	const header = info.header;
+	const mode: ApplyMode = options.mode ?? 'keep-all';
+	const keepBackup = options.keepBackup ?? options.settings.deletedToTrash;
+
+	// 改动包里没有的东西太多了：对着它清老的 / 镜像 = 把仓库清空
+	if (mode !== 'keep-all' && header.mode !== 'full') {
+		throw new Error(
+			`「${mode === 'force' ? '强制应用' : '清老的'}」只能用完整副本：`
+			+ `改动包里只装了变过的文件，对着它清理会把仓库里其余的文件全删掉。`,
+		);
+	}
 
 	if (options.settings.bundleVerify) {
 		const ok = await verifyBundle(options.file, info);
@@ -120,42 +159,85 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const sameLineage = header.lineage === state.lineage;
 	const sameGeneration = header.baseGeneration === null
 		|| (sameLineage && state.generation === header.baseGeneration);
-	const mode: 'fast' | 'merge' = sameGeneration ? 'fast' : 'merge';
+	const fastPath = sameGeneration;
 
-	// 完整包免校验；增量包则看血脉与世代
 	const entries: ApplyPlan['entries'] = [];
 	let adds = 0;
 	let overwrites = 0;
 	let skips = 0;
 	let conflicts = 0;
+	let forcedOverwrites = 0;
 
 	for (const entry of header.entries) {
 		const local = await statFile(toNative(options.vaultRoot, entry.path));
+
+		// 本地没有 → 纯新增
 		if (!local) {
-			entries.push({ entry, action: 'write' });
+			entries.push({ entry, action: 'write', backup: false });
 			adds++;
 			continue;
 		}
-		if (local.size === entry.size && Math.abs(local.mtime - entry.mtime) <= TOLERANCE) {
-			entries.push({ entry, action: 'skip' });
+		// 已经跟包里一样 → 什么都不用做
+		if (sameAsEntry(local, entry)) {
+			entries.push({ entry, action: 'skip', backup: false });
 			skips++;
 			continue;
 		}
-		if (mode === 'fast' || matchesBase(local, entry)) {
-			entries.push({ entry, action: 'write' });
-			overwrites++;
+
+		// 包里给了基准：能判断"本地是不是还停在包以为的样子上"
+		if (entry.baseSize !== undefined) {
+			if (matchesBase(local, entry)) {
+				// 本地没动过 → 覆盖不丢东西
+				entries.push({ entry, action: 'write', backup: false });
+				overwrites++;
+				continue;
+			}
+			// 本地也改过
+			if (mode === 'force') {
+				entries.push({ entry, action: 'write', backup: keepBackup });
+				forcedOverwrites++;
+				continue;
+			}
+			entries.push({ entry, action: 'conflict', backup: false });
+			conflicts++;
 			continue;
 		}
-		// 本地也改过：留副本
-		entries.push({ entry, action: 'conflict' });
-		conflicts++;
+
+		// 包里没给基准（完整包就是这样，改动包里的新文件也是）
+		//
+		// 没有基准就没法三方比对，于是用「本地这份是不是比包还新」当判据：
+		// 比包还新 → 多半是导出之后这边刚改的，得当本地改动处理；
+		// 比包旧   → 那是旧副本，覆盖它不丢东西（第一次整份恢复靠的就是这条，
+		//            否则每台机器的每个文件都会被判成"本地改过"，满天冲突副本）。
+		const newerThanBundle = local.mtime > header.created + TOLERANCE;
+		if (mode === 'force') {
+			entries.push({ entry, action: 'write', backup: keepBackup });
+			if (newerThanBundle) forcedOverwrites++;
+			else overwrites++;
+			continue;
+		}
+		if (newerThanBundle) {
+			entries.push({ entry, action: 'conflict', backup: false });
+			conflicts++;
+			continue;
+		}
+		entries.push({ entry, action: 'write', backup: false });
+		overwrites++;
 	}
 
+	// 包里要求删的
 	const deletes: ApplyPlan['deletes'] = [];
 	let keptDeletes = 0;
 	for (const item of header.deleted) {
 		const local = await statFile(toNative(options.vaultRoot, item.path));
 		if (!local) continue; // 本地早就没有了
+
+		// 强制应用：不看了，直接删（本地那份进回收目录）
+		if (mode === 'force') {
+			deletes.push({ path: item.path, action: 'delete' });
+			continue;
+		}
+
 		const baseKnown = item.baseSize !== undefined && item.baseMtime !== undefined;
 		const stillBase = baseKnown
 			&& local.size === item.baseSize
@@ -169,30 +251,32 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		}
 	}
 
-	// 完整包 + 开了"删除多余文件"：本地有、包里没有、且比包旧的才删
+	// 本地多出来、包里没有的
 	const extra: string[] = [];
-	if (header.mode === 'full' && options.settings.bundleDeleteMissing) {
-		const known = new Set(header.entries.map(entry => entry.path));
+	if (mode !== 'keep-all' && header.mode === 'full') {
+		const known = new Set<string>([
+			...header.entries.map(entry => entry.path),
+			...header.deleted.map(item => item.path),
+		]);
 		const inventory = await scanTree(options.vaultRoot, {
 			exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
 			skipTopLevelDirs: [VAULT_TRASH_DIR],
 		});
 		for (const [file, record] of inventory.files) {
 			if (known.has(file)) continue;
-			if (record.mtime > header.created) continue; // 比包新：多半是这边刚写的
+			// 清老的：比包新的不动 —— 那多半是这边刚写的
+			if (mode === 'delete-old' && record.mtime > header.created) continue;
 			extra.push(file);
 		}
 		extra.sort();
 	}
 
-	const synchronized = skips;
 	const total = header.entries.length;
 	const report: ApplyReport = {
-		mode,
+		mode: fastPath ? 'fast' : 'merge',
 		sameLineage,
 		sameGeneration,
 		parentMatches: header.parentBundleId === null || header.parentBundleId === state.lastBundleId,
-		// 正数＝本地落后了几代（漏了包）；null＝完整包或压根不是同一条血脉
 		generationGap: header.baseGeneration === null || !sameLineage
 			? null
 			: header.baseGeneration - state.generation,
@@ -205,24 +289,29 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			deletedCount: header.deleted.length,
 			payloadBytes: header.payloadBytes,
 		},
+		applyMode: mode,
+		keepBackup,
 		adds,
 		overwrites,
 		skips,
 		conflicts,
+		forcedOverwrites,
 		deletes: deletes.filter(item => item.action === 'delete').length,
 		keptDeletes,
 		extraDeletes: extra.length,
-		synchronized,
-		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
+		synchronized: skips,
+		syncPercent: total === 0 ? 100 : Math.round((skips / total) * 100),
 	};
 
-	return { info, report, entries, deletes, extra };
+	return { info, report, entries, deletes, extra, options: { mode, keepBackup } };
 }
 
 /** 真正落盘 */
 export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyResult> {
 	const started = Date.now();
 	const stamp = formatStamp(Date.now());
+	const trashRoot = `${options.vaultRoot}/.trash/locally-save`;
+	const { mode, keepBackup } = plan.options;
 	const result: ApplyResult = {
 		written: 0,
 		skipped: 0,
@@ -237,7 +326,7 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 	const total = plan.entries.length + plan.deletes.length + plan.extra.length;
 	let done = 0;
 
-	for (const { entry, action } of plan.entries) {
+	for (const { entry, action, backup } of plan.entries) {
 		options.onProgress?.(done++, total, entry.path);
 		if (action === 'skip') {
 			result.skipped++;
@@ -245,16 +334,21 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 		}
 		try {
 			const target = toNative(options.vaultRoot, entry.path);
+
 			if (action === 'conflict') {
 				// 本地那份留成冲突副本，包里的内容占原名 —— 两份都不丢
-				const backup = conflictName(entry.path, stamp, '本地冲突副本');
-				const backupAbs = toNative(options.vaultRoot, backup);
+				const backupName = conflictName(entry.path, stamp, '本地冲突副本');
+				const backupAbs = toNative(options.vaultRoot, backupName);
 				await ensureDir(path.dirname(backupAbs));
 				await fs.promises.copyFile(target, backupAbs);
 				await fs.promises.utimes(backupAbs, new Date(), new Date());
-				result.conflictCopies.push(backup);
+				result.conflictCopies.push(backupName);
 				result.conflicts++;
+			} else if (backup && mode === 'force') {
+				// 强制一致：本地那份不能留在原地（会破坏"与包完全相同"），挪进回收目录
+				await moveToTrash(target, trashRoot, entry.path, stamp);
 			}
+
 			await extractEntry(options.file, plan.info, entry, target);
 			result.written++;
 			result.bytesWritten += entry.size;
@@ -263,13 +357,12 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 		}
 	}
 
-	const trashRoot = `${options.vaultRoot}/.trash/locally-save`;
 	for (const item of plan.deletes) {
 		options.onProgress?.(done++, total, item.path);
 		if (item.action === 'skip') continue;
 		try {
 			const target = toNative(options.vaultRoot, item.path);
-			if (options.settings.deletedToTrash) await moveToTrash(target, trashRoot, item.path, stamp);
+			if (keepBackup) await moveToTrash(target, trashRoot, item.path, stamp);
 			else await fs.promises.rm(target, { force: true });
 			result.deleted++;
 		} catch (error) {
@@ -281,7 +374,7 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 		options.onProgress?.(done++, total, file);
 		try {
 			const target = toNative(options.vaultRoot, file);
-			if (options.settings.deletedToTrash) await moveToTrash(target, trashRoot, file, stamp);
+			if (keepBackup) await moveToTrash(target, trashRoot, file, stamp);
 			else await fs.promises.rm(target, { force: true });
 			result.deleted++;
 		} catch (error) {
@@ -305,7 +398,10 @@ export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions):
 	await saveState(options.stateFile, state);
 
 	result.durationMs = Date.now() - started;
-	options.log.debug(`应用同步包完成：写入 ${result.written}、跳过 ${result.skipped}、冲突 ${result.conflicts}`);
+	options.log.debug(
+		`应用同步包完成（${mode}）：写入 ${result.written}、跳过 ${result.skipped}、`
+		+ `冲突 ${result.conflicts}、删除 ${result.deleted}`,
+	);
 	return result;
 }
 
