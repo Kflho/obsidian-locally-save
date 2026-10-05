@@ -7,8 +7,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
-import type { ApplyOptions, ApplyPlan } from '../src/bundle/apply';
+import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
+import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { exportBundle, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
@@ -97,6 +97,29 @@ function readConflictCopy(root: string): string | null {
 	return walk(trash);
 }
 
+/**
+ * 在回收目录里找**某个文件**的备份（时间戳那层目录名是执行时才知道的）。
+ * 比 readConflictCopy 精确：一次应用里可能挪进去好几个文件 —— 按文件名找。
+ */
+function findBackup(root: string, rel: string): string | null {
+	const base = path.join(root, '.trash', 'locally-save');
+	if (!fs.existsSync(base)) return null;
+	const wanted = rel.split('/').pop() as string;
+	const walk = (dir: string): string | null => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const next = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				const found = walk(next);
+				if (found !== null) return found;
+				continue;
+			}
+			if (entry.name === wanted) return fs.readFileSync(next, 'utf8');
+		}
+		return null;
+	};
+	return walk(base);
+}
+
 const log = createLogger(() => 'silent');
 const settings = (overrides: Partial<PluginSettings> = {}): PluginSettings =>
 	({ ...DEFAULT_SETTINGS, ...overrides });
@@ -118,7 +141,7 @@ function applyOptions(
 		conflictStrategy?: 'keep-both' | 'local-wins' | 'remote-wins';
 		propagateDeletions?: boolean;
 		keepBackup?: boolean;
-		strictness?: 'normal' | 'bundle-wins' | 'mirror';
+		strictness?: ApplyStrictness;
 	} = {},
 ): ApplyOptions {
 	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
@@ -1079,6 +1102,76 @@ check(
 	grouped.map(group => group.items.map(item => item.name)),
 	[['c-new', 'c-mid'], ['f-new', 'f-old'], ['weird']],
 );
+
+// 34. 「应用方式」两套选项：完整副本一套、更新包一套（不是把不合适的灰掉）
+check(
+	'完整副本那套：按设置 / 以包为准 / 完全镜像',
+	APPLY_CHOICES.full.map(item => item.key),
+	['normal', 'bundle-wins', 'mirror'],
+);
+check(
+	'更新包那套：按设置 / 回退 / 两边都留 / 以我为准',
+	APPLY_CHOICES.changes.map(item => item.key),
+	['normal', 'listed-wins', 'keep-both', 'local-wins'],
+);
+check(
+	'更新包那套里没有会清空仓库的两档（包里没有 ≠ 对方删了它）',
+	APPLY_CHOICES.changes.some(item => item.strictness === 'bundle-wins' || item.strictness === 'mirror'),
+	false,
+);
+check('换包类型后原来那档不在新一套里 → 回到这一套的默认档', findApplyChoice('changes', 'mirror').key, 'normal');
+check('默认档就是第一项', findApplyChoice('full', 'normal').strictness, 'normal');
+
+// 35. 「回退到包里那一版」：改了的东西退回对方发来的版本，没提到的一个不动
+// （用户报的场景：应用过更新包 → 自己又改了这个文件 → 想退回包里那一版，但更新包只有"按设置"，
+//   本地改过的一律保留，这件事做不到）
+const ZA = path.join(ROOT, 'machineZA');
+const ZB = path.join(ROOT, 'machineZB');
+const STATE_ZA = path.join(ROOT, 'state-za.json');
+const STATE_ZB = path.join(ROOT, 'state-zb.json');
+const OUTZ = path.join(ROOT, 'transferZ');
+const T0 = Date.now() - 60_000;
+fs.mkdirSync(ZA, { recursive: true });
+fs.mkdirSync(ZB, { recursive: true });
+fs.mkdirSync(OUTZ, { recursive: true });
+
+write(ZA, 'a.md', 'A1', T0);
+write(ZA, 'b.md', 'B1', T0);
+write(ZA, 'c.md', 'C1', T0);
+const zFull = await exportBundle({ ...exportOptions(ZA, STATE_ZA), outDir: OUTZ });
+const zFullPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zFull.file as string));
+await executeBundlePlan(zFullPlan, applyOptions(ZB, STATE_ZB, zFull.file as string));
+check('先应用完整包', [read(ZB, 'a.md'), read(ZB, 'b.md'), read(ZB, 'c.md')], ['A1', 'B1', 'C1']);
+
+// A 那边：改了 a.md、删了 c.md → 导一个更新包（条目里有 a.md，删除清单里点名 c.md）
+write(ZA, 'a.md', 'A2', T0 + 10_000);
+fs.rmSync(abs(ZA, 'c.md'));
+const zChanges = await exportBundle({ ...exportOptions(ZA, STATE_ZA, 'changes'), outDir: OUTZ });
+const zChangesOptions = applyOptions(ZB, STATE_ZB, zChanges.file as string);
+await executeBundlePlan(await planBundleApply(zChangesOptions), zChangesOptions);
+check('按设置应用更新包：a.md 更新、点名的 c.md 删掉', [read(ZB, 'a.md'), read(ZB, 'c.md')], ['A2', null]);
+
+// B 自己又把 a.md 改坏了，还手贱把 c.md 建回来、另外多了个自己的文件
+write(ZB, 'a.md', 'B-WRONG', T0 + 20_000);
+write(ZB, 'c.md', 'C-AGAIN', T0 + 20_000);
+write(ZB, 'mine.md', 'MINE', T0 + 20_000);
+
+// 换「回退到包里那一版」再应用同一个更新包
+const revertOptions = applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'listed-wins' });
+const revertPlan = await planBundleApply(revertOptions);
+check('回退档：更新包也能用（没被降级成"按设置"）', revertPlan.report.strictnessDowngraded, false);
+check('回退档：算出"覆盖一个本地改过的"', [revertPlan.report.forcedOverwrites, revertPlan.report.conflicts], [1, 0]);
+await executeBundlePlan(revertPlan, revertOptions);
+check('a.md 退回了包里那一版', read(ZB, 'a.md'), 'A2');
+check('我改坏的那份没丢：在回收目录里', findBackup(ZB, 'a.md'), 'B-WRONG');
+check('包里点名要删的照删（我又建回来的 c.md）', read(ZB, 'c.md'), null);
+check('它同样进了回收目录', findBackup(ZB, 'c.md'), 'C-AGAIN');
+check('包里没提到的：我自己的文件一个没动', read(ZB, 'mine.md'), 'MINE');
+check('包里没提到的：b.md 也还在', read(ZB, 'b.md'), 'B1');
+
+// 对照：会清空仓库的那两档对更新包仍然降级（引擎层兜底）
+const forcedPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'bundle-wins' }));
+check('「以包为准 / 完全镜像」对更新包仍然降级', forcedPlan.report.strictnessDowngraded, true);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

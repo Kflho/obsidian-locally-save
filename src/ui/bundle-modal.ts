@@ -1,9 +1,8 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { executeBundlePlan, planBundleApply, STRICTNESS_LABELS } from '../bundle/apply';
-import type { ApplyPlan, ApplyStrictness } from '../bundle/apply';
-import { CONFLICT_OPTIONS } from '../settings/model';
+import { APPLY_CHOICES, executeBundlePlan, findApplyChoice, planBundleApply } from '../bundle/apply';
+import type { ApplyChoice, ApplyPlan } from '../bundle/apply';
 import type { ConflictStrategy } from '../sync/types';
 import { exportBundle, plannedExportModes } from '../bundle/export';
 import type { ExportOutcome } from '../bundle/export';
@@ -256,10 +255,13 @@ export class ApplyBundleModal extends Modal {
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
 	/**
-	 * 本次的**强硬程度**：默认"按设置"（与副本同步同一套规则），
-	 * 需要时可以这次性地"以包为准"或"完全镜像"（对方做过颠覆性改动时用）。
+	 * 本次选的**应用方式**（选项见 `APPLY_CHOICES`）：
+	 * 完整副本与更新包各有一套 —— 更新包只有"包里点名的那部分"，
+	 * 所以它那套是"回退 / 两边都留 / 以我为准 / 按设置"，不会有会清空仓库的那两档。
 	 */
-	private strictness: ApplyStrictness = 'normal';
+	private applyChoiceKey = 'normal';
+	/** 下拉框现在摆的是哪一套选项（按选中包的类型换） */
+	private choicesFor: 'full' | 'changes' | null = null;
 	private keepBackup: boolean;
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
@@ -268,7 +270,8 @@ export class ApplyBundleModal extends Modal {
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
 	private backupToggle: { setDisabled(disabled: boolean): unknown } | null = null;
-	/** 应用方式下拉的 select 元素：更新包时要把那两个破坏性选项真的灰掉 */
+	/** 应用方式下拉：换包类型时要整组换掉选项 */
+	private strictnessDropdown: DropdownComponent | null = null;
 	private strictnessSelect: HTMLSelectElement | null = null;
 	/** 包列表（与导出弹窗、管理弹窗共用一套：选中、打开文件夹、复制路径、删除） */
 	private list: BundleListView | null = null;
@@ -337,34 +340,31 @@ export class ApplyBundleModal extends Modal {
 			});
 
 		// ---------------------------------------------------------- 应用方式
-		// 一条轴：有多"以包为准"。默认最安全；对面做过颠覆性改动时才往上调
+		// **选项按包的类型换一套**（完整副本 / 更新包能做的事本就不一样，见 APPLY_CHOICES）
 		new Setting(contentEl)
 			.setName('应用方式')
-			.setDesc('默认与本地副本同步同一套规则；对面大删大改过、想让这台机器跟包一模一样时往上调')
+			.setDesc('默认按设置来。想把本地改过的文件退回包里那一版，选「回退到包里那一版」；'
+				+ '对面大删大改过、想让这台机器跟包一模一样时，用完整副本那几档')
 			.addDropdown(dropdown => {
-				dropdown
-					.addOptions({
-						normal: STRICTNESS_LABELS.normal,
-						'bundle-wins': STRICTNESS_LABELS['bundle-wins'],
-						mirror: STRICTNESS_LABELS.mirror,
-					})
-					.setValue(this.strictness)
-					.onChange(value => {
-						this.strictness = value === 'bundle-wins' || value === 'mirror' ? value : 'normal';
-						void this.replan();
-					});
+				this.strictnessDropdown = dropdown;
 				this.strictnessSelect = dropdown.selectEl;
+				// 还没选包：先按"更新包"摆一套（日常最多的场景），选中之后会按实际类型换
+				this.renderChoices('changes');
+				dropdown.onChange(value => {
+					this.applyChoiceKey = value;
+					void this.replan();
+				});
 			});
 
 		new Setting(contentEl)
 			.setName('覆盖 / 删掉的先进回收目录')
-			.setDesc('强制应用与清老的会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
-				+ '仍然捞得回来。**强制两档必须开着**（关掉回收 + 强制 = 不可恢复的批量删除）')
+			.setDesc('回退、以包为准与完全镜像会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
+				+ '仍然捞得回来。**这几档必须开着**（关掉回收 + 强制 = 不可恢复的批量删除）')
 			.addToggle(toggle => {
 				this.backupToggle = toggle;
 				toggle
 					.setValue(this.keepBackup)
-					.setDisabled(this.strictness !== 'normal')
+					.setDisabled(!this.choiceIsGentle())
 					.onChange(value => {
 						this.keepBackup = value;
 						void this.replan();
@@ -494,14 +494,15 @@ export class ApplyBundleModal extends Modal {
 	/**
 	 * 重新算一遍（换包、换应用方式、换备份开关都要走这里）。
 	 *
-	 * 防呆的第一层：**改动包不能配破坏性的应用方式**。改动包里只装了变过的文件，
-	 * 对着它"清老的"或"强制应用"等于把仓库里其余文件全删掉 ——
-	 * 所以这两种方式只对完整副本开放，选了就自动切回来并说明原因。
+	 * 防呆的第一层：**选项按包的类型换一套**（见 `renderChoices`）。
+	 * 更新包里只有变过的那部分，"包里没有"什么也不代表 —— 所以它没有"以包为准 / 完全镜像"
+	 * 这两档（会把仓库里其余文件全删掉），换成"只动包里点名文件"的那几档。
 	 */
 	private async replan(): Promise<void> {
 		const file = this.current;
 		if (!file) return;
 		this.applyButton?.setDisabled(true);
+		const choice = this.currentChoice();
 		try {
 			const plan = await planBundleApply({
 				settings: this.plugin.settings,
@@ -510,15 +511,22 @@ export class ApplyBundleModal extends Modal {
 				stateFile: this.plugin.stateFile(),
 				file,
 				configDir: this.plugin.configDir(),
-				strictness: this.strictness,
+				strictness: choice.strictness,
+				conflictStrategy: choice.conflictStrategy,
 				keepBackup: this.keepBackup,
 			});
 			this.plan = plan;
-			// 更新包不开放破坏性方式：把那两个选项**真的灰掉**（引擎层还会再兜一道，
-			// 见 planBundleApply）；之前选过的话切回默认并重算一遍
-			this.guardStrictness(plan.info.header.mode);
-			// 强制两档下回收目录是强制开的（界面上灰掉，别让人以为能关）
-			this.backupToggle?.setDisabled(this.strictness !== 'normal');
+			// 包的类型这会儿才知道：换成它该有的那一套选项。
+			// 原来选的那档在新一套里没有（比如从完整副本的"完全镜像"换到更新包）→ 回到默认档，
+			// 这一轮算出来的计划作废，按新档再算一遍。
+			const before = this.applyChoiceKey;
+			this.renderChoices(plan.info.header.mode);
+			if (this.applyChoiceKey !== before) {
+				void this.replan();
+				return;
+			}
+			// 会动本地原有文件的那几档，回收目录是强制开的（界面上灰掉，别让人以为能关）
+			this.backupToggle?.setDisabled(!this.choiceIsGentle());
 			this.renderReport(plan);
 			this.applyButton?.setDisabled(false);
 		} catch (error) {
@@ -528,24 +536,34 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	/**
-	 * 更新包不开放「清老的 / 强制应用」：把那两个选项真的灰掉。
+	 * 把下拉框换成这一类包该有的一套选项。
 	 *
-	 * 光写警告不算数（用户可能先选了方式、再换包）；这里连选项一起禁掉，
-	 * 之前选过的话切回默认并重算 —— 引擎层还有一道兜底（`strictnessDowngraded`）。
+	 * 不是"灰掉几个"：**包里没有某个文件，在两种包里意思完全不同** ——
+	 * 完整副本是完整清单（没有＝对方删过它），更新包只装变过的（没有＝什么也不代表）。
+	 * 两套选项本来就不一样，那就换一套，而不是留一个孤零零的可用项。
 	 */
-	private guardStrictness(mode: 'full' | 'changes'): void {
-		const full = mode === 'full';
-		const select = this.strictnessSelect;
-		if (select) {
-			for (const option of Array.from(select.options)) {
-				if (option.value !== 'normal') option.disabled = !full;
-			}
-		}
-		if (!full && this.strictness !== 'normal') {
-			this.strictness = 'normal';
-			if (select) select.value = 'normal';
-			void this.replan();
-		}
+	private renderChoices(mode: 'full' | 'changes'): void {
+		if (this.choicesFor === mode) return;
+		this.choicesFor = mode;
+		const choices = APPLY_CHOICES[mode];
+		// 换一套之后原来那档可能不存在了 → 回到这一套的默认档
+		this.applyChoiceKey = findApplyChoice(mode, this.applyChoiceKey).key;
+		const dropdown = this.strictnessDropdown;
+		// 测试替身里没有真的 select（只需要不炸）
+		if (!dropdown?.selectEl) return;
+		dropdown.selectEl.empty();
+		dropdown.addOptions(Object.fromEntries(choices.map(item => [item.key, item.label])));
+		dropdown.setValue(this.applyChoiceKey);
+	}
+
+	/** 此刻这一档对应的引擎参数（在当前摆着的那一套选项里找） */
+	private currentChoice(): ApplyChoice {
+		return findApplyChoice(this.choicesFor ?? 'changes', this.applyChoiceKey);
+	}
+
+	/** 这一档会不会主动覆盖本地改动（那种档必须开着回收目录） */
+	private choiceIsGentle(): boolean {
+		return this.currentChoice().strictness === 'normal';
 	}
 
 	private renderReport(plan: ApplyPlan): void {
@@ -565,20 +583,21 @@ export class ApplyBundleModal extends Modal {
 			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`
 			+ `${report.bundleDirsUnknown ? '（旧版包没记空文件夹，只能数到有文件的那些）' : ''}`);
 
-		// 防呆第二层：改动包说清它不能干什么
+		// 防呆第二层：改动包说清它自己的那套选项是干什么的
 		if (report.bundle.mode !== 'full') {
 			if (report.strictnessDowngraded) {
 				this.reportEl.createEl('p', {
-					text: '⚠ 你选的「清老的 / 强制应用」只对**完整副本**开放，这次已自动改用默认方式：'
-						+ '更新包里只装了变过的文件，拿它清理会把仓库里其余文件全删掉。',
+					text: '⚠ 你选的「以包为准 / 完全镜像」只对**完整副本**开放，这次已自动改用「按设置」：'
+						+ '更新包里只装了变过的文件，拿它清理会把仓库里其余文件全删掉。'
+						+ '只想把包里点名的那几个文件退回包里的版本，用「回退到包里那一版」。',
 					cls: 'locally-save-warn',
 				});
 			}
 			this.reportEl.createEl('p', {
-				text: '⚠ 这是「更新包」：里面只装了自完整副本以来变过的文件。所以「清老的」与「强制应用」都用不了 ——'
-					+ ' 对着它清理会把仓库里其余文件全删掉（那两个选项已灰掉）。'
-					+ '真要让仓库和某个状态完全一致，让对方导一份**完整副本**。',
-				cls: 'locally-save-warn',
+				text: '这是「更新包」：里面只装了自完整副本以来变过的文件，所以这里的几档都**只动包里点名的文件**。'
+					+ '想把自己改过的退回对方发来的那一版，选「回退到包里那一版」；'
+					+ '要清理包外的东西（以包为准 / 完全镜像）得让对方导一份**完整副本**。',
+				cls: 'locally-save-hint',
 			});
 			this.reportEl.createEl('p', {
 				text: '它是**累积**的：包含自对方上次导出完整副本以来的全部改动，'
@@ -615,7 +634,7 @@ export class ApplyBundleModal extends Modal {
 		line(`新增 ${report.adds} 个`);
 		line(`覆盖 ${report.overwrites} 个`);
 		if (report.forcedOverwrites > 0) {
-			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（强制应用：以包为准）`);
+			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（按这次选的"以包为准"覆盖，本地那份进回收目录）`);
 		}
 		if (report.historyMatches > 0) {
 			line(`其中 ${report.historyMatches} 个：本地停在对方以前发过的中间版本上，直接覆盖（不留冲突副本）`);
@@ -636,11 +655,21 @@ export class ApplyBundleModal extends Modal {
 			'local-wins': '以本地为准（包里的版本不覆盖本地）',
 			'remote-wins': '以包为准（本地改动会被覆盖）',
 		};
+		// 这一档是不是"这一趟特意选的"：选了就别再说"与副本同步同一套规则"，
+		// 否则用户会以为设置里那条还在起作用
+		const overrode = this.currentChoice().conflictStrategy !== undefined
+			|| this.currentChoice().strictness !== 'normal';
+		const loserText = report.strictness === 'listed-wins'
+			? '本地那份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突）'
+			: '输的那一份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突），'
+				+ '不留在仓库里 —— 留在原地的冲突副本会跟着同步传到对面去';
 		this.reportEl.createEl('p', {
-			text: `与本地副本同步同一套规则：两边都改过时 ${strategyText[report.conflictStrategy]}。`
-				+ '输的那一份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突），'
-				+ '不留在仓库里 —— 留在原地的冲突副本会跟着同步传到对面去。'
-				+ `对方删掉的文件${report.propagateDeletions ? '这边也删' : '取回来'}。`
+			text: `${overrode ? '这一趟按你选的方式' : '与本地副本同步同一套规则'}：`
+				+ `两边都改过时 ${strategyText[report.conflictStrategy]}。`
+				+ `${loserText}。`
+				+ (report.strictness === 'listed-wins'
+					? '包里**没提到**的文件一个都不动。'
+					: `对方删掉的文件${report.propagateDeletions ? '这边也删' : '取回来'}。`)
 				+ (report.keepBackup
 					? '删掉的本地版本同样进回收目录'
 					: '⚠ 回收目录已关：删掉的本地版本会直接消失'),
