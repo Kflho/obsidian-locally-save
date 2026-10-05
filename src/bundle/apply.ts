@@ -290,6 +290,16 @@ export interface ApplyPlan {
 	actions: ApplyAction[];
 	/** 要删掉的本地空文件夹（包里没有它；`mirror` 档会连"本机新建的"一起删） */
 	foldersToRemove: string[];
+	/**
+	 * **应用之前**那一刻的基准点清单（计划时定下：`state.bundle.fullFiles` 当时的样子）。
+	 *
+	 * 执行阶段照它算新点，**不能再去读状态文件**：计划与执行之间状态可能已经往前走了 ——
+	 * 最典型的就是"应用前先把本机改动存成一个包"（`ui/bundle-modal.ts` 的 `parkLocalChanges`），
+	 * 那一步导出之后 `fullFiles` 变成"旧点 ＋ 我的改动"。照它算出来的新点就不等于
+	 * 包送到的那一点（对方头部 `targetBaselineHash` 报的那个），两边从此对不上 ——
+	 * 链条模型下这是硬伤：下一个包会被判"接不上"。
+	 */
+	pointBefore: Record<string, FileRecord>;
 	/** 执行阶段照着做的策略 */
 	options: { conflictStrategy: ConflictStrategy; propagateDeletions: boolean; keepBackup: boolean };
 }
@@ -900,6 +910,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		report,
 		actions,
 		foldersToRemove,
+		pointBefore: { ...(state.bundle?.fullFiles ?? {}) },
 		options: { conflictStrategy, propagateDeletions, keepBackup },
 	};
 }
@@ -1148,7 +1159,6 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 以前这里图省事写成"当前仓库的完整清单"，于是把我独有的文件也记进了基准；
 	// 下次一应用，它们就成了"基准里有、包里没有" → 被当成"对方删过它"而删掉。
 	// （用户的报障：第一次不删、第二次才删。）
-	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
 	/**
 	 * 应用**完整副本**时的新"共同基准"＝**这个包自己的清单里、我这边真的写成了一致**的那些。
 	 *
@@ -1164,8 +1174,14 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * 这个路径**不记进基准** —— 基准是"两边都见过的那一版"，对方手里是包里那一版，
 	 * 本机那一份相对基准就是一处改动，下次导更新包会带上它（`base` 由更新包自己说）。
 	 */
-	/** 应用**之前**那个基准点的清单（见下面 `nextFullFiles`） */
-	const anchorBefore: Record<string, FileRecord> = { ...(state.bundle?.fullFiles ?? {}) };
+	/**
+	 * 应用**之前**那个基准点的清单（见下面 `nextFullFiles`）。
+	 *
+	 * **照计划里那份快照算，不读现在的状态**：计划与执行之间可能已经导出过一次
+	 * （"应用前先把本机改动存成一个包"），那一步会让状态里的点往前走 ——
+	 * 照它算出来的新点就不是包送到的那一点了（见 `ApplyPlan.pointBefore`）。
+	 */
+	const anchorBefore: Record<string, FileRecord> = { ...plan.pointBefore };
 	/** 这次**真的写成了一致**的那些条目（新基准点由它拼出来） */
 	const freshAnchor: Record<string, FileRecord> = {};
 	for (const entry of plan.info.header.entries) {
@@ -1175,15 +1191,10 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			&& Math.abs(current.mtime - entry.mtime) <= TOLERANCE;
 		// 这一个路径先按"没成一致"算：一致的话下面再补回来
 		delete anchorBefore[entry.path];
-		if (!agreed) {
-			delete baseline[entry.path];
-			continue;
-		}
-		baseline[entry.path] = { size: entry.size, mtime: entry.mtime };
+		if (!agreed) continue;
 		freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
 	}
 	for (const item of plan.info.header.deleted) {
-		delete baseline[item.path];
 		delete anchorBefore[item.path];
 	}
 

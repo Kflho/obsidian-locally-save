@@ -14,7 +14,7 @@ import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
 import { anchorOptions, listFullAnchors } from '../src/bundle/anchor';
 import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeExportRange, describeLogEntry, describeStateId } from '../src/bundle/log';
 import type { BundleLogEntry } from '../src/sync/state';
-import { exportBundle, planBundleExport, plannedExportModes } from '../src/bundle/export';
+import { exportBundle, planBundleExport, plannedExportModes, rebaseBundle } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, readEntry, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
@@ -2400,6 +2400,141 @@ const vgBackState = await loadState(STATE_VG_C);
 check('应用更老的完整副本 → 世代同步回那一代', vgBackState.generation, 1);
 check('基准代也跟着回到第 1 代', vgBackState.bundle?.fullGeneration, 1);
 check('内容确实回到了那一版', read(VG_C, 'v.md'), 'V1');
+
+// 44. 应用别人的包时"我这一半"怎么处置：动手前存成一个包 → 应用 → **接到新点上**
+//
+// 用户拍板的语义（原话）："把新的部分变成一个更新包，自己导入就等于在最新基准点基础上
+// 加上原来更新，给别人导入同理。"
+// 所以这一环的起点必须是**应用后落到的那个新点**（不是应用前那一点）——
+// 否则对方站在新点上，应用它会判"接不上"。
+const RBX = path.join(ROOT, 'rebase');
+const RBX_M = path.join(RBX, 'mine');
+const RBX_P = path.join(RBX, 'peer');
+const RBX_OUT = path.join(RBX, 'transfer');
+const STATE_RBX_M = path.join(RBX, 'state-mine.json');
+const STATE_RBX_P = path.join(RBX, 'state-peer.json');
+for (const dir of [RBX_M, RBX_P, RBX_OUT]) fs.mkdirSync(dir, { recursive: true });
+
+const rbxExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: RBX_OUT });
+const rbxApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+
+// ① 对方立一份完整副本，我应用它 → 两边站在同一个点上
+write(RBX_P, 'notes/a.md', 'A0');
+write(RBX_P, 'notes/b.md', 'B0');
+write(RBX_P, 'notes/c.md', 'C0');
+const rbxFull = await exportBundle(rbxExport(RBX_P, STATE_RBX_P, 'full'));
+const rbxFullInfo = await readBundleInfo(rbxFull.file as string);
+
+await executeBundlePlan(
+	await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxFull.file as string)),
+	rbxApply(RBX_M, STATE_RBX_M, rbxFull.file as string),
+);
+check('我应用完整副本之后：内容就是对方那份', [read(RBX_M, 'notes/a.md'), read(RBX_M, 'notes/c.md')], ['A0', 'C0']);
+check(
+	'我站的这一点＝那份完整副本的落点',
+	(await loadState(STATE_RBX_M)).bundle?.fullHash,
+	rbxFullInfo.header.targetBaselineHash,
+);
+
+// ② 我这边改一个、新建一个、删一个；对方改了另一个文件并导一份更新包给我
+write(RBX_M, 'notes/a.md', 'MINE-A');
+write(RBX_M, 'mine.md', 'MINE-NEW');
+fs.rmSync(abs(RBX_M, 'notes/b.md'));
+write(RBX_P, 'notes/c.md', 'P-NEW-C');
+const rbxChanges = await exportBundle(rbxExport(RBX_P, STATE_RBX_P));
+const rbxChangesInfo = await readBundleInfo(rbxChanges.file as string);
+
+// ③ 按界面上的顺序动手：**先只读地算一遍** → 把我的改动存成包 → 应用（用算好的那份计划）
+const rbxPlan = await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxChanges.file as string));
+check('应用前就看得出"我这边还有 2 个改动、1 个删除"', [rbxPlan.report.pendingChanges, rbxPlan.report.pendingDeletes], [2, 1]);
+const rbxParked = await exportBundle(rbxExport(RBX_M, STATE_RBX_M));
+checkTrue('动手前把我的改动存成了一个包', rbxParked.file !== null, rbxParked.reason ?? '没存下来');
+const rbxApplied = await executeBundlePlan(rbxPlan, rbxApply(RBX_M, STATE_RBX_M, rbxChanges.file as string));
+const rbxAfter = await loadState(STATE_RBX_M);
+check('应用完：包里点名的那份用包里的版本', read(RBX_M, 'notes/c.md'), 'P-NEW-C');
+check('应用完：我自己新建的文件被挪走（严格同步不留"送到状态里没有的"）', read(RBX_M, 'mine.md'), null);
+// 诚实边界：包里没提到、而我又改过的文件，包里**没有它的字节** —— 谁也变不出对方那一版，
+// 所以它们留在原地、状态编号当场差一点（那两处正是 ④ 里接到新点上、要发给对方的东西）
+check('应用完：包里没提到、我又改过的那个留在原地', read(RBX_M, 'notes/a.md'), 'MINE-A');
+check('应用完：我删掉的那个也没被凭空补回来（包里没有它的字节）', read(RBX_M, 'notes/b.md'), null);
+check('这一趟状态编号对不上：差的正是"包里没提到的这两处"', rbxApplied.stateIdCompare, 'mismatch');
+check(
+	'应用完：我站到包送到的新点上（存过包也不能把点算歪）',
+	rbxAfter.bundle?.fullHash,
+	rbxChangesInfo.header.targetBaselineHash,
+);
+
+// ④ 关键一步：把我的改动**接到新点上**（起点＝我刚站上的那一点）
+const rbxRebased = await rebaseBundle({ ...rbxExport(RBX_M, STATE_RBX_M), source: rbxParked.file as string });
+checkTrue('接出来的包写成功了', rbxRebased.file !== null, rbxRebased.reason ?? '没写出来');
+const rbxRebasedInfo = await readBundleInfo(rbxRebased.file as string);
+check('这一环的起点＝我刚应用到的那个新点', rbxRebasedInfo.header.baselineHash, rbxAfter.bundle?.fullHash);
+check('起点世代＝我现在的世代', rbxRebasedInfo.header.baseGeneration, rbxAfter.generation);
+check('落点世代＝再往前一版（内容＝新点 ＋ 我的改动）', rbxRebasedInfo.header.targetGeneration, (rbxAfter.generation ?? 0) + 1);
+check(
+	'条目＝我改过 / 新建的那两个',
+	rbxRebasedInfo.header.entries.map(entry => entry.path),
+	['mine.md', 'notes/a.md'],
+);
+check('删除清单＝我删掉的那个', rbxRebasedInfo.header.deleted.map(item => item.path), ['notes/b.md']);
+const rbxEntryA = rbxRebasedInfo.header.entries.find(entry => entry.path === 'notes/a.md');
+const rbxEntryMine = rbxRebasedInfo.header.entries.find(entry => entry.path === 'mine.md');
+check(
+	'包里的字节确实是**我那一版**（仓库里现在放的是对方那版）',
+	[
+		(await readEntry(rbxRebased.file as string, rbxRebasedInfo, rbxEntryA!)).toString('utf8'),
+		(await readEntry(rbxRebased.file as string, rbxRebasedInfo, rbxEntryMine!)).toString('utf8'),
+	],
+	['MINE-A', 'MINE-NEW'],
+);
+check(
+	'接这一下**不推进我这边**：世代与基准点都没动',
+	[rbxRebasedInfo.header.baseGeneration, (await loadState(STATE_RBX_M)).bundle?.fullHash],
+	[rbxAfter.generation, rbxAfter.bundle?.fullHash],
+);
+
+// ⑤ "自己导入就等于在最新基准点基础上加上原来更新"
+const rbxSelfResult = await executeBundlePlan(
+	await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxRebased.file as string)),
+	rbxApply(RBX_M, STATE_RBX_M, rbxRebased.file as string),
+);
+check(
+	'我自己应用它：我的改动加回来了，对方那边的改动也在',
+	[read(RBX_M, 'mine.md'), read(RBX_M, 'notes/a.md'), read(RBX_M, 'notes/c.md')],
+	['MINE-NEW', 'MINE-A', 'P-NEW-C'],
+);
+check('我自己删掉的那个仍然是删掉的', read(RBX_M, 'notes/b.md'), null);
+check('应用完状态编号跟包里记的一致（两边文件内容一致）', rbxSelfResult.stateIdCompare, 'match');
+check(
+	'我站到新的这一点上了',
+	(await loadState(STATE_RBX_M)).bundle?.fullHash,
+	rbxRebasedInfo.header.targetBaselineHash,
+);
+
+// ⑥ "给别人导入同理"：对方刚导完那个包，正站在新点上
+check(
+	'对方此刻确实站在新点上（他导完那个包就走到了）',
+	(await loadState(STATE_RBX_P)).bundle?.fullHash,
+	rbxAfter.bundle?.fullHash,
+);
+const rbxPeerResult = await executeBundlePlan(
+	await planBundleApply(rbxApply(RBX_P, STATE_RBX_P, rbxRebased.file as string)),
+	rbxApply(RBX_P, STATE_RBX_P, rbxRebased.file as string),
+);
+check(
+	'对方应用它：拿到的是"他的新点 ＋ 我的改动"',
+	[read(RBX_P, 'mine.md'), read(RBX_P, 'notes/a.md'), read(RBX_P, 'notes/c.md')],
+	['MINE-NEW', 'MINE-A', 'P-NEW-C'],
+);
+check('对方那边也删掉了我删的那个', read(RBX_P, 'notes/b.md'), null);
+check('对方应用完也报"跟导出方完全一致"', rbxPeerResult.stateIdCompare, 'match');
+check(
+	'两台机器最后落在同一个点上',
+	(await loadState(STATE_RBX_P)).bundle?.fullHash,
+	(await loadState(STATE_RBX_M)).bundle?.fullHash,
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
