@@ -8,10 +8,10 @@ import { listingHashOfFiles } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
-import { excludePatterns } from '../sync/runner';
+import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { fingerprint } from '../sync/hash-cache';
-import { VAULT_TRASH_DIR } from '../sync/runner';
 import { cachedHash, copyRef, loadState, pruneHashes, saveState } from '../sync/state';
+import type { PluginState } from '../sync/state';
 import { computeStateId } from '../sync/state-id';
 import type { Inventory, FileRecord } from '../sync/types';
 import { formatStamp } from '../utils/format';
@@ -130,11 +130,28 @@ export function plannedExportModes(want: { changes: boolean; full: boolean }): B
 	return modes;
 }
 
-export async function exportBundle(options: ExportOptions): Promise<ExportOutcome> {
-	const started = Date.now();
-	const { settings, mode } = options;
-	const exclude = excludePatterns(settings.excludePatterns, options.configDir);
+/** 一次导出"要装什么"的挑选结果，连同后续要用的基准数据（**不写盘**） */
+interface BundleWork {
+	state: PluginState;
+	inventory: Inventory;
+	/** 上次导出（任何类型）时仓库的样子：每个条目的 `base` —— 接收方最可能就停在这个版本 */
+	previous: Record<string, FileRecord>;
+	/** 上次导出**完整包**时的样子：更新包以它为基准累积；还没立过基准时是 null */
+	anchor: Record<string, FileRecord> | null;
+	/** 自上次完整包以来各文件经历过的中间版本 */
+	history: Record<string, FileRecord[]>;
+	picked: string[];
+	deleted: BundleDeletedEntry[];
+}
 
+/**
+ * 算这次要装什么（**纯计算，不写盘**）。
+ *
+ * `exportBundle` 与「导出预览」共用它 —— 预览要能把"会装进去哪些文件、会点名删哪些"
+ * 摊开给人看；两条路各写一遍挑选逻辑的话，迟早会出现"预览说一套、实际导另一套"。
+ */
+async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<BundleWork> {
+	const exclude = excludePatterns(options.settings.excludePatterns, options.configDir);
 	const state = await loadState(options.stateFile);
 	const inventory = options.inventory
 		?? await scanTree(options.vaultRoot, { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
@@ -180,6 +197,64 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		}
 	}
 	picked.sort();
+	return { state, inventory, previous, anchor, history, picked, deleted };
+}
+
+/** 「导出预览」要看的东西：这次会装哪些文件、点名删哪些、大概多大 */
+export interface BundleExportPreview {
+	mode: BundleMode;
+	fileCount: number;
+	deletedCount: number;
+	bytes: number;
+	/** 会装进包里的文件（界面只列前若干个，其余报个数） */
+	files: string[];
+	/** 点名要删的文件（更新包才有意义） */
+	deleted: string[];
+	/** 更新包基于的那份完整副本是第几代；null ＝ 还没立过基准 */
+	anchorGeneration: number | null;
+	/** 算不出来时的原因（例如"还没导过完整副本"）：预览照样打开，把原因写在界面上 */
+	problem?: string;
+}
+
+/**
+ * 只算不写：`sync-preview` 命令与「导出预览」窗口用它。
+ *
+ * 算不出来（最典型的是"更新包还没有基准"）时**不抛错** —— 预览的职责是把情况说清楚，
+ * 而不是甩一条异常给调用方。
+ */
+export async function planBundleExport(options: ExportOptions): Promise<BundleExportPreview> {
+	try {
+		const work = await prepareBundle(options, options.mode);
+		let bytes = 0;
+		for (const file of work.picked) bytes += work.inventory.files.get(file)?.size ?? 0;
+		return {
+			mode: options.mode,
+			fileCount: work.picked.length,
+			deletedCount: work.deleted.length,
+			bytes,
+			files: work.picked,
+			deleted: work.deleted.map(item => item.path),
+			anchorGeneration: work.state.bundle?.fullGeneration ?? null,
+		};
+	} catch (error) {
+		return {
+			mode: options.mode,
+			fileCount: 0,
+			deletedCount: 0,
+			bytes: 0,
+			files: [],
+			deleted: [],
+			anchorGeneration: null,
+			problem: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+export async function exportBundle(options: ExportOptions): Promise<ExportOutcome> {
+	const started = Date.now();
+	const { mode } = options;
+	const work = await prepareBundle(options, mode);
+	const { state, inventory, previous, anchor, history, picked, deleted } = work;
 
 	if (mode === 'changes' && picked.length === 0 && deleted.length === 0) {
 		options.log.debug('更新包：自上次完整包以来没有任何变化');

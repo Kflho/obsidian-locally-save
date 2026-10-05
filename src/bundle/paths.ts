@@ -4,13 +4,12 @@ import { toNative } from '../utils/paths';
 /**
  * 同步包放哪儿。
  *
- * 默认放在**同步目标文件夹**下的 `.lsave/bundles`：
- * - 用户不用再单独想一个路径，包就跟着副本走；
- * - 放在 `.lsave/` 里面很关键 —— 这个目录在扫描副本时是**整个跳过**的，
- *   否则包文件会被当成"副本新增的文件"同步回仓库，越滚越多。
+ * 用户在设置里填一个目录（**必填**），包就放在它的 `full` / `changes` 子目录里：
+ * 完整副本与更新包用途不同（一个用来整份恢复、一个用来天天搬），混在一起很快就认不出谁是谁。
  *
- * 完整包与改动包各自一个子目录：两种包用途不同（一个用来整份恢复、一个用来天天搬），
- * 混在一起很快就不认识谁是谁了。
+ * 目录本身不参与任何扫描 —— 包不是笔记，不该被打进另一个包或者当成仓库内容。
+ * （老版本的默认位置是"本地副本文件夹的 `.lsave/bundles`"：`.lsave` 在扫描副本时整个跳过。
+ * 副本通道砍掉之后这个兜底也没了，见 `bundleBaseDir`。）
  */
 
 /** 副本里那个"不参与同步"的目录名 */
@@ -21,14 +20,15 @@ export const BUNDLE_SUBDIR = 'bundles';
 export type BundleMode = 'full' | 'changes';
 
 /**
- * 包的根目录（绝对路径）。设置里填了就用填的，否则跟着同步目标走。
- * 两个都没填时返回空串 —— 调用方要提示用户先填一个。
+ * 包的根目录（绝对路径）。
+ *
+ * **0.8.0 起必须由用户填**：以前留空会跟着「目标文件夹」（本地副本）走，
+ * 那条通道已经砍掉了。包是这里唯一的搬运格式，"放哪儿"不该有藏起来的默认值 ——
+ * 用户填过才知道去哪儿找包、才会记得把它拷走。
+ * 留空时返回空串，调用方负责提示"先去设置里填同步包文件夹"。
  */
-export function bundleBaseDir(settings: PluginSettings, targetDir: string): string {
-	const custom = settings.bundleDir.trim();
-	if (custom) return custom;
-	const target = targetDir.trim();
-	return target ? toNative(target, `${BUNDLE_ROOT_DIR}/${BUNDLE_SUBDIR}`) : '';
+export function bundleBaseDir(settings: PluginSettings): string {
+	return settings.bundleDir.trim();
 }
 
 /** 某一类包具体放哪个目录 */

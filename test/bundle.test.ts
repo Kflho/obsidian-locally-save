@@ -12,7 +12,7 @@ import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/app
 import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
 import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeLogEntry, describeStateId } from '../src/bundle/log';
 import type { BundleLogEntry } from '../src/sync/state';
-import { exportBundle, plannedExportModes } from '../src/bundle/export';
+import { exportBundle, planBundleExport, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
@@ -505,23 +505,14 @@ check('复用传入的清单：不在清单里的文件不进包', reused.entryC
 const reusedInfo = await readBundleInfo(reused.file as string);
 check('包里只有清单里那一个', reusedInfo.header.entries.map(entry => entry.path), ['notes/a.md']);
 
-// 11. 包目录的解析规则
+// 11. 包目录的解析规则（0.8.0 起必填：副本通道砍掉之后没有"跟着目标文件夹走"这个兜底了）
 const base = { ...DEFAULT_SETTINGS, bundleDir: '' };
-check(
-	'同步包文件夹留空 → 跟着同步目标走',
-	bundleBaseDir(base, 'D:/vault-copy'),
-	'D:/vault-copy/.lsave/bundles',
-);
+check('同步包文件夹留空 → 空串（调用方要提示去设置里填）', bundleBaseDir(base), '');
+check('只有空格也算没填', bundleBaseDir({ ...base, bundleDir: '   ' }), '');
 check(
 	'填了同步包文件夹 → 用填的',
-	bundleBaseDir({ ...base, bundleDir: 'D:/传输' }, 'D:/vault-copy'),
+	bundleBaseDir({ ...base, bundleDir: 'D:/传输' }),
 	'D:/传输',
-);
-check('目标文件夹也没填 → 空串（调用方要提示去填）', bundleBaseDir(base, ''), '');
-check(
-	'对话框里把输入框清空 → 回落到默认，而不是"没填路径"',
-	bundleBaseDir({ ...base, bundleDir: '' }, 'D:/vault-copy'),
-	'D:/vault-copy/.lsave/bundles',
 );
 check(
 	'完整包与改动包分两个目录',
@@ -532,7 +523,6 @@ check('找包时两个子目录都看（外加根目录，兼容早期直接放�
 check('没填目录时不去找包', bundleDirsToScan(''), []);
 
 // 12. 导出真的落到了对应的子目录里
-const fullInfo2 = await readBundleInfo(FILE_FULL);
 check('完整包落在 full 子目录', FILE_FULL.replace(/\\/g, '/').includes('/full/'), true);
 check('改动包落在 changes 子目录', FILE_CHANGES.replace(/\\/g, '/').includes('/changes/'), true);
 checkTrue('包文件名带上了包 ID 前几位', path.basename(FILE_FULL).endsWith('.lsave'), FILE_FULL);
@@ -1680,6 +1670,65 @@ check('旧包没记编号 → 判成"比不了"', qdResult.stateIdCompare, 'unkn
 checkTrue('但自己这边的编号照样算出来、记下来', (qdResult.stateId.id ?? '').length === 16, qdResult.stateId.id);
 checkTrue('描述函数会说清规模', describeStateId(qdResult.stateId).includes('内容') === false
 	&& describeStateId(qdResult.stateId).includes('1 个文件'), describeStateId(qdResult.stateId));
+
+// 46. 导出预览（planBundleExport）：只算不写 —— `sync-preview` 命令与「导出预览」窗口靠它。
+// 关键：它与**真正导出走的是同一套挑选逻辑**，所以"预览说一套、实际导另一套"不会发生。
+const PV = path.join(ROOT, 'preview-vault');
+const STATE_PV = path.join(ROOT, 'state-preview.json');
+fs.mkdirSync(PV, { recursive: true });
+write(PV, 'notes/a.md', 'AAA', T0);
+write(PV, 'notes/b.md', 'BBB', T0 + 1000);
+
+// 还没立过基准：更新包算不出来 —— 预览**不抛错**，只把原因写在结果里
+const pvNoAnchor = await planBundleExport(exportOptions(PV, STATE_PV, 'changes'));
+checkTrue('没立过基准时预览不抛错，只说明原因', typeof pvNoAnchor.problem === 'string', JSON.stringify(pvNoAnchor));
+checkTrue(
+	'原因说的是"先导完整副本"',
+	(pvNoAnchor.problem ?? '').includes('完整副本'),
+	String(pvNoAnchor.problem),
+);
+
+// 立基准 → 改两个文件 → 预览要能列出来
+await exportBundle(exportOptions(PV, STATE_PV, 'full'));
+write(PV, 'notes/b.md', 'BBB 改过了', T0 + 60_000);
+write(PV, 'notes/c.md', 'CCC', T0 + 61_000);
+const pvPreview = await planBundleExport(exportOptions(PV, STATE_PV, 'changes'));
+check('预览列出会装进包里的文件', pvPreview.files, ['notes/b.md', 'notes/c.md']);
+check('预览报出文件数', pvPreview.fileCount, 2);
+check('这次没有删除', pvPreview.deleted, []);
+checkTrue('预览报出估算大小', pvPreview.bytes > 0, String(pvPreview.bytes));
+check('预览说清基于第几代完整副本', pvPreview.anchorGeneration, 1);
+
+// 预览**不写盘**：包里该有的东西一样都不落地
+const pvOutBefore = fs.readdirSync(OUT).length;
+await planBundleExport(exportOptions(PV, STATE_PV, 'changes'));
+check('预览不写盘（包目录里的条目数没变）', fs.readdirSync(OUT).length, pvOutBefore);
+
+// 删除清单只认**基准（完整副本）里有的**文件：基准之后新加又删掉的，对面本来就没有
+fs.rmSync(abs(PV, 'notes/c.md'));
+const pvAfterNewDelete = await planBundleExport(exportOptions(PV, STATE_PV, 'changes'));
+check('新加又删掉的文件不进删除清单', pvAfterNewDelete.deleted, []);
+
+// 删掉基准里有的那个 → 预览要点名它，而且它不该再出现在"装入"清单里
+fs.rmSync(abs(PV, 'notes/a.md'));
+const pvAfterDelete = await planBundleExport(exportOptions(PV, STATE_PV, 'changes'));
+check('预览点名要删的文件', pvAfterDelete.deleted, ['notes/a.md']);
+check('要删的文件不在"装入"清单里', pvAfterDelete.files.includes('notes/a.md'), false);
+check('改过的那个照样要装进去', pvAfterDelete.files, ['notes/b.md']);
+
+// 预览说的 == 实际导出来的（挑选逻辑同一处，这是这条测试真正要钉的东西）
+const pvRealRun = await exportBundle(exportOptions(PV, STATE_PV, 'changes'));
+const pvRealInfo = await readBundleInfo(pvRealRun.file as string);
+check(
+	'预览说会装哪些，包里就是哪些',
+	pvRealInfo.header.entries.map(entry => entry.path).sort(),
+	pvAfterDelete.files,
+);
+check(
+	'预览说会删哪些，包里就是哪些',
+	pvRealInfo.header.deleted.map(entry => entry.path).sort(),
+	pvAfterDelete.deleted,
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

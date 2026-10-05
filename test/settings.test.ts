@@ -121,13 +121,11 @@ for (const def of definitions) {
 	);
 }
 
-// 4. 依赖其它开关的谓词：「删除前先备份」跟着「同步删除」走
-// （以前还有一对：启动提示 + 提示文案，那两项已经删掉了 —— 启动不再弹通知）
-const trashDisabled = (s: Partial<PluginSettings>) =>
-	(defsOf(createTab(s).tab).find(def => def.control?.key === 'deletedToTrash')?.control?.disabled as () => boolean)();
-check("「删除前先备份」：开着删除传播时可用", trashDisabled({ propagateDeletions: true }), false);
-check("「删除前先备份」：关掉删除传播后变灰", trashDisabled({ propagateDeletions: false }), true);
-check("删除传播开关本身不设 disabled", byKey(definitions, 'propagateDeletions')?.control?.disabled, undefined);
+// 4. 依赖其它开关的谓词：0.8.0 砍掉副本通道之后，「删除前先备份」不再跟着
+//    「包里删掉的文件，这边也删」变灰 —— 应用包时回收是独立的一件事
+//    （强制两档更是必然备份，不看这一项）
+check("「删除前先备份」不再依赖别的开关", byKey(definitions, 'deletedToTrash')?.control?.disabled, undefined);
+check("删除开关本身不设 disabled", byKey(definitions, 'propagateDeletions')?.control?.disabled, undefined);
 
 // 5. 写入时收敛脏数据并保存
 const { tab: writeTab, settings: written, saveCount } = createTab();
@@ -175,6 +173,30 @@ check(
 check("大小提醒：下拉选项外的值收敛到默认", settingsFrom({ bundleSizeWarnLimit: '300MB' }).bundleSizeWarnLimit, '');
 check("大小提醒：选项内的值原样保留", settingsFrom({ bundleSizeWarnLimit: '1GB' }).bundleSizeWarnLimit, '1GB');
 
+// 6c. 迁移：0.8.0 砍掉了「同步到本地副本」通道（targetDir / syncDirection 一起删了）。
+//     老用户的包原本就放在 `<目标文件夹>/.lsave/bundles` —— 把包目录迁到那个位置，
+//     包还在原处，用户不必重新找一遍；自己填过包目录的照旧不动。
+check(
+	'老配置：只有目标文件夹 → 包目录迁到原来放包的地方',
+	settingsFrom({ targetDir: 'D:/备份/我的笔记' }).bundleDir,
+	'D:/备份/我的笔记/.lsave/bundles',
+);
+check(
+	'老配置：自己填过包目录 → 照旧，不被目标文件夹覆盖',
+	settingsFrom({ targetDir: 'D:/备份/我的笔记', bundleDir: 'E:/同步包' }).bundleDir,
+	'E:/同步包',
+);
+check(
+	'老配置：目标文件夹是空白 → 包目录还是空的（界面上提示去填）',
+	settingsFrom({ targetDir: '   ' }).bundleDir,
+	'',
+);
+checkTrue(
+	'被删掉的老字段不带进内存（也不会写回 data.json）',
+	!('targetDir' in settingsFrom({ targetDir: 'D:/x', syncDirection: 'both' })),
+	'老字段又冒出来了',
+);
+
 // 7. 面板结构：按"用户要干什么"分页，页内同类的事挨在一起
 const pages = tab.getSettingDefinitions() as unknown as AnyDefinition[];
 check("顶层都是页面（按功能分页，不平铺一堆组）",
@@ -213,27 +235,18 @@ try {
 	checkTrue("旧版 DOM 路径能画出按钮", false, String(error));
 }
 
-// 9. 灰底提示（placeholder）：留空时的默认值要显示成灰字，而不是预先填进输入框 ——
-//    预先填进去的话，用户一删就变成"没填路径"，还得自己猜默认是哪儿
+// 9. 灰底提示（placeholder）：「同步包文件夹」是**必填**，所以灰字只是给个路径例子 ——
+//    0.8.0 之前它有个"留空跟着目标文件夹走"的隐藏默认值，那条通道砍掉之后没有了
 const bundleDirField = ALL_FIELDS.find(field => field.key === 'bundleDir');
 checkTrue('字段表里有「同步包文件夹」', bundleDirField !== undefined, '没找到');
 const bundleDirControl = bundleDirField?.control;
 checkTrue(
-	'它的灰底提示是动态的（默认值依赖目标文件夹）',
-	bundleDirControl?.type === 'text' && typeof bundleDirControl.placeholder === 'function',
-	'写成了固定字符串',
+	'它是个输入框，灰字给一个路径例子',
+	bundleDirControl?.type === 'text',
+	'类型不对',
 );
-if (bundleDirField && bundleDirControl) {
-	check(
-		'没填目标文件夹时，提示先去填它',
-		placeholderOf(bundleDirControl, { ...DEFAULT_SETTINGS, targetDir: '' }),
-		'先填上面的「目标文件夹」，或在这里直接指定',
-	);
-	check(
-		'填了目标文件夹 → 灰字显示默认路径',
-		placeholderOf(bundleDirControl, { ...DEFAULT_SETTINGS, targetDir: 'D:/备份/我的笔记' }),
-		'D:/备份/我的笔记/.lsave/bundles',
-	);
+if (bundleDirControl) {
+	check('灰底提示是个例子', placeholderOf(bundleDirControl, DEFAULT_SETTINGS), 'D:\\备份\\同步包');
 }
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);

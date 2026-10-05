@@ -13,6 +13,7 @@ import {
 import type { ManagedBundle } from '../bundle/manage';
 import { dirExists } from '../sync/disk';
 import { formatBytes, formatTime } from '../utils/format';
+import { markDestructive } from './modal-layout';
 import { openFolderInExplorer } from './reveal';
 
 /**
@@ -60,7 +61,8 @@ export class BundleListView {
 	/** 刷新序号：连打几个字会触发好几次，异步读目录会乱序返回 */
 	private token = 0;
 	/** 攒着的那次刷新（见 schedule） */
-	private pending: ReturnType<typeof setTimeout> | null = null;
+	// 用 window.setTimeout 而不是裸的 setTimeout：弹窗（popout window）里也能对上号
+	private pending: number | null = null;
 
 	constructor(plugin: LocallySavePlugin, parent: HTMLElement, options: BundleListViewOptions) {
 		this.plugin = plugin;
@@ -80,8 +82,8 @@ export class BundleListView {
 	 * 包多的时候卡的是自己。按钮点击、删完包这种要立刻看到结果的**仍然直接 refresh**。
 	 */
 	schedule(): void {
-		if (this.pending) clearTimeout(this.pending);
-		this.pending = setTimeout(() => {
+		if (this.pending) window.clearTimeout(this.pending);
+		this.pending = window.setTimeout(() => {
 			this.pending = null;
 			void this.refresh();
 		}, 250);
@@ -116,7 +118,7 @@ export class BundleListView {
 		this.noteEl.setText('');
 
 		if (!base) {
-			this.noteEl.setText('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个路径。');
+			this.noteEl.setText('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
 			return;
 		}
 		if (!this.baseExists) {
@@ -357,13 +359,14 @@ class ConfirmBundleModal extends Modal {
 			.addButton(button => button
 				.setButtonText('取消')
 				.onClick(() => this.close()))
-			.addButton(button => button
-				.setButtonText(this.options.confirmText)
-				.setWarning()
-				.onClick(() => {
+			.addButton(button => {
+				button.setButtonText(this.options.confirmText);
+				markDestructive(button);
+				button.onClick(() => {
 					this.close();
 					void this.options.onConfirm();
-				}));
+				});
+			});
 	}
 
 	onClose(): void {

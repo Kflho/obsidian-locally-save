@@ -14,8 +14,8 @@ import { toNative } from '../utils/paths';
  * 界面上三个地方（导出弹窗、导入弹窗、管理弹窗）都要用同一套结果；
  * 而且不 import obsidian 就能拿临时目录直接测（见 test/bundle.test.ts）。
  *
- * 回收站用 `.lsave` 这个名字是有意的：它本来就在扫描副本时被整个跳过，
- * 万一用户把包文件夹设在了副本里面，回收站也不会被同步回仓库。
+ * 回收站用 `.lsave` 这个名字是有意的：包目录里混进一个回收站本来就不该被当成笔记，
+ * 而且万一用户把包文件夹设在了仓库里，`.lsave` 也在默认排除规则里、不会被装进下一个包。
  * 具体放在哪个 `.lsave` 里见 `bundleTrashRoot`。
  */
 
@@ -24,10 +24,10 @@ export const BUNDLE_TRASH_DIR = 'bundles-trash';
 /**
  * 回收站根目录（绝对路径）＝**离包最近的那个 `.lsave` 里**的 `bundles-trash`。
  *
- * 关键一条：**不要塞进 `bundles` 里面**。默认布局下包就在 `<目标文件夹>/.lsave/bundles`，
- * 再往里放一个 `.lsave/bundles-trash` 会变成 `.lsave/bundles/.lsave/bundles-trash` ——
- * 两层 `.lsave` 套着，翻起来又乱又难找（用户报过）。所以：
- * - `<x>/.lsave/bundles`（默认布局）→ `<x>/.lsave/bundles-trash`，跟 `bundles` 平级；
+ * 关键一条：**不要塞进 `bundles` 里面**。包目录的上一级或它本身就是 `.lsave` 时，
+ * 再往里放会把 `.lsave` 套两层（`.lsave/bundles/.lsave/bundles-trash`），
+ * 翻起来又乱又难找（用户报过）。所以：
+ * - `<x>/.lsave/bundles`（0.8.0 之前副本通道的默认布局）→ `<x>/.lsave/bundles-trash`，跟 `bundles` 平级；
  * - `<x>/.lsave`（用户直接把包文件夹指到了 `.lsave`）→ `<x>/.lsave/bundles-trash`；
  * - 用户自己填的文件夹（那儿压根没有 `.lsave`）→ `<自定义>/.lsave/bundles-trash`。
  *
