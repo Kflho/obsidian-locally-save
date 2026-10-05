@@ -41,6 +41,71 @@
 	font-weight: var(--font-semibold);
 }
 
+/* 同步包列表：一行一个包，右侧是行内操作 */
+.locally-save-bundles-head {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6em;
+	margin: 1em 0 0.3em;
+	font-weight: var(--font-semibold);
+}
+
+/* 分组标题（更新包 / 完整副本）：列表里滚到哪儿都看得见自己在哪一组 */
+.locally-save-bundles-group {
+	position: sticky;
+	top: 0;
+	z-index: 1;
+	padding: 0.3em 0.6em;
+	background-color: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+}
+
+.locally-save-row.is-selected {
+	background-color: var(--background-modifier-active-hover);
+}
+
+/* 头部读不出来的包：看得见、也能删，但要一眼看出它不对劲 */
+.locally-save-row.is-unknown .locally-save-file {
+	color: var(--text-muted);
+}
+
+.locally-save-bundle-actions {
+	display: flex;
+	flex: 0 0 auto;
+	gap: 0.3em;
+	align-items: center;
+}
+
+/* 行内小按钮：默认的按钮样式在列表里太胖，撑得一行放不下 */
+.locally-save-mini {
+	padding: 0.1em 0.5em;
+	font-size: var(--font-ui-smaller);
+	line-height: 1.6;
+}
+
+.locally-save-mini.is-danger {
+	color: var(--text-error);
+}
+
+/* 回收站那一行：放在列表**上面**，别被滚动列表顶出视野 */
+.locally-save-trash {
+	display: flex;
+	align-items: baseline;
+	gap: 0.6em;
+	flex-wrap: wrap;
+	margin: 0 0 0.3em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* 空的回收站也要占一行（说明"删掉的包会去哪"），但不能看着像有东西 */
+.locally-save-trash:empty {
+	display: none;
+}
+
 /* 同步预览 / 同步包列表：一行一个文件 */
 .locally-save-list {
 	max-height: 40vh;
@@ -65,6 +130,8 @@
 
 .locally-save-row.is-bundle {
 	cursor: pointer;
+	/* 这一行右边有按钮：按中线对齐比按基线对齐好看 */
+	align-items: center;
 }
 
 .locally-save-row.is-bundle:hover {

@@ -40,6 +40,11 @@ export interface SyncProgress {
 	done: number;
 	total: number;
 	path: string;
+	/**
+	 * 状态栏上那句动词，默认"同步中"。
+	 * 导出 / 应用同步包也借这一格显示进度，界面要能说清此刻在干什么。
+	 */
+	label?: string;
 }
 
 export interface SyncRunOptions {

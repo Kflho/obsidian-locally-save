@@ -242,6 +242,18 @@ export async function moveToTrash(absPath: string, trashRoot: string, relPath: s
 	}
 }
 
+/**
+ * 递归删掉一整棵目录。
+ *
+ * 和上面那条"删目录只走 rmdir"的规矩**不冲突**：那条规矩保护的是用户的数据
+ * （清单看漏了最多就是没删掉）；这里删的是插件自己建的回收站，
+ * 里面的东西全部是用户点过"删除"、又明确点了"清空"的，所以用 rm -rf 语义。
+ * 调用方必须只传自己算出来的回收站路径，绝不能拿它删仓库 / 副本里的目录。
+ */
+export async function removeDirRecursive(absDir: string): Promise<void> {
+	await fs.promises.rm(absDir, { recursive: true, force: true });
+}
+
 export async function readJsonFile<T>(absPath: string): Promise<T | null> {
 	try {
 		const text = await fs.promises.readFile(absPath, 'utf8');

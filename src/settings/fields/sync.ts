@@ -14,6 +14,7 @@ import { DEFAULT_SIZE_LIMIT } from '../../bundle/size-warn';
 import { bundleBaseDir } from '../../bundle/paths';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
+import { BundleManagerModal } from '../../ui/manage-modal';
 import { associationSupported } from '../../ui/associate';
 import { AssociateModal } from '../../ui/associate-modal';
 import type { FieldSection } from './types';
@@ -95,7 +96,9 @@ export const SYNC_SECTION: FieldSection = {
 					name: '同步后自动留更新包',
 					desc: '每次同步成功后，把自上次**完整副本**以来的累积改动导成一个包放进「同步包文件夹/changes」'
 						+ '（没有变化就不导）。用的是同步刚扫完的结果，几乎不额外花时间；'
-						+ '包会随改动累积变大，定期导一次完整副本即可清零。**第一次要先导一次完整副本**，更新包要有基准',
+						+ '包会随改动累积变大，定期导一次完整副本即可清零。**第一次要先导一次完整副本**，更新包要有基准。'
+						+ '下面那个「留完整包」也开着时：完整包先留、更新包按它算必然是空的，于是不会留'
+						+ '（想要"一个小文件传出去"就别开完整包）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
@@ -163,11 +166,28 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					name: '导出到文件',
 					desc: '把仓库打包成 .lsave 文件，拷到别的机器上用下面的按钮应用。'
-						+ '对话框里**完整副本与更新包是两个独立开关**，可以都要（都勾时先导更新包、再导完整包）',
+						+ '对话框里**完整副本与更新包是两个独立开关**，可以都要（都勾时先导完整副本、再导更新包；'
+						+ '完整副本刚把整个仓库装走，这时的更新包必然是空的，所以不会生成它）',
 					button: '导出同步包…',
 					cta: true,
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleTarget(settings),
+				},
+			],
+		},
+		{
+			heading: '同步包：管理',
+			// 包攒多了要清、要看看某个包到底在哪个目录：这些都是"管已有的包"，不是设置项
+			fields: [],
+			actions: [
+				{
+					name: '管理已有的包',
+					desc: '列出同步包文件夹里的所有包（完整还是更新、多大、什么时候导的），'
+						+ '选中一行可以**应用… / 打开所在文件夹 / 复制路径 / 删除**。'
+						+ '**删除只是挪进回收站**（跟 bundles 平级的 .lsave/bundles-trash/时间戳/），'
+						+ '列表上方那行的「清空回收站」才是真删',
+					button: '管理同步包…',
+					run: plugin => { new BundleManagerModal(plugin.app, plugin).open(); },
 				},
 			],
 		},

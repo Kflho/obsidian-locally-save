@@ -146,6 +146,9 @@ export interface BundleSource {
 
 const CHUNK = 4 * 1024 * 1024;
 
+/** 每搬完一个文件报一次（右下角的数字靠它跳动，见 ui/progress.ts） */
+export type BundleWriteProgress = (done: number, total: number, path: string) => void;
+
 /**
  * 写一个同步包。
  *
@@ -157,6 +160,7 @@ export async function writeBundle(
 	file: string,
 	header: Omit<BundleHeader, 'entries' | 'payloadBytes'>,
 	sources: BundleSource[],
+	onProgress?: BundleWriteProgress,
 ): Promise<{ header: BundleHeader; trailer: BundleTrailer }> {
 	const entries: BundleEntry[] = [];
 	let offset = 0;
@@ -195,6 +199,7 @@ export async function writeBundle(
 		const payloadHash = createHash('sha256');
 		const buffer = Buffer.alloc(CHUNK);
 		let chunks = 0;
+		let doneFiles = 0;
 
 		for (const source of sources) {
 			const sourceHandle = await fs.promises.open(source.abs, 'r');
@@ -219,6 +224,9 @@ export async function writeBundle(
 			} finally {
 				await sourceHandle.close();
 			}
+			// 报进度放在**搬完一个文件之后**：写包是导出里最耗时的一段，
+			// 不报的话右下角的数字会一直停在算指纹结束的那个数上
+			onProgress?.(++doneFiles, sources.length, source.path);
 		}
 
 		const trailer: BundleTrailer = {

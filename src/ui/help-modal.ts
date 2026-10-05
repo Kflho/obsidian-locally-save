@@ -61,7 +61,27 @@ export class BundleHelpModal extends Modal {
 				+ '跳过之后提醒线按原上限整数倍往上抬（200 → 400 → 600MB），换过基准就清零',
 		});
 		pick.createEl('li', {
-			text: '两个自动开关各自独立，可以只开"更新包"，也可以都开（都开时先导更新包、再导完整包）',
+			text: '两个自动开关各自独立，可以只开"更新包"，也可以都开。都开时**先导完整包、后导更新包** ——'
+				+ '完整包刚把整个仓库装走，这时的更新包必然是空的，所以不会生成它（状态栏会说明一句）。'
+				+ '想要一个小文件传出去，就只开"更新包"',
+		});
+
+		contentEl.createEl('h3', { text: '包攒多了怎么清' });
+		const clean = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		clean.createEl('li', {
+			text: '导出对话框、打开包对话框、以及命令面板里的 `管理同步包…` 都会列出包文件夹里的所有包：'
+				+ '完整还是更新、多大、什么时候导的。选中一行可以**应用… / 打开所在文件夹 / 复制路径 / 删除**',
+		});
+		clean.createEl('li', {
+			text: '**删除只是挪进回收站**（跟 `bundles` 平级的 `.lsave/bundles-trash/时间戳/`；'
+				+ '默认布局下就是"目标文件夹/.lsave/bundles-trash"），包没有真的消失，'
+				+ '想反悔去那个目录里手动捞回来就行（弹窗里也会把完整路径写出来）',
+		});
+		clean.createEl('li', {
+			text: '列表**上方**那一行显示回收站里还剩几个包；点「清空回收站」才是**真删**，删完捞不回来',
+		});
+		clean.createEl('li', {
+			text: '读不出头部的 .lsave（传坏了、或不是本插件的包）也会列出来、标一个"？" —— 看得见才删得掉',
 		});
 
 		contentEl.createEl('h3', { text: '打开包那一步是只读的' });

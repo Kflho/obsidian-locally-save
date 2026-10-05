@@ -5,22 +5,20 @@ import { executeBundlePlan, planBundleApply, STRICTNESS_LABELS } from '../bundle
 import type { ApplyPlan, ApplyStrictness } from '../bundle/apply';
 import { CONFLICT_OPTIONS } from '../settings/model';
 import type { ConflictStrategy } from '../sync/types';
-import { exportBundle } from '../bundle/export';
+import { exportBundle, plannedExportModes } from '../bundle/export';
 import type { ExportOutcome } from '../bundle/export';
-import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../bundle/paths';
+import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
-import { dirExists, listFiles } from '../sync/disk';
 import { removeFromTarget } from '../sync/runner';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
+import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
 import { bringWindowForward, focusWindow } from './modal-layout';
 import { offerBaselineReset } from './reset-baseline-modal';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
-/** 列表里最多列多少个包 */
-const MAX_BUNDLES = 20;
 /** 确认框里最多列多少个会被删的文件 */
 const MAX_ROWS = 200;
 
@@ -32,7 +30,7 @@ const MAX_ROWS = 200;
  */
 export class ExportBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
-	/** 两个**独立**的选项：可以都要（不是互斥的下拉框） */
+	/** 两个**独立**的选项：可以都要（顺序见 plannedExportModes：先完整、后更新） */
 	private wantChanges = true;
 	private wantFull = false;
 	/** 用户自己填的值（可能为空 ＝ 用默认） */
@@ -41,6 +39,8 @@ export class ExportBundleModal extends Modal {
 	private defaultDir: string;
 	private statusEl!: HTMLElement;
 	private whereEl!: HTMLElement;
+	/** 底下那份"已有的同步包"列表：导出完不用另开窗口就能顺手清一清 */
+	private list: BundleListView | null = null;
 
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
@@ -66,10 +66,11 @@ export class ExportBundleModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
-		// 两个独立选项，不是互斥的：都要就都勾上（导出时会先导更新包、再导完整包）
+		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整副本、再导更新包**）
 		new Setting(contentEl)
 			.setName('导出更新包')
-			.setDesc('自上次完整副本以来累积的全部改动。对方直接应用最新的一个即可，跳过中间几个也不会少内容')
+			.setDesc('自上次完整副本以来累积的全部改动。对方直接应用最新的一个即可，跳过中间几个也不会少内容。'
+				+ '两个都勾时它会是空的（完整副本刚把当前仓库整个装走），那时不会生成空包，只提示一句')
 			.addToggle(toggle => toggle
 				.setValue(this.wantChanges)
 				.onChange(value => {
@@ -96,11 +97,21 @@ export class ExportBundleModal extends Modal {
 				.onChange(value => {
 					this.outDir = value.trim();
 					this.renderWhere();
+					this.list?.schedule();
 				}));
 
 		this.whereEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.statusEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.renderWhere();
+
+		// 顺手就能管理：包攒多了、看到过时的，不用关掉这个窗再去导入弹窗里删
+		this.list = new BundleListView(this.plugin, contentEl, {
+			baseDir: () => this.effectiveDir(),
+			// 回收站那一行也显示：在**这个**弹窗里删掉的包，得能在这儿看到它去哪了
+			showTrash: true,
+			emptyText: '这个文件夹里还没有 .lsave 文件（导一次就有了）',
+		});
+		void this.list.refresh();
 
 		new Setting(contentEl)
 			.addButton(button => button
@@ -130,12 +141,9 @@ export class ExportBundleModal extends Modal {
 		this.whereEl.setText(`会写到：${targets}${this.outDir === '' ? '（留空＝跟着目标文件夹）' : ''}`);
 	}
 
-	/** 勾了哪几种，以及导出顺序：**先更新包、后完整包** */
+	/** 勾了哪几种，以及导出顺序：**先完整副本、后更新包**（见 plannedExportModes） */
 	private wantedModes(): BundleMode[] {
-		const modes: BundleMode[] = [];
-		if (this.wantChanges) modes.push('changes');
-		if (this.wantFull) modes.push('full');
-		return modes;
+		return plannedExportModes({ changes: this.wantChanges, full: this.wantFull });
 	}
 
 	private async run(): Promise<void> {
@@ -157,6 +165,8 @@ export class ExportBundleModal extends Modal {
 		let resetCandidate: ExportOutcome | null = null;
 		/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
 		const written: string[] = [];
+		/** 这一轮导过完整副本了（紧随其后的更新包必然是空的） */
+		let fullWritten = false;
 
 		for (const mode of modes) {
 			const label = mode === 'full' ? '完整副本' : '更新包';
@@ -174,15 +184,27 @@ export class ExportBundleModal extends Modal {
 					outDir,
 					configDir: this.plugin.configDir(),
 					keepPaths: written,
-					onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file }),
+					onProgress: (done, total, file) => this.plugin.reportProgress({
+						done,
+						total,
+						path: file,
+						label: '导出中',
+					}),
 				});
 				this.plugin.reportProgress(null);
 
 				if (!outcome.file) {
-					notes.push(`${label}：${outcome.reason ?? '没有需要导出的内容'}`);
+					// 两个都勾时更新包**必然是空的**：完整副本刚导过，它自己就是最新基准。
+					// 写一个谁都用不上的空包（对方应用它什么也不会发生，还让人以为漏了什么）
+					// 不如不写、并说清楚 —— 想要"小文件传出去"就只勾更新包。
+					notes.push(`${label}没有生成：${outcome.reason ?? '没有需要导出的内容'}`
+						+ (mode === 'changes' && fullWritten
+							? '（刚导出的完整副本已经是当前仓库的完整样子，这时的更新包会是空的）'
+							: ''));
 					continue;
 				}
 				written.push(outcome.file);
+				if (mode === 'full') fullWritten = true;
 				anySuccess = true;
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
@@ -203,6 +225,7 @@ export class ExportBundleModal extends Modal {
 		}
 
 		this.statusEl.setText(notes.join('；'));
+		await this.list?.refresh();
 		if (anySuccess) {
 			new Notice(`导出完成：${notes.join('；')}`, 12000);
 			this.close();
@@ -241,15 +264,14 @@ export class ApplyBundleModal extends Modal {
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
 	private pathInput: TextComponent | null = null;
-	/** 列表刷新的序号：防止乱序返回把列表写花 */
-	private refreshToken = 0;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
 	private backupToggle: { setDisabled(disabled: boolean): unknown } | null = null;
 	/** 应用方式下拉的 select 元素：更新包时要把那两个破坏性选项真的灰掉 */
 	private strictnessSelect: HTMLSelectElement | null = null;
-	private listEl!: HTMLElement;
+	/** 包列表（与导出弹窗、管理弹窗共用一套：选中、打开文件夹、复制路径、删除） */
+	private list: BundleListView | null = null;
 	private reportEl!: HTMLElement;
 	private applyButton: { setDisabled(disabled: boolean): unknown } | null = null;
 
@@ -294,12 +316,12 @@ export class ApplyBundleModal extends Modal {
 				.setValue(this.dir)
 				.onChange(value => {
 					this.dir = value.trim();
-					void this.refresh();
+					this.list?.schedule();
 				}))
 			.addExtraButton(button => button
 				.setIcon('refresh-cw')
 				.setTooltip('重新列出')
-				.onClick(() => { void this.refresh(); }));
+				.onClick(() => { void this.list?.refresh(); }));
 
 		new Setting(contentEl)
 			.setName('包文件路径')
@@ -361,7 +383,24 @@ export class ApplyBundleModal extends Modal {
 				.setDisabled(!target)
 				.onChange(value => { this.alsoSyncCopy = value; }));
 
-		this.listEl = contentEl.createDiv({ cls: 'locally-save-list' });
+		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
+		this.list = new BundleListView(this.plugin, contentEl, {
+			baseDir: () => this.effectiveDir(),
+			actionLabel: '检查',
+			onAction: item => { void this.select(item.file); },
+			onSelect: item => { void this.select(item.file); },
+			// 选中的包被挪走了：报告留着只会让人以为它还在，清掉并说明一句
+			onRemove: file => {
+				if (this.current !== file) return;
+				this.current = null;
+				this.plan = null;
+				this.applyButton?.setDisabled(true);
+				this.reportEl.setText('刚选中的那个包已经被挪进回收站了，重新选一个吧。');
+			},
+			// 回收站那一行也显示：在这里删掉的包，得能在这儿看见、也能在这儿清掉
+			showTrash: true,
+			emptyText: '这个文件夹里没有 .lsave 文件',
+		});
 		this.reportEl = contentEl.createDiv({ cls: 'locally-save-report' });
 		this.reportEl.setText('还没有选择同步包。');
 
@@ -378,11 +417,12 @@ export class ApplyBundleModal extends Modal {
 				.setButtonText('关闭')
 				.onClick(() => this.close()));
 
-		void this.refresh();
+		void this.list.refresh();
 
 		// 拖进来的 / 命令带过来的包：先填进输入框（让人看清是哪个文件），再直接检查
 		if (this.current) {
 			this.pathInput?.setValue(this.current);
+			this.list.markSelected(this.current);
 			void this.select(this.current);
 		}
 	}
@@ -392,72 +432,11 @@ export class ApplyBundleModal extends Modal {
 		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir }, this.plugin.settings.targetDir);
 	}
 
-	/**
-	 * 重新列一遍包。
-	 *
-	 * 带一个序号：改文件夹时每敲一个字都会触发一次，异步读目录会**乱序返回** ——
-	 * 没有这个守卫的话，列表可能显示的是上一个目录的结果（用户看到的"错乱"就是这么来的）。
-	 */
-	private async refresh(): Promise<void> {
-		const token = ++this.refreshToken;
-		this.listEl.empty();
-
-		const base = this.effectiveDir();
-		if (!base) {
-			this.listEl.setText('（还没法确定位置：可先在设置里填「目标文件夹」，或在下面直接粘包文件路径）');
-			return;
-		}
-		// 把"这个目录不存在"和"这个目录里没有包"分开说 —— 路径打错时前者更有用
-		if (!await dirExists(base) && !await dirExists(this.dir)) {
-			this.listEl.setText(`这个文件夹不存在：${base}（检查一下路径，或者直接在下面粘包文件路径）`);
-			return;
-		}
-
-		const found: { file: string; label: string; size: number; mtime: number }[] = [];
-		for (const dir of bundleDirsToScan(base)) {
-			const segments = dir.split(/[/\\]/);
-			const sub = dir === base ? '' : `${segments[segments.length - 1] ?? ''}/`;
-			for (const item of await listFiles(dir)) {
-				if (!item.name.endsWith('.lsave')) continue;
-				found.push({
-					file: `${dir.replace(/[/\\]+$/, '')}/${item.name}`,
-					label: `${sub}${item.name}`,
-					size: item.size,
-					mtime: item.mtime,
-				});
-			}
-		}
-		found.sort((a, b) => b.mtime - a.mtime);
-
-		// 有更新的刷新在跑：这次的结果作废
-		if (token !== this.refreshToken) return;
-
-		if (found.length === 0) {
-			// 别让"列表空着"和"下面显示着某个包的报告"看起来自相矛盾
-			this.listEl.createDiv({ text: '这个文件夹里没有 .lsave 文件', cls: 'locally-save-hint' });
-			if (this.current) {
-				this.listEl.createDiv({
-					text: '当前正在检查的是（拖进来的 / 上面填的）：',
-					cls: 'locally-save-hint',
-				});
-				this.listEl.createDiv({ text: this.current, cls: 'locally-save-path' });
-			}
-			return;
-		}
-		for (const item of found.slice(0, MAX_BUNDLES)) {
-			const row = this.listEl.createDiv({ cls: 'locally-save-row is-bundle' });
-			row.createSpan({ text: item.label, cls: 'locally-save-file' });
-			row.createSpan({
-				text: `${formatBytes(item.size)} · ${formatTime(item.mtime)}`,
-				cls: 'locally-save-reason',
-			});
-			row.addEventListener('click', () => { void this.select(item.file); });
-		}
-	}
-
 	/** 选中一个包：只读地算一遍，把报告画出来 */
 	private async select(file: string): Promise<void> {
 		this.current = file;
+		// 高亮同步到列表上（拖进来 / 粘路径进来的包不在"点一行"这条路上）
+		this.list?.markSelected(file);
 		this.plan = null;
 		this.applyButton?.setDisabled(true);
 		this.reportEl.empty();
@@ -725,7 +704,7 @@ export class ApplyBundleModal extends Modal {
 				file,
 				configDir: this.plugin.configDir(),
 				keepBackup: plan.options.keepBackup,
-				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path }),
+				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '应用中' }),
 			});
 			this.plugin.reportProgress(null);
 			this.plugin.settings.showLastSyncInStatusBar
