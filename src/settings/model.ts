@@ -129,6 +129,21 @@ export interface PluginSettings {
 	 * 取值来自 `SIZE_LIMIT_OPTIONS`：留空 ＝ 默认 200MB，`0` ＝ 不提醒。
 	 */
 	bundleSizeWarnLimit: string;
+	/**
+	 * 更新包**从哪个状态**开始：留空 ＝ 我最新那份完整副本（默认）；否则是**基准指纹**
+	 * （16 位十六进制，见 `bundle/baseline.ts`）。
+	 *
+	 * 为什么存指纹而不是世代号：世代号是每台机器各数各的节奏号（导出一个包 +1），
+	 * 两边的"第 32 代"完全可能是**两份不同的完整副本**。用户实测踩过：按"第 32 代"
+	 * 选起点，对方回「基准对不上」—— 选中的那份根本不是对方手里那份。
+	 * 指纹是内容的直接证据，也是对方「更新记录」顶上那行「基准：… · 指纹 xxxx」里的值。
+	 */
+	changesFromState: string;
+	/**
+	 * 更新包**到哪个状态**为止：留空 ＝ 最新（当前仓库，现在这一刻）；否则是某一份完整副本的
+	 * **基准指纹** —— 导一份"从起点到那一刻"的**差量包**（内容取自那份包的负载）。
+	 */
+	changesToState: string;
 
 	// ------------------------------------------------------------ 界面
 	/** 左侧栏：立即留包（按两个「自动留包」开关留一次） */
@@ -164,6 +179,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	autoExportChanges: false,
 	autoExportFull: false,
 	bundleSizeWarnLimit: '',
+	// 留空 ＝ 从"我最新那份完整副本"到"最新（当前仓库）"，也就是原来的行为
+	changesFromState: '',
+	changesToState: '',
 
 	ribbonSyncIcon: true,
 	ribbonExportIcon: true,
@@ -204,6 +222,27 @@ export function coerceConflict(value: unknown): ConflictStrategy {
 
 export function coerceBundleMode(value: unknown): 'full' | 'changes' {
 	return coerceChoice(value, ['full', 'changes'] as const, 'full');
+}
+
+/**
+ * 「从哪个状态 / 到哪个状态」的取值：留空 ＝ 最新，其余必须是**基准指纹**
+ * （16 位十六进制，大小写都收，统一成小写）。
+ *
+ * 为什么不是世代号：世代号两台机器会碰号，两边的"第 32 代"可能是两份不同的完整副本
+ * （用户实测踩过：按代选起点 → 对面报「基准对不上」）。指纹才是"这是哪一份东西"的判据。
+ *
+ * 这里只做形状检查：万一那一份完整副本已经不在目录里了，导出时会明确报错并列出
+ * "现在有哪些状态" —— 不会悄悄换一份。
+ */
+export function coerceAnchorFingerprint(value: unknown): string {
+	const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+	return /^[0-9a-f]{16}$/.test(text) ? text : '';
+}
+
+/** 「从 / 到」设置项 → 引擎参数：null ＝ 最新 */
+export function anchorFingerprintOf(value: string): string | null {
+	const coerced = coerceAnchorFingerprint(value);
+	return coerced === '' ? null : coerced;
 }
 
 /**
@@ -265,6 +304,8 @@ export function settingsFrom(data: unknown): PluginSettings {
 			Object.keys(SIZE_LIMIT_OPTIONS),
 			DEFAULT_SETTINGS.bundleSizeWarnLimit,
 		),
+		changesFromState: coerceAnchorFingerprint(raw.changesFromState),
+		changesToState: coerceAnchorFingerprint(raw.changesToState),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
 		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),

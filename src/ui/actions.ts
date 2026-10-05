@@ -3,7 +3,7 @@ import { exportBundle, planBundleExport, plannedExportModes } from '../bundle/ex
 import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
 import { handleIncoming, pickIncoming, skipSuperseded } from '../bundle/incoming';
 import type { IncomingOutcome } from '../bundle/incoming';
-import { describeLastActivity } from '../bundle/log';
+import { describeExportRange, describeLastActivity } from '../bundle/log';
 import { listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
@@ -13,6 +13,7 @@ import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { scanTree } from '../sync/disk';
 import { loadState } from '../sync/state';
 import type { PluginState } from '../sync/state';
+import { anchorFingerprintOf } from '../settings/model';
 import type { Inventory } from '../sync/types';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
@@ -140,16 +141,20 @@ async function writePlannedBundles(
 			notes.push(mode === 'full'
 				? `已留完整副本（${result.outcome.entryCount} 个文件）`
 				: `已留更新包（${result.outcome.entryCount} 个文件`
-					+ `${result.outcome.deletedCount > 0 ? `、删除 ${result.outcome.deletedCount}` : ''}）`);
-			// 攒大了就弹窗问"要不要换基准"（用户点过跳过后，提醒线会抬高一倍原上限）
-			if (mode === 'changes') await offerBaselineReset(plugin, result.outcome);
+					+ `${result.outcome.deletedCount > 0 ? `、删除 ${result.outcome.deletedCount}` : ''}）`
+					+ describeExportRange(result.outcome));
+			// 攒大了就弹窗问"要不要换基准"。**差量包不参与**：它的内容到那一代为止，
+			// 不存在"越攒越大"，问"要不要换基准"只会让人困惑
+			if (mode === 'changes' && result.outcome.anchor?.checkpoint !== true) {
+				await offerBaselineReset(plugin, result.outcome);
+			}
 			continue;
 		}
 		// 空的更新包：完整包刚留过时它必然空，别写；其余情况如实说一句"没有变化"
 		if (result.kind === 'empty' && mode === 'changes') {
-			notes.push(fullWritten
+			notes.push(fullWritten && !result.reason?.includes('已经导过')
 				? '更新包是空的（刚留的完整副本已含全部内容），没生成'
-				: '没有变化，更新包没生成');
+				: (result.reason ?? '没有变化，更新包没生成'));
 			continue;
 		}
 		if (result.kind === 'failed') {
@@ -189,7 +194,8 @@ function hasChanges(state: PluginState, inventory: Inventory): boolean {
 /** 留包的结果：写了 / 空包 / 失败三种分开报，界面上才说得清"更新包为什么没生成" */
 type BundleWriteResult =
 	| { kind: 'written'; outcome: ExportOutcome }
-	| { kind: 'empty' }
+	/** 没写：`reason` 是引擎给的原因（没有变化 / 这一份差量包已经导过了…） */
+	| { kind: 'empty'; reason?: string }
 	| { kind: 'failed'; error: string };
 
 /** 导一个包出去 */
@@ -207,7 +213,7 @@ async function writeBundleFile(
 			keepPaths: [...written],
 			onProgress: (done, total, path) => plugin.reportProgress({ done, total, path, label: '导出中' }),
 		});
-		if (!result.file) return { kind: 'empty' };
+		if (!result.file) return { kind: 'empty', ...(result.reason ? { reason: result.reason } : {}) };
 		written.push(result.file);
 		plugin.log.debug(`${label}已留下：${result.file}`);
 		return { kind: 'written', outcome: result };
@@ -237,6 +243,10 @@ function exportOptions(
 		mode,
 		outDir: base,
 		configDir: plugin.configDir(),
+		// 「从哪个状态到哪个状态」：设置里那两个下拉（留空 ＝ 最新）。导出时按它算。
+		// 值是**基准指纹**（不是世代号）：世代号两台机器会碰号，认指纹才认得出"哪一份东西"
+		baseFingerprint: anchorFingerprintOf(plugin.settings.changesFromState),
+		toFingerprint: anchorFingerprintOf(plugin.settings.changesToState),
 		...(inventory ? { inventory } : {}),
 	};
 }

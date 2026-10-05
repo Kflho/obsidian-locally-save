@@ -76,10 +76,16 @@ export interface ManagedBundle {
 	mtime: number;
 }
 
-/** 文件名里认一下类型（旧包 / 手工改过名的包就没有头部可读） */
+/**
+ * 文件名里认一下类型（头部读不出来的包才有这一步：传坏了、被改过名、不是我们的包）。
+ *
+ * 0.8.x 起名字里写的是「**完整** / **更新**」（用户提的：原名 full / changes 太费解），
+ * 早期版本的包还是 `-full-` / `-changes-` —— **两种都认**：只认新写法的话，
+ * 一个读不出头部的新包会从"更新包"那一组掉进"类型未知"，用户还以为包坏了。
+ */
 function modeFromName(name: string): BundleMode | null {
-	if (name.includes('-full-')) return 'full';
-	if (name.includes('-changes-')) return 'changes';
+	if (name.includes('-full-') || name.includes('-完整-')) return 'full';
+	if (name.includes('-changes-') || name.includes('-更新-')) return 'changes';
 	return null;
 }
 

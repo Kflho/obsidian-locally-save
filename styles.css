@@ -50,6 +50,24 @@
 	font-weight: var(--font-semibold);
 }
 
+/* 「本机现在站在哪儿」：第几代 · 基于哪份完整副本 · 状态编号。
+   放在列表最上面 —— 判断"这个包该不该应用"要拿它跟包里的编号对 */
+.locally-save-position {
+	margin: 0.4em 0 0.2em;
+	padding: 0.4em 0.6em;
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+}
+
+/* 行里标出"这就是我现在的基准"：一眼看出自己站在哪份完整副本上 */
+.locally-save-current {
+	flex: 0 0 auto;
+	color: var(--text-accent);
+	font-size: var(--font-ui-smaller);
+}
+
 /* 分组标题（更新包 / 完整副本）：列表里滚到哪儿都看得见自己在哪一组 */
 .locally-save-bundles-group {
 	position: sticky;

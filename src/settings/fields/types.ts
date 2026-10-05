@@ -27,8 +27,31 @@ export type ControlSpec<T = PluginSettings> =
 	| { type: 'text'; placeholder: PlaceholderSpec<T> }
 	/** 多行输入框（一行的列表用它，如"每行一个菜单项"） */
 	| { type: 'textarea'; placeholder: PlaceholderSpec<T>; rows: number }
-	/** 下拉框：取值 → 显示文案 */
-	| { type: 'dropdown'; options: Record<string, string> };
+	/**
+	 * 下拉框：取值 → 显示文案。
+	 *
+	 * 也可以给一个函数：**选项要到渲染那一刻才知道**（例如"更新包从哪个状态到哪个状态"——
+	 * 选项是磁盘上那几份完整包，每台机器、每个时刻都不一样）。函数拿到插件，
+	 * 自己去读包文件夹与状态文件；读不出来时至少要把「最新」那一项给出来。
+	 */
+	| { type: 'dropdown'; options: DropdownOptions<T> };
+
+/** 下拉框的选项：固定表，或者按当前插件算出来的一张表 */
+export type DropdownOptions<T = PluginSettings> =
+	| Record<string, string>
+	| ((plugin: LocallySavePlugin) => Record<string, string>);
+
+/** 取某个控件此刻该显示的选项（固定表原样返回；函数就当场算） */
+export function dropdownOptions<T>(control: ControlSpec<T>, plugin: LocallySavePlugin): Record<string, string> {
+	if (control.type !== 'dropdown') return {};
+	if (typeof control.options !== 'function') return control.options;
+	try {
+		return control.options(plugin);
+	} catch {
+		// 选项算不出来（包目录没填 / 状态文件读不了）：返回空表，面板照常画得出来
+		return {};
+	}
+}
 
 /** 取某个控件此刻该显示的灰底提示 */
 export function placeholderOf<T>(control: ControlSpec<T>, settings: T): string {

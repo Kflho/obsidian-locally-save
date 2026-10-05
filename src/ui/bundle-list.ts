@@ -11,7 +11,10 @@ import {
 	trashBundles,
 } from '../bundle/manage';
 import type { ManagedBundle } from '../bundle/manage';
+import { describeLocalState } from '../bundle/log';
 import { dirExists } from '../sync/disk';
+import { loadState } from '../sync/state';
+import type { PluginState } from '../sync/state';
 import { formatBytes, formatTime } from '../utils/format';
 import { markDestructive } from './modal-layout';
 import { openFolderInExplorer } from './reveal';
@@ -42,6 +45,13 @@ export interface BundleListViewOptions {
 	onRemove?: (file: string) => void;
 	/** 显示回收站那一行（只有管理弹窗要） */
 	showTrash?: boolean;
+	/**
+	 * 顶上那行「本机现在站在哪儿」（第几代 · 基于哪份完整副本 · 状态编号）。
+	 *
+	 * 用户提的：同步包界面（管理 / 导出 / 应用）都得能一眼看到"我这台现在基于第几代、
+	 * 文件状态是什么" —— 光有世代号认不出跟对方是不是同一份东西，得跟状态编号一起看。
+	 */
+	showPosition?: boolean;
 	/** 列表为空时显示什么 */
 	emptyText?: string;
 }
@@ -53,9 +63,13 @@ export class BundleListView {
 	private listEl!: HTMLElement;
 	/** 路径不存在 / 没有包之类的说明 */
 	private noteEl!: HTMLElement;
+	/** 顶上那行"本机现在站在哪儿"（可选，见 showPosition） */
+	private positionEl: HTMLElement | null = null;
 	private trashEl: HTMLElement | null = null;
 	private items: ManagedBundle[] = [];
 	private selected: string | null = null;
+	/** 我这边的状态：行里标出"哪个包就是我现在的基准"，顶上写"第几代 + 状态编号" */
+	private local: PluginState | null = null;
 	/** 包文件夹在不在：不在跟"里面没有包"要分开说，路径打错时前者更有用 */
 	private baseExists = true;
 	/** 刷新序号：连打几个字会触发好几次，异步读目录会乱序返回 */
@@ -68,6 +82,9 @@ export class BundleListView {
 		this.plugin = plugin;
 		this.options = options;
 		this.headEl = parent.createDiv({ cls: 'locally-save-bundles-head' });
+		// 「本机现在站在哪儿」放在最上面：管理和导出时最先要知道的就是"我这边是哪一代、
+		// 状态编号是什么"，再往下才是"文件夹里都有哪些包"
+		if (options.showPosition) this.positionEl = parent.createDiv({ cls: 'locally-save-position' });
 		this.noteEl = parent.createDiv({ cls: 'locally-save-hint' });
 		// 回收站那一行放在**列表上面**：放下面时会被"最多 40vh 的滚动列表"顶出视野，
 		// 用户翻不到就会问"删掉的包到底去哪了、回收站在哪"（报过）
@@ -96,6 +113,14 @@ export class BundleListView {
 		const exists = base !== '' && await dirExists(base);
 		const items = exists ? await listBundles(base) : [];
 		if (token !== this.token) return; // 有更新的刷新在跑，这次的结果作废
+		// 我这边的状态（第几代 / 基于哪份完整副本 / 状态编号）：读不到就只画包列表
+		if (this.positionEl) {
+			try {
+				this.local = await loadState(this.plugin.stateFile());
+			} catch {
+				this.local = null;
+			}
+		}
 
 		this.baseExists = exists;
 		this.items = items;
@@ -116,6 +141,7 @@ export class BundleListView {
 		this.headEl.empty();
 		this.listEl.empty();
 		this.noteEl.setText('');
+		this.renderPosition();
 
 		if (!base) {
 			this.noteEl.setText('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
@@ -175,17 +201,16 @@ export class BundleListView {
 		// 类型由分组标题说了，行里不再重复标一遍；世代要写出来 ——
 		// 两台机器的 full/ 目录各有一堆包时，靠它才看得出谁跟谁是同一份基准
 		row.createSpan({ text: item.name, cls: 'locally-save-file' });
-		const generation = item.header
-			? (item.header.mode === 'full'
-				? `第 ${item.header.targetGeneration} 代`
-				: `基于第 ${item.header.baseGeneration ?? '?'} 代`)
-			: '';
 		row.createSpan({
 			text: `${formatBytes(item.size)} · ${formatTime(item.mtime)}`
-				+ `${generation ? ` · ${generation}` : ''}`
+				+ `${this.describeGeneration(item)}`
 				+ (item.header ? '' : '（读不出头部，可能不是我们的包）'),
 			cls: 'locally-save-reason',
 		});
+		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"
+		if (this.local?.bundle?.fullFile === item.name) {
+			row.createSpan({ text: '← 本机现在的基准', cls: 'locally-save-current' });
+		}
 
 		const actions = row.createDiv({ cls: 'locally-save-bundle-actions' });
 		if (this.options.actionLabel && this.options.onAction) {
@@ -207,6 +232,36 @@ export class BundleListView {
 			this.render();
 			this.options.onSelect?.(item);
 		});
+	}
+
+	/**
+	 * 一个包"是第几代"——**世代与状态编号一起写**。
+	 *
+	 * 只写世代会认错包：两台机器各自 +1 会碰号；状态编号才是"这一刻文件长什么样"。
+	 * 完整副本写「第 N 代」；更新包写「第 N → M 代」（M ＝ 应用它之后到达的世代，
+	 * 差量包的 M 就是它送到的那一刻）。
+	 */
+	private describeGeneration(item: ManagedBundle): string {
+		const header = item.header;
+		if (!header) return '';
+		const stateId = header.stateId?.id ? `状态 ${header.stateId.id}` : '状态未记（旧版包）';
+		const generation = header.mode === 'full'
+			? `第 ${header.targetGeneration} 代`
+			: `第 ${header.baseGeneration ?? '?'} → ${header.targetGeneration} 代`;
+		return ` · ${generation} · ${stateId}`;
+	}
+
+	/** 顶上那行：本机第几代、基于哪份完整副本、状态编号是什么 */
+	private renderPosition(): void {
+		const host = this.positionEl;
+		if (!host) return;
+		host.empty();
+		const state = this.local;
+		if (!state) {
+			host.setText('读不到本机状态（sync-state.json）：下面只是包文件夹里有什么');
+			return;
+		}
+		host.createSpan({ text: describeLocalState(state) });
 	}
 
 	/** 行内小按钮：点了别让整行的"选中"也跟着触发 */

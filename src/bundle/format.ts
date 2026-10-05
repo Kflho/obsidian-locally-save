@@ -108,6 +108,15 @@ export interface BundleHeader {
 	 */
 	baselineHash?: string;
 	/**
+	 * **差量包（"到某一份完整副本为止"）的目的地指纹**：那份终点完整副本的基准指纹。
+	 *
+	 * 有了它，接收方就能一眼看出"这个包要送到的那份完整副本，**正好就是我现在的基准**"——
+	 * 那说明包里点名的东西它全都有，应用它什么都不会改（用户实测遇到过：把"32→36"的包
+	 * 发给一台**已经站在第 36 代**上的机器，只看到一句"基准对不上"，看不出其实是白跑一趟）。
+	 * 普通更新包（到"最新"）没有终点完整副本，就没有这个字段。
+	 */
+	targetBaselineHash?: string;
+	/**
 	 * **导出方导完这一刻的状态编号**（见 `sync/state-id.ts`）：整个仓库的内容指纹。
 	 *
 	 * 接收方应用完之后算一个自己的跟它比：**相同 ＝ 两边文件内容一致**（用户要的就是这句话）。
@@ -148,8 +157,16 @@ export interface BundleInfo {
 export interface BundleSource {
 	/** 仓库相对路径 */
 	path: string;
-	/** 磁盘上的绝对路径 */
+	/** 磁盘上的绝对路径（内容来自仓库里的文件时用它） */
 	abs: string;
+	/**
+	 * 内容**来自另一份包**里的某一段（`payloadOffset + offset`）。
+	 *
+	 * 什么时候用：导"从状态 a 到状态 b"的差量包（b 是一份完整副本）时，要装的是
+	 * **b 那一刻的内容** —— 那些字节只存在于 b 那份包的负载里，当前仓库里可能早就不是那一版了。
+	 * 给了它就用它，`abs` 不读。
+	 */
+	from?: { file: string; offset: number };
 	size: number;
 	mtime: number;
 	hash?: string;
@@ -218,12 +235,15 @@ export async function writeBundle(
 		let doneFiles = 0;
 
 		for (const source of sources) {
-			const sourceHandle = await fs.promises.open(source.abs, 'r');
+			// 内容可能来自仓库里的文件，也可能来自另一份包里的某一段（导 a→b 的差量包）
+			const sourceHandle = await fs.promises.open(source.from?.file ?? source.abs, 'r');
+			const start = source.from?.offset ?? 0;
+			const where = source.from ? `包里的那一段（${source.from.file}）` : source.abs;
 			try {
 				let written = 0;
 				while (written < source.size) {
 					const want = Math.min(CHUNK, source.size - written);
-					const { bytesRead } = await sourceHandle.read(buffer, 0, want, written);
+					const { bytesRead } = await sourceHandle.read(buffer, 0, want, start + written);
 					if (bytesRead <= 0) break;
 					payloadHash.update(buffer.subarray(0, bytesRead));
 					await handle.write(buffer, 0, bytesRead, position);
@@ -234,7 +254,7 @@ export async function writeBundle(
 				}
 				if (written !== source.size) {
 					throw new Error(
-						`${source.path} 在导出过程中被改动了（预期 ${source.size} 字节，实际写入 ${written} 字节）`,
+						`${source.path} 在导出过程中被改动了（预期 ${source.size} 字节，实际写入 ${written} 字节，来源：${where}）`,
 					);
 				}
 			} finally {
@@ -272,25 +292,46 @@ export async function writeBundle(
 	}
 }
 
-/** 读包的头部与尾部，不碰负载 */
+/**
+ * 读包的头部与尾部，不碰负载。
+ *
+ * 实现放在同步版里（`readBundleInfoSync`），这里只是等价的异步外壳：
+ * 读的只有**开头几十字节 + 末尾几十字节**，同步读一次的开销可以忽略，
+ * 而设置面板那条路（同步渲染，要列出本地有几份完整包）需要同步版本 ——
+ * 两个版本各写一遍解析最容易走偏（尾部布局的读写顺序错一次就是读不出来），所以只留一份实现。
+ */
 export async function readBundleInfo(file: string): Promise<BundleInfo> {
-	const stat = await fs.promises.stat(file);
+	return readBundleInfoSync(file);
+}
+
+/** 同步读包的头部与尾部（设置面板列"本地有哪些状态"时用；语义与上一版完全一致） */
+export function readBundleInfoSync(file: string): BundleInfo {
+	const stat = fs.statSync(file);
 	if (stat.size < BUNDLE_MAGIC.length + 4 + BUNDLE_TRAILER_MAGIC.length + 4) {
 		throw new Error('不是有效的同步包（文件太短）');
 	}
 
-	const handle = await fs.promises.open(file, 'r');
+	const handle = fs.openSync(file, 'r');
 	try {
+		const readAt = (buffer: Buffer, position: number): void => {
+			let read = 0;
+			while (read < buffer.length) {
+				const got = fs.readSync(handle, buffer, read, buffer.length - read, position + read);
+				if (got <= 0) break;
+				read += got;
+			}
+		};
+
 		const magic = Buffer.alloc(BUNDLE_MAGIC.length);
-		await handle.read(magic, 0, magic.length, 0);
+		readAt(magic, 0);
 		if (!magic.equals(BUNDLE_MAGIC)) throw new Error('不是有效的同步包（开头标记不对）');
 
 		const lengthPrefix = Buffer.alloc(4);
-		await handle.read(lengthPrefix, 0, 4, BUNDLE_MAGIC.length);
+		readAt(lengthPrefix, BUNDLE_MAGIC.length);
 		const headerLength = lengthPrefix.readUInt32BE(0);
 
 		const headerBytes = Buffer.alloc(headerLength);
-		await handle.read(headerBytes, 0, headerLength, BUNDLE_MAGIC.length + 4);
+		readAt(headerBytes, BUNDLE_MAGIC.length + 4);
 		const header = JSON.parse(headerBytes.toString('utf8')) as BundleHeader;
 		if (header.format !== BUNDLE_FORMAT) throw new Error('不是有效的同步包（格式标记不对）');
 		if (header.version > BUNDLE_VERSION) {
@@ -298,15 +339,15 @@ export async function readBundleInfo(file: string): Promise<BundleInfo> {
 		}
 
 		const trailerLengthPrefix = Buffer.alloc(4);
-		await handle.read(trailerLengthPrefix, 0, 4, stat.size - 4);
+		readAt(trailerLengthPrefix, stat.size - 4);
 		const trailerLength = trailerLengthPrefix.readUInt32BE(0);
 		const trailerStart = stat.size - 4 - trailerLength;
 
 		const trailerBytes = Buffer.alloc(trailerLength);
-		await handle.read(trailerBytes, 0, trailerLength, trailerStart);
+		readAt(trailerBytes, trailerStart);
 
 		const marker = Buffer.alloc(BUNDLE_TRAILER_MAGIC.length);
-		await handle.read(marker, 0, marker.length, trailerStart - BUNDLE_TRAILER_MAGIC.length);
+		readAt(marker, trailerStart - BUNDLE_TRAILER_MAGIC.length);
 		if (!marker.equals(BUNDLE_TRAILER_MAGIC)) throw new Error('同步包不完整（尾部标记丢失）');
 
 		return {
@@ -316,7 +357,7 @@ export async function readBundleInfo(file: string): Promise<BundleInfo> {
 			fileSize: stat.size,
 		};
 	} finally {
-		await handle.close();
+		fs.closeSync(handle);
 	}
 }
 

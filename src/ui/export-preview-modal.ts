@@ -46,12 +46,22 @@ export class ExportPreviewModal extends Modal {
 				parts.push(`点名删除 ${preview.deletedCount} 个`);
 			}
 			if (preview.mode === 'changes' && preview.anchorGeneration !== null) {
-				parts.push(`基于第 ${preview.anchorGeneration} 代完整副本`);
+				parts.push(`第 ${preview.anchorGeneration} 代`
+					+ `${preview.anchorFingerprint ? `（基准 ${preview.anchorFingerprint}）` : ''}`
+					+ (preview.targetGeneration === null ? ' → 最新' : ` → 第 ${preview.targetGeneration} 代`));
 			}
 			contentEl.createEl('p', { text: parts.join(' · '), cls: 'locally-save-summary' });
 
+			if (preview.existing) {
+				contentEl.createEl('p', {
+					text: `这一份已经导过了（${preview.existing}），不重复生成。`,
+					cls: 'locally-save-hint',
+				});
+				continue;
+			}
+
 			if (preview.fileCount === 0 && preview.deletedCount === 0) {
-				contentEl.createEl('p', { text: '自上次完整副本以来没有变化，这个包不会生成。' });
+				contentEl.createEl('p', { text: '起点与终点之间没有变化，这个包不会生成。' });
 				continue;
 			}
 			const list = contentEl.createDiv({ cls: 'locally-save-list' });

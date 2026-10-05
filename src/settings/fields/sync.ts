@@ -5,15 +5,19 @@ import {
 	coerceBoolean,
 	coerceChoice,
 	coerceConflict,
+	coerceAnchorFingerprint,
 	coerceText,
 } from '../model';
 import type { PluginSettings } from '../model';
+import { anchorOptions, listFullAnchorsSync, LATEST_STATE } from '../../bundle/anchor';
 import { bundleBaseDir } from '../../bundle/paths';
+import { loadStateSync } from '../../sync/state';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
 import { BundleManagerModal } from '../../ui/manage-modal';
 import { associationSupported } from '../../ui/associate';
 import { AssociateModal } from '../../ui/associate-modal';
+import type LocallySavePlugin from '../../main';
 import type { FieldSection } from './types';
 
 /**
@@ -35,17 +39,14 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: '包放在哪个文件夹（填绝对路径，例如 D:\\备份\\同步包）。完整包与更新包分别放在它的 '
-						+ 'full 与 changes 子目录里。**必填**：留空时导出与应用都不可用 —— '
-						+ '包是这个插件唯一的搬运格式，放哪儿得你说了算，插件不该替你藏一个默认值',
+					desc: '包放在哪个文件夹（绝对路径）。完整包与更新包分别进它的 full 与 changes 子目录。必填',
 					control: { type: 'text', placeholder: 'D:\\备份\\同步包' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
 				},
 				{
 					key: 'excludePatterns',
 					name: '不进包的文件',
-					desc: '一行一条，写法同 .gitignore：结尾带 / 表示整个文件夹，不带 / 就匹配任意层级的同名文件，'
-						+ '支持 * 与 ?。默认排除配置目录（各台机器的插件与快捷键往往不同）、回收目录与系统垃圾文件',
+					desc: '一行一条，写法同 .gitignore（`目录/`、`*.tmp`、`a/**/*.md`）。默认已排除配置目录、回收目录与系统垃圾文件',
 					control: {
 						type: 'textarea',
 						placeholder: '一行一条，例如：\n附件/临时/\n*.tmp',
@@ -63,27 +64,21 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'autoExportChanges',
 					name: '留更新包',
-					desc: '自上次**完整副本**以来累积的全部改动（含一份删除清单）导成一个包放进「同步包文件夹/changes」。'
-						+ '对方永远只需要应用**最新那一个**，跳过中间几个也不会少内容。'
-						+ '**第一次要先导一次完整副本** —— 更新包要有基准。'
-						+ '两个开关都开着时：完整包先留、更新包按它算必然是空的，于是不会留空包',
+					desc: '留包时导一个更新包（自上次完整副本以来累积的改动）。第一次要先导一次完整副本',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
 				{
 					key: 'autoExportFull',
 					name: '留完整包',
-					desc: '每次留包都把整个仓库重写一遍放进「同步包文件夹/full」，几百 MB 的库会明显变慢。'
-						+ '它是**还原点**，也是更新包的基准 —— 只在"随时要给别人一份完整副本"时才打开',
+					desc: '留包时导一份完整副本（整个仓库重写一遍，大库会明显变慢）。它是还原点，也是更新包的基准',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
 				},
 				{
 					key: 'bundleSizeWarnLimit',
 					name: '更新包超过多大就提醒换基准',
-					desc: '更新包是**累积**的，越攒越大；大到快赶上完整副本时，它最大的好处（传得小）就没了。'
-						+ '到点会弹窗：建议先把手上这个更新包传过去应用，再重导一份完整副本当新基准'
-						+ '（换完基准，更新包从零重新累积）。',
+					desc: '更新包是累积的、越攒越大；到线弹窗问要不要重导一份完整副本当新基准',
 					control: { type: 'dropdown', options: SIZE_LIMIT_OPTIONS },
 					coerce: value => coerceChoice(
 						value,
@@ -94,31 +89,49 @@ export const SYNC_SECTION: FieldSection = {
 			],
 		},
 		{
+			heading: '更新包从哪个状态到哪个状态',
+			// 本地有几份完整包，就有几个"状态"，再加上「最新」这一项 ——
+			// 选项是在渲染那一刻扫包目录算出来的（见 bundle/anchor.ts）
+			fields: [
+				{
+					key: 'changesFromState',
+					name: '从哪个状态开始',
+					desc: '更新包接着哪一份完整副本往后算。默认「最新那份完整副本」；'
+						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（世代号两台机器会碰号）',
+					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
+					coerce: value => coerceAnchorFingerprint(value),
+				},
+				{
+					key: 'changesToState',
+					name: '到哪个状态为止',
+					desc: '默认「最新（当前仓库）」；选一份完整副本则导到那一刻为止（内容取自那份包，不是你现在的仓库）',
+					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
+					coerce: value => coerceAnchorFingerprint(value),
+				},
+			],
+		},
+		{
 			heading: '应用同步包时的默认处理',
 			fields: [
 				{
 					key: 'conflictStrategy',
 					name: '两边都改了怎么办',
-					desc: '「应用方式」选「按设置」时按这一条办。判定依据是"跟上次应用后的样子比，包和我这边各自动过没有"：'
-						+ '两边都动过才算冲突 —— 留两份最稳（改得新的那份占原名，另一份存进回收目录的「冲突」文件夹，不留在原地）。'
-						+ '打开包时可以这一次性地覆盖它（「两边都留 / 以我为准 / 以包为准」）',
+					desc: '「应用方式」选「按设置」时按这条办。默认留两份：新的占原名，旧的那份进回收目录的「冲突」文件夹',
 					control: { type: 'dropdown', options: CONFLICT_OPTIONS },
 					coerce: value => coerceConflict(value),
 				},
 				{
 					key: 'propagateDeletions',
 					name: '包里删掉的文件，这边也删',
-					desc: '关掉的话，包里点名要删的一律留着。删除必须过基准检查，没有例外：'
-						+ '本地改过的、或者还在别的中间版本上的，都不删 —— 宁可留着',
+					desc: '关掉的话，包里点名要删的一律留着（本地改过的一律不删，不受这一项影响）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.propagateDeletions),
 				},
 				{
 					key: 'deletedToTrash',
 					name: '删除前先备份',
-					desc: '删掉的文件不直接消失，而是挪进「仓库/.trash/locally-save/时间戳/」，想反悔可以手动捞回来。'
-						+ '强制两档（以包为准 / 完全镜像）**一定会备份**，不看这一项 —— '
-						+ '关掉回收再加强制，等于不可恢复的批量删除，不给这个组合留口子',
+					desc: '删掉的文件挪进回收目录（`仓库/.trash/locally-save/`），还能捞回来。'
+						+ '强制两档（以包为准 / 完全镜像）一定备份，不看这一项',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.deletedToTrash),
 				},
@@ -132,9 +145,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '导出到文件',
-					desc: '把仓库打包成 .lsave 文件，拷到别的机器上用下面的按钮应用。'
-						+ '对话框里**完整副本与更新包是两个独立开关**，可以都要（都勾时先导完整副本、再导更新包；'
-						+ '完整副本刚把整个仓库装走，这时的更新包必然是空的，所以不会生成它）',
+					desc: '把仓库打包成 .lsave 文件，拷到别的机器上应用。完整副本与更新包是两个独立开关，可以都要',
 					button: '导出同步包…',
 					cta: true,
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
@@ -149,10 +160,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '管理已有的包',
-					desc: '列出同步包文件夹里的所有包（完整还是更新、多大、什么时候导的），'
-						+ '选中一行可以**应用… / 打开所在文件夹 / 复制路径 / 挪进回收站 / 彻底删除**。'
-						+ '「挪进回收站」只是挪走（跟 bundles 平级的 .lsave/bundles-trash/时间戳/，还能捞回来）；'
-						+ '「彻底删除」是真删，单个包就能删，不必为它清空整个回收站',
+					desc: '列出包文件夹里的所有包：应用 / 打开文件夹 / 复制路径 / 挪进回收站 / 彻底删除',
 					button: '管理同步包…',
 					run: plugin => { new BundleManagerModal(plugin.app, plugin).open(); },
 				},
@@ -164,28 +172,22 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'autoApplyIncoming',
 					name: '自动应用收到的更新包',
-					desc: '有人把包放进「同步包文件夹」之后，不用再手点那一下：每 30 秒看一眼，发现**没处理过**的包就处理 ——'
-						+ '每次只看**最新那一个**（更新包是累积的、完整包是完整清单，更新的包已经包含旧的，'
-						+ '比它旧的还没处理的会记成"被取代了"）。'
-						+ '更新包**只在完全不会动到本地已有的东西时**才自己应用（不删文件、不覆盖你改过的内容、不产生冲突副本）；'
-						+ '要删东西、或者两边都改过时，只提示一句让你自己打开看。'
-						+ '**完整副本从来不自动应用**（它可能删掉你本机独有的文件），也只提示一句。'
-						+ '我自己的导出、以及已经处理过的包都会跳过',
+					desc: '每 30 秒看一眼包文件夹：只在**不会动到本地已有东西**时才自己应用；'
+						+ '完整包、要删东西的、两边都改过的一律只提示一句',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncoming),
 				},
 				{
 					key: 'dropBundleToApply',
 					name: '拖入 .lsave 即打开应用对话框',
-					desc: '把 .lsave 文件直接拖到 Obsidian 窗口上，自动打开这个对话框并填好路径（等同于在这里粘路径）。'
-						+ '只拦 .lsave，往笔记里拖图片、拖别的文件一概不受影响；关掉的话拖进来会交给 Obsidian 自己处理',
+					desc: '把 .lsave 拖到 Obsidian 窗口上就打开应用对话框。只拦 .lsave，别的文件一概不受影响',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.dropBundleToApply),
 				},
 				{
 					key: 'bundleVerify',
 					name: '应用前校验完整性',
-					desc: '把整个包读一遍算校验和，确认传输（U 盘、网盘）没把文件弄坏。包很大时这一步会多花几秒',
+					desc: '把整个包读一遍算校验和，确认传输没把文件弄坏（大包会多花几秒）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
 				},
@@ -193,8 +195,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '应用一个包',
-					desc: '选中 .lsave 文件后会**先算一遍再给你看**（同步程度、会改动哪些、会不会删东西）；'
-						+ '冲突与删除默认跟随设置，也可以在对话框里临时覆盖。这一步只读，不碰你的文件',
+					desc: '选中包后先算一遍再给你看（同步程度、会改动哪些）；确认了才动文件',
 					button: '打开同步包并应用…',
 					cta: true,
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
@@ -209,10 +210,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '把 .lsave 关联到 Obsidian',
-					desc: '双击 .lsave 就用 Obsidian 打开并弹出应用对话框。'
-						+ '做法是往当前用户注册表写一条关联（**不需要管理员权限**，只动 HKCU）。'
-						+ '注意：单纯"用 Obsidian 打开"是通不了的 —— 必须让它调起 obsidian:// 链接'
-						+ '（而且链接里要写明 vault，插件才收得到）',
+					desc: '双击 .lsave 用 Obsidian 打开并弹出应用对话框（往当前用户注册表写一条关联，不需要管理员权限）',
 					button: '设置关联',
 					run: plugin => { new AssociateModal(plugin.app, plugin.app.vault.getName()).open(); },
 					disabled: () => !associationSupported(),
@@ -231,4 +229,37 @@ export const SYNC_SECTION: FieldSection = {
 /** 没填「同步包文件夹」＝没地方放包、也没地方找包 —— 导出 / 应用按钮就该是灰的 */
 function hasBundleDir(settings: PluginSettings): boolean {
 	return bundleBaseDir(settings) !== '';
+}
+
+/**
+ * 「从哪个状态 / 到哪个状态」的选项：**本地有几份完整包就有几个状态**，外加「最新」。
+ *
+ * 设置面板是同步渲染的，所以这里用的是同步那套读法（`listFullAnchorsSync` /
+ * `loadStateSync`）—— 只看包目录与状态文件，量都很小。
+ * 读不出来（没填包目录、状态文件还没建）也要给出一张表：至少留着「最新」那一项，
+ * 否则下拉框会空着，用户以为这个设置坏了。
+ */
+function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
+	const fallback = end === 'from'
+		? { [LATEST_STATE]: '最新那份完整副本' }
+		: { [LATEST_STATE]: '最新（当前仓库，现在这一刻）' };
+	/** 现在存着的值（一个基准指纹）：那一份要是找不到了，也得把它列出来（否则下拉框会显示成别的项） */
+	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
+	try {
+		const base = bundleBaseDir(plugin.settings);
+		const state = loadStateSync(plugin.stateFile());
+		const anchors = listFullAnchorsSync(base, state.lineage);
+		const options = anchorOptions(anchors, end, {
+			generation: state.bundle?.fullGeneration ?? null,
+			hash: state.bundle?.fullHash ?? null,
+			file: state.bundle?.fullFile ?? null,
+		});
+		const wanted = coerceAnchorFingerprint(current);
+		if (wanted !== '' && !(wanted in options)) {
+			options[wanted] = `基准 ${wanted}（这个目录里找不到那一份完整副本）`;
+		}
+		return options;
+	} catch {
+		return fallback;
+	}
 }
