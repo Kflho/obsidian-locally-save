@@ -300,6 +300,11 @@ export interface ApplyPlan {
 	 * 链条模型下这是硬伤：下一个包会被判"接不上"。
 	 */
 	pointBefore: Record<string, FileRecord>;
+	/**
+	 * **这一趟送到的那一点上有哪些目录**（严格镜像的收尾照它办：那一点上没有的目录都清掉，
+	 * 有的一个不少）。空目录也是内容的一部分，所以这份名单必须与那一点完全一致。
+	 */
+	deliveredDirs: string[];
 	/** 执行阶段照着做的策略 */
 	options: { conflictStrategy: ConflictStrategy; propagateDeletions: boolean; keepBackup: boolean };
 }
@@ -768,9 +773,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * （本机改过的、本机独有的）就是"我这一半"。本机删过的那些在包里有、本地没有，
 	 * 也算我这一半的删除。
 	 *
-	 * 前提是**本机有基准**：没有基准时这台机器压根导不出更新包，算这个没有意义。
+	 * **判断里不能带 `strictness`**（踩过）：这里原来是 `&& strictness === 'normal'`，
+	 * 界面改成"应用永远走严格档"之后就永远进不来了 —— 于是退回下面那条按**旧基准**算的分支：
+	 * 完整副本要删掉的"我这点上有、它那份里没有"的文件（本地没动过、跟旧基准一模一样）
+	 * 一个都不算，`pendingChanges` 可能是 0 → **不触发"先把我的改动存成包"** →
+	 * 一条 `cp` 就把它们镜像走了（只进回收目录，没有包）。用户报的"没看到改动的包"就是这个。
+	 *
+	 * 前提是**本机有基准**：没有基准时这台机器导不出更新包，只提示一句（界面那边负责说）。
 	 */
-	if (anchor && header.mode === 'full' && strictness === 'normal') {
+	if (anchor && header.mode === 'full') {
 		pendingChanges = local.files.size - synchronized;
 		for (const entry of header.entries) {
 			if (!local.files.has(entry.path)) pendingDeletes++;
@@ -821,6 +832,22 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 和对方都有的空文件夹也删掉。这种情况下目录只建不删，并在报告里说明白。
 	 */
 	const bundleRecordsDirs = Array.isArray(header.emptyDirs);
+	/**
+	 * **这一趟送到的那一点上有哪些目录**（镜像的收尾就照它办）。
+	 *
+	 * 空目录也是内容的一部分，所以"哪些目录该在"只能由**那一点**说了算：
+	 * - 包里的空文件夹（导出方的全部空文件夹，不是增量）＋ 条目的上级目录；
+	 * - 那一点上**还留着的文件**的上级目录 —— 那些文件自基准以来没动过、不在包条目的名单里，
+	 *   但它们的目录同样是那一点的内容（本地也就有）。
+	 * - 被点名的删除要划掉：它的目录要是空了、导出方也没留着，那这一点上就没有它了。
+	 */
+	const deliveredFiles = new Set<string>(Object.keys(anchor ?? {}));
+	for (const item of header.deleted) deliveredFiles.delete(item.path);
+	for (const entry of header.entries) deliveredFiles.add(entry.path);
+	const deliveredDirs = new Set<string>(header.emptyDirs ?? []);
+	for (const file of deliveredFiles) deliveredDirs.add(dirnameRel(file));
+	deliveredDirs.delete('');
+
 	const foldersToRemove: string[] = [];
 	/** 想删却删不掉的：清单里看着是空的，磁盘上还有东西（被排除规则挡住的文件） */
 	const foldersKept: string[] = [];
@@ -829,10 +856,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		const filled = dirsContainingFiles(local);
 		const candidates: string[] = [];
 		for (const dir of local.dirs) {
-			if (bundleDirs.has(dir)) continue;
+			if (deliveredDirs.has(dir)) continue; // 那一点上有它 → 留着（空目录也是内容）
 			if (filled.has(dir)) continue; // 里面有文件：交给文件规则，别在这里抢着删
-			// 完整副本是镜像：包里没有的目录都得清掉（连本机新建的）
-			if (mirrorFull) {
+			// **严格镜像**：那一点上没有的目录都清掉（连本机新建的）。完整副本与更新包一样 ——
+			// 更新包这边的判据是"那一点上有没有它"，不是"我以前记没记过它"：
+			// 按记录判会漏掉本机新建的空文件夹，两边目录集合从此不一样，状态编号也就永远对不上。
+			if (mirrorFull || strict) {
 				candidates.push(dir);
 				continue;
 			}
@@ -911,6 +940,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		actions,
 		foldersToRemove,
 		pointBefore: { ...(state.bundle?.fullFiles ?? {}) },
+		deliveredDirs: [...deliveredDirs].sort(),
 		options: { conflictStrategy, propagateDeletions, keepBackup },
 	};
 }
@@ -1087,11 +1117,19 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		}
 	}
 
-	// 收尾：把"被删空 / 挪空"的目录收拾掉，别留一串空壳
-	result.foldersRemoved += await pruneEmptyDirs(options.vaultRoot, [
-		...plan.actions.filter(action => action.kind === 'delete').map(action => action.path),
-		...plan.actions.flatMap(action => (action.kind === 'rename' && action.from ? [action.from] : [])),
-	]);
+	// 收尾：**把那一点上没有的目录清掉**（空目录也是内容的一部分，所以这不是"顺手收拾空壳"，
+	// 而是镜像的收尾动作）。`plan.deliveredDirs` 就是"这一趟之后该有哪些目录"：
+	// 那一点上有、本地没建出来的（比如空文件夹）上面刚建好了，剩下的空目录就都是那一点上没有的。
+	// 传 `keep` 是为了**别把刚建好的那些又收掉**（踩过：对面把一个文件夹里的文件删光、
+	// 文件夹留着，这边删完文件顺手把空壳收掉 → 状态编号当场对不上，用户看到"还差一点"而文件一个不差）。
+	result.foldersRemoved += await pruneEmptyDirs(
+		options.vaultRoot,
+		[
+			...plan.actions.filter(action => action.kind === 'delete').map(action => action.path),
+			...plan.actions.flatMap(action => (action.kind === 'rename' && action.from ? [action.from] : [])),
+		],
+		plan.deliveredDirs,
+	);
 
 	// 包里没有的本地空目录（强制档全删、默认档只删"对方删过的"）。
 	// 放在文件动作之后：被文件删除腾空的目录这时候才可能真的空。

@@ -36,6 +36,8 @@ export function describeLogEntry(entry: BundleLogEntry): string {
 	// 差量包：内容到 target 那一代**为止**，导它的时候我这边什么都没推进 —— 得说清楚，
 	// 不然这一条里的状态编号会被当成"我现在的状态"
 	if (entry.checkpoint) parts.push(`送到第 ${entry.target} 代那一刻的状态`);
+	// 流程自己发起的那两次导出（应用前存的改动 / 接到新基准点上）：写清来路
+	if (entry.note) parts.push(entry.note);
 	// 状态编号：两台机器日志里最后一条一比，就知道两边到底同不同步（世代号做不到这件事）
 	if (entry.stateId) parts.push(`状态 ${entry.stateId}`);
 	if (entry.vault) parts.push(`来自「${entry.vault}」`);

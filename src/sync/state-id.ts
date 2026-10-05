@@ -33,9 +33,10 @@ export async function computeStateId(options: {
 	/**
 	 * 路径 → 内容指纹，**覆盖"去仓库里读"**。
 	 *
-	 * 给"内容不在仓库里"的清单算编号用：最典型的是 `bundle/export.ts` 的 `rebaseBundle` ——
-	 * 它算的是"我站的这一点 ＋ 另一份包里的改动"落出来的那一点，那些文件的字节在**那份包里**，
-	 * 仓库里现在是别的版本；照仓库读会算出一个错的编号，接收方应用完一比就报"还差一点"。
+	 * 给"内容不在仓库里"的清单算编号用。最典型的是 `export.ts` 的 `parkLocalChangesFor`：
+	 * 那一环送到的是「**新点 ＋ 我的东西**」—— 被对方那份包覆盖的路径上，落点用的是**对方那一版**
+	 * （我仓库里现在还是改动前的旧版本），照仓库读会算出一个错的编号，接收方应用完一比就报
+	 * "还差一点"（踩过）。
 	 */
 	hashes?: ReadonlyMap<string, string>;
 }): Promise<StateIdInfo> {

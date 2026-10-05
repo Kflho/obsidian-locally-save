@@ -5,11 +5,13 @@ import { executeBundlePlan, isDestructivePlan, planBundleApply } from '../bundle
 import type { ApplyPlan, ApplyResult } from '../bundle/apply';
 import type { StateIdInfo } from '../sync/state';
 import { describeStateId } from '../bundle/log';
-import { exportBundle, plannedExportModes, rebaseBundle } from '../bundle/export';
+import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle/export';
+import { baselineOfFullBundle, listingHashOfFiles } from '../bundle/baseline';
+import type { BundleAnchor } from '../bundle/anchor';
+import type { FileRecord } from '../sync/types';
 import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
 import type { AnchorRef, LatestInfo } from '../bundle/anchor';
 import { listPointRefsSync } from '../bundle/points';
-import { trashBundles } from '../bundle/manage';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
 import { loadStateSync } from '../sync/state';
@@ -892,18 +894,17 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	/**
-	 * **动手前先把"我这边的最新改动"存成一个更新包**（用户要的："本地最新更新保存为一个更新包"）。
+	 * **动手前先把"我这边的东西"存成一个包**（用户要的："本地最新更新保存为一个更新包"）。
 	 *
-	 * 为什么非做不可：严格档（「严格同步」）会**用包里的版本覆盖我改过的文件、把我多出来的文件挪走** ——
-	 * 我那一版如果只躺在回收目录里，就是散的、认不出是一整套改动。存成一个包之后：
-	 * 它是一份完整、可搬运的备份。
+	 * 引擎那边负责起点与内容（`export.ts` 的 `parkLocalChangesFor`）：
+	 * 起点＝**这份包送到的那一点**，内容＝我现在的仓库，并且不推进我这边 ——
+	 * 于是这一环就是「**新点 → 新点 ＋ 我的东西**」：本地改过/删过/新建而在包里没提到的那些，
+	 * 全在里面。我自己应用它＝在新点上把东西加回来，发给对方（他正站在同一点上）＝同理。
 	 *
-	 * **它接的还是"应用前"那一点** —— 应用成功之后还要 `rebaseParked` 把它接到新点上（见那个方法）。
-	 *
-	 * **存不下就不动手**：宁可这次不应用，也不能让本地改动在"存不下来"的情况下被覆盖掉。
+	 * **返回 null ＝ 我这边跟那个点没有任何差别，没什么可存的**（不是失败）。
 	 */
-	private async parkLocalChanges(): Promise<string> {
-		const outcome = await exportBundle({
+	private async parkLocalChanges(plan: ApplyPlan): Promise<string | null> {
+		const outcome = await parkLocalChangesFor({
 			settings: this.plugin.settings,
 			log: this.plugin.log,
 			vaultRoot: this.plugin.vaultRoot(),
@@ -912,48 +913,9 @@ export class ApplyBundleModal extends Modal {
 			mode: 'changes',
 			outDir: this.effectiveDir(),
 			configDir: this.plugin.configDir(),
-		});
-		if (!outcome.file) throw new Error(outcome.reason ?? '没能把你的改动存成更新包');
+			onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '导出中' }),
+		}, { header: plan.info.header, pointBefore: plan.pointBefore });
 		return outcome.file;
-	}
-
-	/**
-	 * 应用成功之后，把"我这一半"**接到刚落到的新点**上（引擎是 `export.ts` 的 `rebaseBundle`）。
-	 *
-	 * 为什么非做不可：`parkLocalChanges` 那份包接的是**应用前**那一点，而对方导完包之后
-	 * 已经往前走到新点了 —— 他直接应用它会判"接不上"。接到新点上之后这一环谁都能用：
-	 * **我自己应用它**＝在新点上加回我的改动（基准点跟着到那一点）；
-	 * **发给对方**（他站在新点上）应用＝同理。用户原话："自己导入就等于在最新基准点基础上
-	 * 加上原来更新，给别人导入同理。"
-	 *
-	 * 成功之后把原来那份 park 包**挪进回收站**：内容已经在新的这一环里了，
-	 * 留着只会让人分不清哪份是哪份（还能从回收站捞回来）。
-	 * 失败**什么都不动**：原包留着当备份，调用方在通知里如实说明"改动还在那份包里"。
-	 */
-	private async rebaseParked(source: string): Promise<{ file: string | null; error: string | null }> {
-		try {
-			const outcome = await rebaseBundle({
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				vaultName: this.plugin.vaultName(),
-				stateFile: this.plugin.stateFile(),
-				mode: 'changes',
-				outDir: this.effectiveDir(),
-				configDir: this.plugin.configDir(),
-				source,
-				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '导出中' }),
-			});
-			if (!outcome.file) return { file: null, error: outcome.reason ?? '没能把你的改动接到新基准点上' };
-			// 挪走原包：它的内容已经在新的一环里了（挪不动不算错，只是列表里多一份，如实报出来）
-			const moved = await trashBundles(this.effectiveDir(), [source]);
-			if (moved.failed.length > 0) {
-				this.plugin.log.debug(`旧的那份改动包没能挪进回收站：${moved.failed[0]?.error ?? ''}`);
-			}
-			return { file: outcome.file, error: null };
-		} catch (error) {
-			return { file: null, error: describe(error) };
-		}
 	}
 
 	private async runApply(): Promise<void> {
@@ -963,15 +925,17 @@ export class ApplyBundleModal extends Modal {
 		this.reportEl.setText('正在应用……');
 		try {
 			/**
-			 * 严格档会覆盖 / 挪走我这边的东西 → 先把"我这一半"存成一个更新包。
-			 * 没有改动要存（`pendingChanges/Deletes` 都是 0）时跳过，不白写一个空包。
+			 * 严格档会覆盖 / 挪走我这边的东西 → 先把"我这一半"存成一个包。
+			 *
+			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己的点"算的，
+			 * 完整副本那一趟会漏（见 `parkLocalChanges`）；真没什么可存时这一趟只是白扫一遍，
+			 * 会直接告诉我们"没有差别"（返回 null），不写空包。
 			 */
 			const strict = plan.report.strictness === 'mirror' || plan.report.strictness === 'bundle-wins';
-			const owedBefore = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
 			let parked: string | null = null;
-			if (strict && owedBefore > 0) {
-				this.reportEl.setText(`正在把你这边的 ${owedBefore} 个改动先存成一个更新包……`);
-				parked = await this.parkLocalChanges();
+			if (strict) {
+				this.reportEl.setText('正在把你这边的东西先存成一个包……');
+				parked = await this.parkLocalChanges(plan);
 				this.reportEl.setText('正在应用……');
 			}
 			const result = await executeBundlePlan(plan, {
@@ -984,19 +948,6 @@ export class ApplyBundleModal extends Modal {
 				keepBackup: plan.options.keepBackup,
 				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '应用中' }),
 			});
-			/**
-			 * 应用成功、而且**一个文件都没失败**时，才把那份改动接到新点上。
-			 *
-			 * 有失败就说明本机没真正落到包里那一点（`state.bundle.fullFiles` 只记写成功的那些），
-			 * 这时接出来的包起点跟对方站的点对不上 —— 不如不接，让它留在原来那份包里。
-			 */
-			let rebased: { file: string | null; error: string | null } = { file: null, error: null };
-			if (parked && result.failed.length === 0) {
-				this.reportEl.setText('正在把你这边的改动接到刚应用到的那个基准点上……');
-				rebased = await this.rebaseParked(parked);
-			} else if (parked) {
-				rebased.error = `这次有 ${result.failed.length} 个文件没写成，接出来的起点会跟对方对不上`;
-			}
 			this.plugin.reportProgress(null);
 			this.plugin.statusBar.setSummary(
 				`同步包已应用（写入 ${result.written}`
@@ -1027,12 +978,13 @@ export class ApplyBundleModal extends Modal {
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
 			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
 
-			// 我这一半的去处：接到新点上之后，这一环谁都能用（我自己应用＝加回来，发给对方＝同理）
-			if (rebased.file) {
-				parts.push(`你那边的改动已存成 ${rebased.file}（接在刚应用到的这个基准点上：`
+			// 我这一半的去处：存下来的那一环**起点就是刚应用到的这个点**，
+			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一点上）应用＝同理
+			if (parked) {
+				parts.push(`你这边的改动已存成 ${parked}（接在刚应用到的这个基准点上：`
 					+ '你自己应用它就加回来，发给对方、他站在同一点上应用也等于把你的改动叠上去）');
-			} else if (parked) {
-				parts.push(`你那边的改动还在 ${parked} 里（没能接到新基准点上：${rebased.error ?? '未知原因'}）—— 先留着当备份`);
+			} else if (strict) {
+				parts.push('你这边跟那个点本来就没有差别，所以没有另存包');
 			}
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
