@@ -758,6 +758,12 @@ export class ApplyBundleModal extends Modal {
 					+ '没提到的一律不动（"没提到"不等于"被删了"）。',
 				cls: 'locally-save-hint',
 			});
+		} else {
+			this.reportEl.createEl('p', {
+				text: '完整副本：**镜像**，没有别的档 —— 包里没有的本地文件全挪进回收目录，'
+					+ '仓库会变成和那个包一模一样（本机改过的、自己新建的都不留）。',
+				cls: 'locally-save-hint',
+			});
 		}
 
 		// 旧版本导的包：它没记空文件夹，所以这次目录只建不删（否则会删错）
@@ -817,7 +823,10 @@ export class ApplyBundleModal extends Modal {
 			}
 		} else {
 			this.reportEl.createEl('p', {
-				text: `基准：应用之后，你这台就以这份完整副本为基准（第 ${plan.info.header.targetGeneration} 代）`,
+				text: `基准：应用之后，你这台就以这份完整副本为基准（第 ${plan.info.header.targetGeneration} 代）。`
+					+ '**完整副本是镜像，不合并**：包里没有的本地文件会挪进回收目录（捞得回来），'
+					+ '本机改过的会被包里那一版覆盖（旧的同样进回收目录）—— 应用完这个仓库就是那个包。'
+					+ '这样两边的基准是**同一份东西**，之后互发更新包才不会对不上。',
 				cls: 'locally-save-hint',
 			});
 		}

@@ -189,7 +189,11 @@ fs.mkdirSync(THIRD, { recursive: true });
 write(OTHER, 'notes/a.md', 'AAA 改过第二次');
 const older = await exportFromOther('changes');
 
-// 第三台机器 C：照 A 那份完整副本铺一遍（这一步会在 C 那边认祖 = 同血脉），改同一个文件再发一个包
+// 第三台机器 C：照 A 那份完整副本铺一遍（这一步会在 C 那边认祖 = 同血脉），改一笔再发一个包。
+// 改的是**另一个文件**（`notes/c.md`）：两台机器各发一个包时，接收方手里 `notes/a.md` 那一版
+// 来自 A 的包，而 C 的包是按"我们俩都还停在完整副本那一版"算的 base（更新包自带的 base 优先于
+// 本机记录）—— 两边改同一个文件的话，C 的包会被判成冲突，那就变成"要人看"而不是"按最新那个应用"，
+// 验不到这一组真正要钉的东西。改不同文件，两条语义互不打扰。
 await applyBundle({
 	settings: { ...DEFAULT_SETTINGS },
 	log,
@@ -197,7 +201,7 @@ await applyBundle({
 	stateFile: STATE_THIRD,
 	file: firstFull.file as string,
 });
-write(THIRD, 'notes/a.md', 'AAA 改过第三次');
+write(THIRD, 'notes/c.md', '第三台机器加的');
 const newer = await exportBundle({
 	settings: { ...DEFAULT_SETTINGS },
 	log,
@@ -211,7 +215,9 @@ checkTrue('两个更新包真的同时躺在文件夹里', older.file !== null &
 
 noticeLog.length = 0;
 check('两个包一起来：按最新那个应用', await checkIncomingBundles(plugin), true);
-check('两个包一起来：落地的是最新那一版', read(VAULT, 'notes/a.md'), 'AAA 改过第三次');
+check('两个包一起来：落地的是最新那一版', read(VAULT, 'notes/c.md'), '第三台机器加的');
+// 更早那个包（A 改的 a.md）被记成"被取代"，一个字都没落地 —— 这才是"只看最新那一个"
+check('更早那个包的内容没进仓库', read(VAULT, 'notes/a.md'), 'AAA 改过了');
 const afterPair = await loadState(plugin.stateFile());
 const notes = afterPair.incoming.map(item => `${item.id === older.header?.bundleId ? '旧' : item.id === newer.header?.bundleId ? '新' : '?'}:${item.note}`);
 checkTrue('旧的被记成"被取代了"', notes.includes('旧:superseded'), notes.join(' / '));
