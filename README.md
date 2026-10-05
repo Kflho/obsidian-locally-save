@@ -398,7 +398,7 @@ Obsidian 收到一个陌生路径只会当成未知文件，压根到不了插�
 npm install
 npm run dev      # 监听改动，打包完自动同步到 vault 的插件目录
 npm run build    # 类型检查 + 生产打包
-npm test         # 556 项检查（比对矩阵 / 排除规则 / 端到端同步 / 同步包 / 设置面板 / 装配）
+npm test         # 629 项检查（比对矩阵 / 排除规则 / 端到端同步 / 同步包 / 包管理 / 设置面板 / 装配）
 npm run lint
 ```
 
@@ -407,9 +407,14 @@ npm run lint
 ### 发版
 
 ```bash
-npm version 0.2.0        # 同步 manifest.json 与 versions.json，并打好同名 tag（不带 v 前缀）
+npm version 0.4.0        # 同步 manifest.json 与 versions.json，打好同名 tag（不带 v 前缀），
+                         # 并顺带跑一次 npm run build —— 重新打包、部署到 vault 的插件目录
 git push origin main --follow-tags
 ```
+
+`postversion` 里那次 build 不是多余的：不然"先 build、后改版本号"会让 vault 里那份
+`manifest.json` 停在旧版本号（代码是新的、版本号是旧的），你从插件目录拷到另一台机器，
+装出来就是旧版本。
 
 CI（`.github/workflows/release.yml`）会在 tag 推上去之后跑测试与构建，
 校验 **tag 与 `manifest.json` 的 version 一致**，然后创建 Release 并附上
