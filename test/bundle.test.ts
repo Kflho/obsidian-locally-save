@@ -1055,7 +1055,13 @@ check('没有失败', deleted.failed, []);
 check('文件真的没了', fs.existsSync(doomed?.file as string), false);
 check('回收站里也不该多东西（不是挪走，是删掉）', await readBundleTrash(OUT3), { count: 0, bytes: 0 });
 check('列表空了', (await listBundles(OUT3)).length, 0);
-check('删一个本来就不在的：算成功，不报错（可能刚被别的操作挪走）', await deleteBundles(['Z:\\definitely\\missing.lsave']), { deleted: ['missing.lsave'], failed: [] });
+// 路径要用 path.join 拼（CI 跑 Linux：字面量 `Z:\x\y.lsave` 在那边根本不是路径，
+// path.basename 会原样返回，测试就会红 —— 踩过一次）
+check(
+	'删一个本来就不在的：算成功，不报错（可能刚被别的操作挪走）',
+	await deleteBundles([path.join(ROOT, 'definitely-missing', 'missing.lsave')]),
+	{ deleted: ['missing.lsave'], failed: [] },
+);
 
 // 32. 回收站放哪儿：**跟 bundles 平级**，绝不在 bundles 里面再套一层 .lsave
 // （默认布局下 base 本身就是 `.lsave/bundles`，塞进去会变成 `.lsave/bundles/.lsave/bundles-trash`：两层 .lsave，用户报过）
