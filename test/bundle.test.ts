@@ -19,6 +19,7 @@ import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, readEntry, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import { mergeBundleGroup, planBundleMerges } from '../src/bundle/merge';
+import type { MergeOptions } from '../src/bundle/merge';
 import {
 	bundleTrashRoot,
 	deleteBundles,
@@ -2683,8 +2684,9 @@ check(
 	[1, 4, 3, 2],
 );
 
-const mgMerged = await mergeBundleGroup(mgExport(MG_A, STATE_MG_A), mgBefore[0] as NonNullable<typeof mgBefore[0]>);
-checkTrue('合并后的包写出来了', typeof mgMerged.file === 'string' && mgMerged.file.length > 0, mgMerged.reason ?? '没有文件名');
+const mgMerged = await mergeBundleGroup({ outDir: MG_OUT, log, stateFile: STATE_MG_A, vaultName: '我的笔记' }, mgBefore[0] as NonNullable<typeof mgBefore[0]>);
+checkTrue('合并后的包写出来了', typeof mgMerged.file === 'string' && mgMerged.file.length > 0, '没有文件名');
+check('这一份是新写的（不是复用现成的）', mgMerged.reused, false);
 check('那三份小包都挪进了回收站', mgMerged.trashed.length, 3);
 check('回收站里能捞回来', (await readBundleTrash(MG_OUT)).count >= 3, true);
 
@@ -2829,6 +2831,110 @@ write(TT_VAULT, 'a.md', 'A2 长一点', ttT0 + 900_000);
 const ttMoved = await exportBundle(ttExport('full'));
 check('内容真变了 → +1', ttMoved.header?.targetGeneration, 2);
 check('状态编号跟着变', ttMoved.header?.stateId?.id !== ttFull.header?.stateId?.id, true);
+
+// 50. **段首那份完整副本被删了，照样合得成**（用户报的：「39 到 54，54 到 55 合不上」）
+//
+// 他的现场：第 39 代那份完整副本几百 MB、太占地方，删了；手里只剩「39→54」与「54→55」两环。
+// 老实现要"重新导一份 39→55"，而重新导得先把**段首那一点**算出来 —— 它要从一份完整副本起步，
+// 起点那份没了就什么都算不出来，合并窗口里空空的。现在合并走**拼装**：内容在那几环的负载里、
+// 版本关系在它们的 base 里，一份完整副本都不需要，也不读仓库。
+const AG = path.join(ROOT, 'anchor-gone');
+const AG_A = path.join(AG, 'a');      // 本机（就是删掉段首那份完整副本的那台）
+const AG_B = path.join(AG, 'b');      // 站在段首（第 1 代）的机器
+const AG_C = path.join(AG, 'c');      // 站在中间那一点（第 2 代）的机器
+const AG_OUT = path.join(AG, 'transfer');
+const AG_STATE_A = path.join(AG, 'state-a.json');
+const AG_STATE_B = path.join(AG, 'state-b.json');
+const AG_STATE_C = path.join(AG, 'state-c.json');
+for (const dir of [AG_A, AG_B, AG_C, AG_OUT]) fs.mkdirSync(dir, { recursive: true });
+const agExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes', extra: Partial<ExportOptions> = {}): ExportOptions =>
+	({ settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: AG_OUT, ...extra });
+const agApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+const agMerge = (): MergeOptions => ({ outDir: AG_OUT, log, stateFile: AG_STATE_A, vaultName: '我的笔记' });
+
+const agT0 = Date.now();
+write(AG_A, 'a.md', 'AG1', agT0);
+const agFull1 = await exportBundle(agExport(AG_A, AG_STATE_A, 'full'));
+check('第一份完整副本是第 1 代', agFull1.header?.targetGeneration, 1);
+write(AG_A, 'a.md', 'AG2 长一点', agT0 + 30_000);
+const agFull2 = await exportBundle(agExport(AG_A, AG_STATE_A, 'full'));
+check('第二份完整副本是第 2 代', agFull2.header?.targetGeneration, 2);
+
+// ① 第 1 代那台机器先应用（趁那份包还在）
+await executeBundlePlan(
+	await planBundleApply(agApply(AG_B, AG_STATE_B, agFull1.file as string)),
+	agApply(AG_B, AG_STATE_B, agFull1.file as string),
+);
+check('B 站在第 1 代（段首）', (await loadState(AG_STATE_B)).generation, 1);
+
+// ② 「1 → 2」那一环：照着第 1 代导的差量包（对面手里就是第 1 代）
+const agRing1 = await exportBundle(agExport(AG_A, AG_STATE_A, 'changes', {
+	baseFingerprint: agFull1.header?.baselineHash ?? '',
+	toFingerprint: agFull2.header?.baselineHash ?? '',
+}));
+check('导出了「1 → 2」这一环', agRing1.header?.targetGeneration, 2);
+check('它记着起点是第 1 代', agRing1.header?.baseGeneration, 1);
+
+// ③ 「2 → 3」那一环（第 2 代那台机器再往前走一格）
+write(AG_A, 'a.md', 'AG3 再长一点点', agT0 + 60_000);
+const agRing2 = await exportBundle(agExport(AG_A, AG_STATE_A, 'changes'));
+check('导出了「2 → 3」这一环', agRing2.header?.targetGeneration, 3);
+await executeBundlePlan(
+	await planBundleApply(agApply(AG_C, AG_STATE_C, agFull2.file as string)),
+	agApply(AG_C, AG_STATE_C, agFull2.file as string),
+);
+check('C 站在第 2 代（中间那一点）', (await loadState(AG_STATE_C)).generation, 2);
+
+// ④ **把第 1 代那份完整副本删掉**（用户干的那件事）
+fs.rmSync(agFull1.file as string);
+checkTrue('第 1 代那份包确实不在了', !fs.existsSync(agFull1.file as string), '还在');
+
+const agLineage = (await loadState(AG_STATE_A)).lineage;
+const agPlans = (await planBundleMerges(AG_OUT, agLineage)).plans;
+check('段首那份完整副本没了，照样算出了可以合并的一段', agPlans.length, 1);
+check(
+	'这一段正是「第 1 → 3 代、两环并一环、中间一个点」',
+	[agPlans[0]?.anchorGeneration, agPlans[0]?.targetGeneration, agPlans[0]?.links.length, agPlans[0]?.middlePoints.length],
+	[1, 3, 2, 1],
+);
+
+const agMerged = await mergeBundleGroup(agMerge(), agPlans[0] as NonNullable<typeof agPlans[0]>);
+checkTrue('合并后的包写出来了', typeof agMerged.file === 'string' && agMerged.file.length > 0, '没有文件名');
+check('那两环都挪进了回收站', agMerged.trashed.length, 2);
+const agMergedInfo = await readBundleInfo(agMerged.file);
+check(
+	'合并后：起点还是段首那一点、落点还是段末那一点',
+	[agMergedInfo.header.baseGeneration, agMergedInfo.header.targetGeneration, agMergedInfo.header.baselineHash],
+	[1, 3, agRing1.header?.baselineHash],
+);
+check('落点指纹就是段末那一点', agMergedInfo.header.targetBaselineHash, agRing2.header?.targetBaselineHash);
+check('状态编号取段末那一刻的', agMergedInfo.header.stateId?.id, agRing2.header?.stateId?.id);
+check('装的是段末那一刻的内容', agMergedInfo.header.entries.map(entry => entry.path), ['a.md']);
+check(
+	'内容取的是**段末那一环**的负载（不是我现在的仓库）',
+	(await readEntry(agMerged.file, agMergedInfo, agMergedInfo.header.entries[0]!)).toString('utf8'),
+	'AG3 再长一点点',
+);
+check('本机什么都不推进（还是第 3 代）', (await loadState(AG_STATE_A)).generation, 3);
+check('本机基准那一行改指合并后的这一份', (await loadState(AG_STATE_A)).bundle?.fullFile, path.basename(agMerged.file));
+check('合并完再看：没有可合并的了', (await planBundleMerges(AG_OUT, agLineage)).plans.length, 0);
+
+// ⑤ 站在**段首**（第 1 代）的机器：起点严格相等 → 收下，应用完落到第 3 代
+const agPlanB = await planBundleApply(agApply(AG_B, AG_STATE_B, agMerged.file));
+check('B（段首）基准对得上', agPlanB.report.baselineMatch, 'match');
+const agResultB = await executeBundlePlan(agPlanB, agApply(AG_B, AG_STATE_B, agMerged.file));
+check('B 应用后内容就是段末那一刻的', read(AG_B, 'a.md'), 'AG3 再长一点点');
+check('B 落在第 3 代', (await loadState(AG_STATE_B)).generation, 3);
+check('B 跟对方状态编号一致', agResultB.stateIdCompare, 'match');
+
+// ⑥ 站在**中间那一点**（第 2 代）的机器：起点对不上，但算一遍落点正好是段末 → 收下
+const agPlanC = await planBundleApply(agApply(AG_C, AG_STATE_C, agMerged.file));
+check('C（中间点）认出"我站的这一点在它的路线上"', agPlanC.report.viaMine, true);
+const agResultC = await executeBundlePlan(agPlanC, agApply(AG_C, AG_STATE_C, agMerged.file));
+check('C 应用后也是段末那一刻的内容', read(AG_C, 'a.md'), 'AG3 再长一点点');
+check('C 也落在第 3 代', (await loadState(AG_STATE_C)).generation, 3);
+check('C 那边状态编号也一致', agResultC.stateIdCompare, 'match');
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

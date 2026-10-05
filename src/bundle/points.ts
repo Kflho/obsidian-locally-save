@@ -40,6 +40,8 @@ export interface PointRef {
 	stateId: StateIdInfo | null;
 	/** 从哪一点来（完整包 ＝ null） */
 	from: string | null;
+	/** 这一环基于的那一代（头部 `baseGeneration`）——起点那份包不在文件夹里时，区间还得靠它报出来 */
+	baseGeneration: number | null;
 	/** 落到这一点的那份包 */
 	file: string;
 	name: string;
@@ -102,6 +104,7 @@ export function listPointRefsSync(baseDir: string, lineage: string): PointRef[] 
 			generation: header.targetGeneration,
 			stateId: header.stateId ?? null,
 			from: header.mode === 'full' ? null : baselineOfBundle(header),
+			baseGeneration: header.baseGeneration ?? null,
 			file: item.file,
 			name: item.name,
 			mtime: item.mtime,
@@ -151,6 +154,7 @@ function buildPoint(
 			generation: full.header.targetGeneration,
 			stateId: full.header.stateId ?? null,
 			from: null,
+			baseGeneration: null,
 			file: full.file,
 			name: full.name,
 			mtime: full.mtime,
@@ -189,6 +193,7 @@ function buildPoint(
 		generation: link.header.targetGeneration,
 		stateId: link.header.stateId ?? null,
 		from: baseHash,
+		baseGeneration: link.header.baseGeneration ?? null,
 		file: link.file,
 		name: link.name,
 		mtime: link.mtime,
