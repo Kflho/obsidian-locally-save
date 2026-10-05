@@ -64,11 +64,14 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   （用户报过）；老位置仍然会被 `readBundleTrash` / `emptyBundleTrash` 认（`legacyTrashRoot`），
   否则用户之前删掉的包会"人间蒸发"。用 `.lsave` 这个名字是因为它整个不参与扫描，
   包文件夹就算设在副本里也不会被同步回仓库。
-  **只有「清空回收站」是真删**，走 `disk.ts` 的 `removeDirRecursive`（rm -rf 语义，
-  只准传插件自己算出来的回收站路径）；别处删东西仍然一律走 `removeEmptyDir`（rmdir，非空必然失败）。
+  **真删只有两条路**：「**彻底删除**」（行内按钮，`manage.ts` 的 `deleteBundles` → `removeFile`，
+  一次一个包，单独确认）与「清空回收站」（`disk.ts` 的 `removeDirRecursive`，rm -rf 语义，
+  只准传插件自己算出来的回收站路径）；别的删除一律是"挪进回收站"。
   列表 / 删除 / 回收站都在 `bundle/manage.ts`（不 import obsidian，测试直接跑临时目录），
   界面是 `ui/bundle-list.ts` 那一套列表 —— 导出弹窗、导入弹窗、管理弹窗**共用**，
-  别让"这边能删、那边不能"；**回收站那一行三处都要有**，而且放在列表**上面**
+  别让"这边能删、那边不能"；行内按钮是**应用… / 文件夹 / 复制路径 / 挪进回收站 / 彻底删除**，
+  两个删除并排（用户提的：只有"挪进回收站"时，想真删一个包就得清空整个回收站）；
+  **回收站那一行三处都要有**，而且放在列表**上面**
   （放下面会被"最多 40vh 的滚动列表"顶出视野，用户翻不到就会问"删掉的包去哪了"）。
 - **应用同步包的"强硬程度"有四档**（`ApplyStrictness`：`normal` / `listed-wins` / `bundle-wins` / `mirror`）：
   - `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`）；
@@ -183,7 +186,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 622 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 629 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
