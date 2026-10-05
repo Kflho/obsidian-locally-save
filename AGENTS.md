@@ -142,7 +142,15 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   `keepPaths` 用来排掉"同一次里先导出来的那个包"（现在顺序是先完整、后更新，
   它也够不着 changes 目录，所以只是一道保险：哪天有调用方反过来先导更新包，
   完整包那一步不至于把它当成"被取代的旧包"删掉）。
+  **没删掉的必须如实报出来**（`SupersededReport.kept` → `ExportOutcome.keptChanges` →
+  弹窗里那句话）：是别的血脉、还是世代不比新包小。悄悄留着会被当成"清理开关没生效"，
+  或者更糟 —— 当成偶发 bug（用户报过："同一个操作第一遍没清、第二遍清掉了"）。
   开关是设置里的 `pruneSupersededBundles`。
+- **世代（`state.generation`）只增不减**：应用一个**更老的**包时绝不能把它拨回去
+  （`bundle/apply.ts` 里是 `Math.max`）。它记的是"这份副本见过这条血脉的哪一段"，
+  不是"我此刻的内容像哪一代"。拨回去的后果就是上面那条：`removeSupersededChanges` 判
+  "新包取代了旧包"靠的是「世代**严格更小**」，世代一倒退，同一个"导出完整包 + 更新包"的动作
+  会第一遍清不掉、第二遍才清（用户报成偶发 bug，`test/bundle.test.ts` 第 36 组钉住了）。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
   上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
   填 0 ＝ 关掉）。到线弹窗，三个选项：**重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
@@ -175,7 +183,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 615 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 622 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

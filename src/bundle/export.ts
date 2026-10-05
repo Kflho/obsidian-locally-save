@@ -89,6 +89,17 @@ export interface ExportOutcome {
 	cumulative: boolean;
 	/** 这次顺手删掉了哪些被取代的旧更新包（文件名，已排序） */
 	superseded: string[];
+	/**
+	 * 看着该被取代、却**留着没动**的更新包，以及为什么。
+	 * 界面上要如实说明 —— 不然用户会以为"清理开关没生效"，或者当成偶发 bug（报过）。
+	 */
+	keptChanges: { name: string; why: string }[];
+}
+
+/** 清理被取代的旧更新包的结果：删了哪些、留了哪些（留的要说清原因） */
+export interface SupersededReport {
+	removed: string[];
+	kept: { name: string; why: string }[];
 }
 
 /** 文件名里不能有的字符换成下划线（仓库名可能含 : / 之类） */
@@ -183,6 +194,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			cumulative: true,
 			fileBytes: 0,
 			superseded: [],
+			keptChanges: [],
 		};
 	}
 
@@ -296,13 +308,15 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 
 	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
 	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩
-	const superseded = settings.pruneSupersededBundles
+	const prune = settings.pruneSupersededBundles
 		? await removeSupersededChanges(options, header, file)
-		: [];
+		: { removed: [], kept: [] };
+	const superseded = prune.removed;
 
 	options.log.debug(
 		`导出${mode === 'full' ? '完整' : '累积更新'}包：${file}（${sources.length} 个文件，${header.payloadBytes} 字节）`
-		+ (superseded.length > 0 ? `；顺手清掉 ${superseded.length} 个被它取代的旧更新包` : ''),
+		+ (superseded.length > 0 ? `；顺手清掉 ${superseded.length} 个被它取代的旧更新包` : '')
+		+ (prune.kept.length > 0 ? `；changes 里还有 ${prune.kept.length} 个更新包没动（${prune.kept.map(item => item.why).join('、')}）` : ''),
 	);
 
 	return {
@@ -319,6 +333,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		parentBundleId: state.lastExportedBundleId,
 		cumulative: mode === 'changes',
 		superseded,
+		keptChanges: prune.kept,
 	};
 }
 
@@ -341,16 +356,20 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
  *
  * 内容安全性：新包（或与它同代的那份完整包）含有旧包的全部内容，删掉不丢东西；
  * 读不出头部、或者任何一条对不上的，一律留着（宁可多留，不可误删）。
+ *
+ * **没删掉的要说明为什么**（`kept`）：悄悄留着会让人以为是"清理开关没生效"，
+ * 或者以为是"偶发 bug"（用户报过：同一个操作第一遍没清、第二遍清了）。
  */
 async function removeSupersededChanges(
 	options: ExportOptions,
 	header: BundleHeader,
 	keep: string,
-): Promise<string[]> {
+): Promise<SupersededReport> {
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
 	keepPaths.add(path.resolve(keep));
 	const removed: string[] = [];
+	const kept: { name: string; why: string }[] = [];
 	for (const item of await listFiles(dir)) {
 		if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
 		const candidate = path.join(dir, item.name);
@@ -362,11 +381,19 @@ async function removeSupersededChanges(
 			continue; // 读不出头部（不是我们的包 / 传坏了）：不动它
 		}
 		if (other.mode !== 'changes') continue;
-		if (other.lineage !== header.lineage) continue;
-		if (other.targetGeneration >= header.targetGeneration) continue;
+		// 到这儿它就是一个"看着该被取代"的更新包了：没删就得说清为什么
+		if (other.lineage !== header.lineage) {
+			kept.push({ name: item.name, why: '不是同一条血脉（多半是另一台机器导的）' });
+			continue;
+		}
+		if (other.targetGeneration >= header.targetGeneration) {
+			kept.push({ name: item.name, why: '记的世代不比这次的新（导出过更晚的包）' });
+			continue;
+		}
 		await removeFile(candidate);
 		removed.push(item.name);
 	}
 	removed.sort();
-	return removed;
+	kept.sort((a, b) => a.name.localeCompare(b.name));
+	return { removed, kept };
 }

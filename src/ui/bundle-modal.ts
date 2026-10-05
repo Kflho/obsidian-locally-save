@@ -205,13 +205,21 @@ export class ExportBundleModal extends Modal {
 				written.push(outcome.file);
 				if (mode === 'full') fullWritten = true;
 				anySuccess = true;
+				// 没清掉的老更新包要说清为什么 —— 不然用户以为"清理开关没生效"，
+				// 或者当成偶发 bug（报过：同一个操作第一遍没清、第二遍清了）
+				const keptNote = outcome.keptChanges.length > 0
+					? `；changes 里还有 ${outcome.keptChanges.length} 个更新包没动：`
+						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}`
+						+ '（不需要就去「管理同步包…」里删）'
+					: '';
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
 					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
 					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）→ ${outcome.file}`
 					+ (outcome.superseded.length > 0
 						? `；顺手清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
-						: ''),
+						: '')
+					+ keptNote,
 				);
 				// 更新包攒大了 → 关掉本窗后问"要不要换基准"
 				if (outcome.cumulative) resetCandidate = outcome;
