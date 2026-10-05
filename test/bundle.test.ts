@@ -1609,7 +1609,7 @@ try {
 } catch (error) {
 	mismatchError = error instanceof Error ? error.message : String(error);
 }
-checkTrue('基准对不上的更新包被拒绝', mismatchError.includes('基准对不上'), mismatchError || '（没拒绝）');
+checkTrue('基准对不上的更新包被拒绝（不猜着合）', mismatchError.includes('接不上'), mismatchError || '（没拒绝）');
 checkTrue(
 	'拒绝时说清两条出路（按我的指纹重导 / 导一份完整副本）',
 	mismatchError.includes('完整副本') && mismatchError.includes('基准指纹'),
