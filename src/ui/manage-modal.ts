@@ -1,13 +1,11 @@
-import { Modal, Notice, Setting } from 'obsidian';
+import { Modal, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { bundleBaseDir } from '../bundle/paths';
-import { describeLocalChanges, exportBundle } from '../bundle/export';
-import { describeExportRange } from '../bundle/log';
+import { describeLocalChanges } from '../bundle/export';
 import { loadState } from '../sync/state';
 import { scanTree } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
-import { formatBytes, formatDuration } from '../utils/format';
 import { ApplyBundleModal } from './bundle-modal';
 import { BundleListView } from './bundle-list';
 import { BundleLogModal } from './log-modal';
@@ -23,11 +21,12 @@ import { openFolderInExplorer } from './reveal';
  * （比如攒了七八个包要清一清、上个月那个包到底放哪儿了）；
  * 但两边**共用同一个列表组件**，不会出现"这边能删、那边不能"的错位。
  *
- * 这里还有两件**跟"基准"有关**的事（用户提的两条需求都落在这儿）：
- * 1. **以本机现状立一份新完整包**（顶上的按钮）：多留一个还原点，
- *    把现状固化成分新完整包当基准，之后的更新包就从零开始攒；这份完整包同时也是备份；
- * 2. **把某一份完整副本设为基准**（每行那个按钮）：拿到别人发来的完整副本时用它 ——
- *    走的是应用那条路（先算报告再动手），本机已有的改动会留在原地成为"相对新基准的改动"。
+ * 这里还剩一件跟"基准点"有关的事：**把某一份完整副本设成本机的基准点**（完整副本那一行的按钮）——
+ * 拿到别人发来的完整副本时用它，走的是应用那条路（先算报告再动手），
+ * 本机已有的改动会留在原地成为"相对新基准点的改动"。
+ *
+ * （0.11 删掉了原来的「立新基准…」按钮：基准点现在**自己往前走**，手动换基准这件事没有了。
+ * 想留一个还原点就走「导出同步包…」勾「完整副本」—— 同一件事，不必两个入口。）
  */
 export class BundleManagerModal extends Modal {
 	private plugin: LocallySavePlugin;
@@ -37,9 +36,6 @@ export class BundleManagerModal extends Modal {
 	private list: BundleListView | null = null;
 	/** 顶上那句"本机现在有多少改动还没发出去" */
 	private positionEl!: HTMLElement;
-	/** 正在跑"立新基准"，防止连点 */
-	private busy = false;
-
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
 		this.plugin = plugin;
@@ -78,14 +74,11 @@ export class BundleManagerModal extends Modal {
 					this.app as unknown as { openWithDefaultApp?: (path: string) => void },
 				)));
 
-		// ------------------------------------------------ 立新基准（要点一的第一件事）
+		// ------------------------------------------------ 本机现在有多少改动还没发出去
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
-			.setName('立新基准')
-			.setDesc('按本机现状导一份新完整副本，并站到它上面（多一个还原点）。仓库文件不动')
-			.addButton(button => button
-				.setButtonText('立新基准…')
-				.onClick(() => { void this.confirmResetBaseline(); }));
+			.setName('想留一个还原点？')
+			.setDesc('用「导出同步包…」勾上「完整副本」：整个仓库写成一份包，你也会站到它上面（仓库文件不动）');
 		this.list = new BundleListView(this.plugin, contentEl, {
 			baseDir: () => this.effectiveDir(),
 			actionLabel: '应用…',
@@ -116,7 +109,7 @@ export class BundleManagerModal extends Modal {
 	/**
 	 * 顶上那句：**本机现在有多少改动是基准里没有的**。
 	 *
-	 * 这句话正是"要不要立新基准"的依据 —— 没有它，用户只能看着更新包一天天变大猜。
+	 * 这句话是"下次留包会装多少"的依据 —— 也就是"我现在站在哪一点上"。
 	 * 还没有基准时如实说"算不出来"，不硬凑一个数。
 	 */
 	private async renderPosition(): Promise<void> {
@@ -129,97 +122,15 @@ export class BundleManagerModal extends Modal {
 			});
 			const changes = describeLocalChanges(state, inventory);
 			if (!changes) {
-				this.positionEl.setText('本机还没有基准（没导过、也没应用过完整副本）：先导一份完整副本，更新包才谈得上基准');
+				this.positionEl.setText('本机还没有基准点（没导过、也没应用过完整副本）：先导一份完整副本，更新包才有起点');
 				return;
 			}
 			this.positionEl.setText(`本机现在：第 ${state.generation} 代`
-				+ `，自基准以来改了 ${changes.changed} 个文件`
+				+ `，自基准点以来改了 ${changes.changed} 个文件`
 				+ `${changes.deleted > 0 ? `、删了 ${changes.deleted} 个` : ''}`
 				+ '（这些就是下次更新包会装的内容）');
 		} catch (error) {
 			this.positionEl.setText(`读不到本机状态：${describe(error)}`);
-		}
-	}
-
-	/**
-	 * 「立新基准」先确认：它**会重写一份完整包**（几百 MB 的仓库就是几百 MB 的写入），
-	 * 而且换基准之后旧更新包会被清掉（新完整包已经含全部内容，留着也没用）。
-	 * 这两件事必须写清楚再动手。
-	 */
-	private async confirmResetBaseline(): Promise<void> {
-		const base = this.effectiveDir();
-		if (!base) {
-			new Notice('先去设置里填「同步包文件夹」', 9000);
-			return;
-		}
-		let note = '';
-		try {
-			const state = await loadState(this.plugin.stateFile());
-			const inventory = await scanTree(this.plugin.vaultRoot(), {
-				exclude: excludePatterns(this.plugin.settings.excludePatterns, this.plugin.configDir()),
-				skipTopLevelDirs: [VAULT_TRASH_DIR],
-			});
-			const changes = describeLocalChanges(state, inventory);
-			note = changes
-				? `现在是第 ${state.generation} 代，自基准以来改了 ${changes.changed} 个文件`
-					+ `${changes.deleted > 0 ? `、删了 ${changes.deleted} 个` : ''}。`
-				: '本机还没有基准，这一份就是第一份。';
-		} catch {
-			note = '';
-		}
-		new ConfirmBaselineModal(this.app, {
-			note: `${note}新完整包会写到 ${base} 的 full 目录，写完本机基准就换成它；`
-				+ '旧更新包会被清掉（新完整包已经含全部内容）。仓库里的文件一个都不动。',
-			onConfirm: () => this.resetBaseline(),
-		}).open();
-	}
-
-	/** 真去导那份新完整包（＝立新基准），跑完刷新列表与顶上那句 */
-	private async resetBaseline(): Promise<void> {
-		if (this.busy) {
-			new Notice('上一次「立新基准」还在跑');
-			return;
-		}
-		this.busy = true;
-		try {
-			const outcome = await exportBundle({
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				vaultName: this.plugin.vaultName(),
-				stateFile: this.plugin.stateFile(),
-				mode: 'full',
-				outDir: this.effectiveDir(),
-				configDir: this.plugin.configDir(),
-				onProgress: (done, total, file) => this.plugin.reportProgress({
-					done,
-					total,
-					path: file,
-					label: '导出中',
-				}),
-			});
-			this.plugin.reportProgress(null);
-			if (!outcome.file) {
-				new Notice(`没能立新基准：${outcome.reason ?? '没有内容可导出'}`, 9000);
-				return;
-			}
-			new Notice(
-				`已立新基准：第 ${outcome.header?.targetGeneration ?? '?'} 代，`
-				+ `${outcome.entryCount} 个文件、${formatBytes(outcome.payloadBytes)}`
-				+ `（${formatDuration(outcome.durationMs)}）${describeExportRange(outcome)}`
-				+ `${outcome.superseded.length > 0 ? `；清掉了 ${outcome.superseded.length} 个被它取代的旧更新包` : ''}`
-				+ ` → ${outcome.file}`,
-				12000,
-			);
-			this.plugin.log.debug(`立新基准完成：${outcome.file}`);
-			await this.list?.refresh();
-			await this.renderPosition();
-		} catch (error) {
-			this.plugin.reportProgress(null);
-			new Notice(`立新基准失败：${describe(error)}`, 9000);
-			this.plugin.log.error('立新基准失败', error);
-		} finally {
-			this.busy = false;
 		}
 	}
 
@@ -231,39 +142,4 @@ export class BundleManagerModal extends Modal {
 
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** 「立新基准」的确认框：把"会写哪个文件、旧更新包会怎样、仓库不动"摊开说清楚 */
-class ConfirmBaselineModal extends Modal {
-	private note: string;
-	private onConfirm: () => void | Promise<void>;
-
-	constructor(app: App, options: { note: string; onConfirm: () => void | Promise<void> }) {
-		super(app);
-		this.note = options.note;
-		this.onConfirm = options.onConfirm;
-	}
-
-	onOpen(): void {
-		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
-		contentEl.createEl('h2', { text: '以本机现状立一份新完整包？' });
-		contentEl.createEl('p', { text: this.note, cls: 'locally-save-hint' });
-		new Setting(contentEl)
-			.addButton(button => button
-				.setButtonText('取消')
-				.onClick(() => this.close()))
-			.addButton(button => button
-				.setButtonText('立新基准')
-				.setCta()
-				.onClick(() => {
-					this.close();
-					void this.onConfirm();
-				}));
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-	}
 }

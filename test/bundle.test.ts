@@ -2257,10 +2257,10 @@ if (hkPast) {
 	check('直接覆盖成包里那一版', hkPlan.report.overwrites, 1);
 }
 
-// 48. **立新基准不许"多占一代"**（用户报的现场）
+// 48. **导一份完整副本不许"多占一代"**（用户报的现场）
 //
 // 场景：本机站在第 1 代基准上，收到并应用了别人「1 → 3」的更新包 ——
-// 内容就是第 3 代，`state.generation` 也到了 3。这时立新基准（把已经掌握的内容固化成基准），
+// 内容就是第 3 代，`state.generation` 也到了 3。这时导一份完整副本（把内容固化成基准点），
 // 它**不该**自称"第 4 代"：内容一代都没往前走。照旧 `+1` 的话，本机导出的更新包会变成
 // 「3 → 4」，对面看着像凭空多一代，应用完也停在 4 上，两边的"第几代"跟内容再也对不上。
 //
@@ -2286,9 +2286,9 @@ check('改了两轮 → 第 3 代', gnState.generation, 3);
 check('基准点跟着导出自动往前走（站到第 3 代那一点）', gnState.bundle?.fullGeneration, 3);
 check('这一点是自己导出来的 → 还没被对方确认', gnState.bundle?.pointConfirmed, false);
 
-// **立新基准**（内容没动）：世代号不推进，基准换成这一份
+// **导完整副本**（内容没动）：世代号不推进，基准点换成这一份
 const gnFull2 = await exportBundle({ ...exportOptions(GN, STATE_GN), outDir: OUT_GN });
-check('立新基准不许占新世代（内容没动）', gnFull2.header?.targetGeneration, 3);
+check('内容没动的完整副本不许占新世代', gnFull2.header?.targetGeneration, 3);
 const gnAfter = await loadState(STATE_GN);
 check('本机世代也不推进', gnAfter.generation, 3);
 check('基准换到第 3 代', gnAfter.bundle?.fullGeneration, 3);
