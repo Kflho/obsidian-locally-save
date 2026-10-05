@@ -201,6 +201,14 @@ npm run lint    # eslint（obsidianmd 插件规则）
 靠 `git checkout` 与重写才救回来）。批量文本处理用 **Node**（默认就是 UTF-8），
 单文件改动用编辑工具。
 
+**测试必须跨平台**（CI 在 ubuntu 上跑，本机是 Windows）：路径一律 `path.join` / `toNative` 拼，
+**别写字面量的 Windows 路径**。踩过一次：`deleteBundles(['Z:\\definitely\\missing.lsave'])` 断言
+`basename` 是 `missing.lsave` —— 在 Linux 上反斜杠不是分隔符，`path.basename` 原样返回整串，
+CI 直接红（本机却全绿）。发版流程里的 `npm test` 就是这道闸。
+
+**提交信息里别带 ASCII 双引号**（用 `「」`）：PowerShell 传参会被拆开，`git commit -m` 会报
+`pathspec ... did not match`；长消息写成文件用 `git commit -F` 最稳。
+
 ## 还没做的事
 
 - [ ] 移动端：目前 `isDesktopOnly: true`（同步到仓库外必须用 fs）
