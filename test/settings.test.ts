@@ -197,6 +197,29 @@ checkTrue(
 	'老字段又冒出来了',
 );
 
+// 6d. 「更新包从哪个状态到哪个状态」：留空 ＝ 最新（默认），其余必须是**基准指纹**
+//      （不是世代号 —— 世代号两台机器会碰号，用户实测按代选会选错那一份完整副本）。
+//      选项是**渲染那一刻**扫包目录算出来的，所以这里只查"至少留着「最新」那一项"。
+check('从哪个状态：留空 ＝ 最新', settingsFrom({ changesFromState: '' }).changesFromState, '');
+check('从哪个状态：基准指纹原样保留', settingsFrom({ changesFromState: '7a22d790635332a0' }).changesFromState, '7a22d790635332a0');
+check('大写也认，统一成小写', settingsFrom({ changesToState: '7A22D790635332A0' }).changesToState, '7a22d790635332a0');
+check('到哪个状态：乱填 → 回落成"最新"', settingsFrom({ changesToState: 'abc' }).changesToState, '');
+check(
+	'位数不对、带别的字符都回落',
+	['32', '7a22d790635332a', '7a22d790635332a0ff', ' 7a22d790635332ag'].map(value =>
+		settingsFrom({ changesToState: value }).changesToState),
+	['', '', '', ''],
+);
+const fromOptions = byKey(definitions, 'changesFromState')?.control?.options ?? {};
+const toOptions = byKey(definitions, 'changesToState')?.control?.options ?? {};
+checkTrue('「从哪个状态」至少有「最新」那一项', '' in fromOptions, JSON.stringify(fromOptions));
+checkTrue('「到哪个状态」至少有「最新」那一项', '' in toOptions, JSON.stringify(toOptions));
+checkTrue(
+	'两项的"最新"文案不一样（一个是"最新那份完整副本"，一个是"当前仓库"）',
+	fromOptions[''] !== toOptions[''],
+	`${fromOptions['']} / ${toOptions['']}`,
+);
+
 // 7. 面板结构：按"用户要干什么"分页，页内同类的事挨在一起
 const pages = tab.getSettingDefinitions() as unknown as AnyDefinition[];
 check("顶层都是页面（按功能分页，不平铺一堆组）",

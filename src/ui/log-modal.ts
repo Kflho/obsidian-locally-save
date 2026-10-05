@@ -27,14 +27,8 @@ export class BundleLogModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '同步包更新记录' });
 		contentEl.createEl('p', {
-			text: '每次导出 / 应用同步包都记一笔，最近的在上。基准（完整副本）换了会单独标出来，'
-				+ '应用别人发来的包还会写明来自哪个仓库。',
-			cls: 'locally-save-hint',
-		});
-		contentEl.createEl('p', {
-			text: '**两边是不是一样的内容，看「状态」这个编号**：两台机器日志里最后一条编号相同 '
-				+ '＝ 文件内容一致。它记的是上次导出 / 应用那一刻 —— 之后又改了文件，要等下一次'
-				+ '导出 / 应用才刷新。（「第 N 代」只是节奏号：两台机器各自 +1 会碰号，别拿它比内容。）',
+			text: '每次导出 / 应用记一笔，最近的在上。**两台机器最后一条的「状态」相同 ＝ 内容一致**'
+				+ '（「第 N 代」只是各自的节奏号，会碰号，别拿它比内容）。',
 			cls: 'locally-save-hint',
 		});
 

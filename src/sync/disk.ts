@@ -248,6 +248,21 @@ export async function readJsonFile<T>(absPath: string): Promise<T | null> {
 	}
 }
 
+/**
+ * 同步版 `readJsonFile`：**只给设置面板那类"同步渲染"的地方用**。
+ *
+ * 设置面板（Obsidian 1.13 的声明式定义）是同步渲染的，等不了 `await`；
+ * 而"更新包从哪个状态到哪个状态"的选项要列出本地那几份完整包 —— 得先知道
+ * 状态文件里的血脉与基准世代，只能同步读一次。读的还是同一个文件、同样容错。
+ */
+export function readJsonFileSync<T>(absPath: string): T | null {
+	try {
+		return JSON.parse(fs.readFileSync(absPath, 'utf8')) as T;
+	} catch {
+		return null;
+	}
+}
+
 /** 先写临时文件再改名：断电也不会留下半截的状态文件 */
 export async function writeJsonAtomic(absPath: string, data: unknown): Promise<void> {
 	await ensureDir(path.dirname(absPath));
@@ -281,6 +296,26 @@ export async function listFiles(absDir: string): Promise<{ name: string; size: n
 		for (const entry of entries) {
 			if (!entry.isFile()) continue;
 			const stat = await fs.promises.stat(path.join(absDir, entry.name));
+			out.push({ name: entry.name, size: stat.size, mtime: stat.mtimeMs });
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * 同步版 `listFiles`：设置面板要**当场**把本地那几份完整包列成下拉选项。
+ *
+ * 只在包目录上用（那几个目录里文件数很少），所以同步读一次的开销可以忽略；
+ * 读不到（目录不存在、没权限）照样返回空 —— 选项里就只剩「最新」那一项。
+ */
+export function listFilesSync(absDir: string): { name: string; size: number; mtime: number }[] {
+	try {
+		const out: { name: string; size: number; mtime: number }[] = [];
+		for (const entry of fs.readdirSync(absDir, { withFileTypes: true })) {
+			if (!entry.isFile()) continue;
+			const stat = fs.statSync(path.join(absDir, entry.name));
 			out.push({ name: entry.name, size: stat.size, mtime: stat.mtimeMs });
 		}
 		return out;

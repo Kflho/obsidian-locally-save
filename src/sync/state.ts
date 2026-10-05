@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readJsonFile, writeJsonAtomic } from './disk';
+import { readJsonFile, readJsonFileSync, writeJsonAtomic } from './disk';
 import type { FileRecord } from './types';
 
 /**
@@ -220,6 +220,13 @@ export interface BundleLogEntry {
 	deleted: number;
 	/** 这一次导出 / 应用之后，我这边的状态编号（见 `sync/state-id.ts`）：两台机器的日志一比就知道同不同步 */
 	stateId?: string;
+	/**
+	 * 这是一份**差量包**：从第 base 代**送到第 target 代那一刻**（而不是"到我现在的仓库"）。
+	 *
+	 * 导它的时候我这边什么都不推进（内容取自终点那份完整包），所以这一条里的 `stateId`
+	 * 记的是**终点那一刻**的状态编号 —— 界面上要写明白，不然用户会以为"我现在就是这个状态"。
+	 */
+	checkpoint?: boolean;
 }
 
 export function emptyState(): PluginState {
@@ -252,7 +259,20 @@ function normalizeStateId(raw: StateIdRecord | null | undefined): StateIdRecord 
 }
 
 export async function loadState(absPath: string): Promise<PluginState> {
-	const raw = await readJsonFile<Partial<PluginState>>(absPath);
+	return normalizeState(await readJsonFile<Partial<PluginState>>(absPath));
+}
+
+/**
+ * 同步读状态：**只给设置面板那类同步渲染的地方用**（"更新包从哪个状态到哪个状态"
+ * 的选项要当场列出来，等不了 await）。语义与 `loadState` 完全一样 —— 共用同一套收敛，
+ * 所以手改坏的状态文件两条路读出来也一样。
+ */
+export function loadStateSync(absPath: string): PluginState {
+	return normalizeState(readJsonFileSync<Partial<PluginState>>(absPath));
+}
+
+/** 读到的原始 JSON → 一份完整的状态（缺字段补默认、脏字段丢弃） */
+function normalizeState(raw: Partial<PluginState> | null): PluginState {
 	if (!raw || raw.version !== 1) return emptyState();
 	return {
 		version: 1,

@@ -10,11 +10,12 @@ import path from 'node:path';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
-import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeLogEntry, describeStateId } from '../src/bundle/log';
+import { anchorOptions, listFullAnchors } from '../src/bundle/anchor';
+import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeExportRange, describeLogEntry, describeStateId } from '../src/bundle/log';
 import type { BundleLogEntry } from '../src/sync/state';
 import { exportBundle, planBundleExport, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
-import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
+import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, readEntry, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import {
 	bundleTrashRoot,
@@ -172,7 +173,7 @@ check('容器格式标记', info.header.format, 'locally-save-bundle');
 check('包类型', info.header.mode, 'full');
 check('包里没有删除清单', info.header.deleted.length, 0);
 check('负载校验和一致', await verifyBundle(FILE_FULL, info), true);
-check('包文件名带仓库名与模式', path.basename(FILE_FULL).includes('我的笔记-full'), true);
+check('包文件名带仓库名与模式（完整 / 更新，见 28b 那组断言）', path.basename(FILE_FULL).includes('我的笔记-完整'), true);
 
 // 2. 应用到 B（模拟另一台机器）
 let plan = await planBundleApply(applyOptions(B, STATE_B, FILE_FULL));
@@ -910,18 +911,65 @@ check('同一次导出的更新包不会被完整包清掉', fs.existsSync(aaC3.
 check('但更早的更新包被完整包取代了', aaC3.superseded, [path.basename(aaC2.file as string)]);
 check('这次完整包没删东西（该删的上一轮已删）', aaF2.superseded, []);
 
-// 换基准之后再导更新包：之前的那些（属于老基准）也不留 —— changes 里永远只有一个
+// 换基准之后再导更新包：**不同基准的各留一份** —— 新版那份是给"站在新基准上"的机器用的，
+// 站在老基准上的机器收它只能逐文件合并（"指定起点"这个功能就是为这件事加的）。
+// 同基准的旧包照样被取代（下面那条）。
 write(AA, 'e.md', 'E1');
 const aaC4 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
-check('新基准下的更新包只剩它一个', fs.readdirSync(changesDir), [path.basename(aaC4.file as string)]);
+check(
+	'换了基准：新旧两份更新包并存（各有各的接收方）',
+	fs.readdirSync(changesDir).sort(),
+	[path.basename(aaC3.file as string), path.basename(aaC4.file as string)].sort(),
+);
+check(
+	'没删掉的那份要说清为什么',
+	aaC4.keptChanges.map(item => item.why),
+	['基于第 1 代，跟这个包的基准不是同一份（各有各的接收方）'],
+);
 
-// 清理是**一律**做的（以前是个开关，现在删了）：再导一个更新包，上一个照样被取代
+// 清理是**一律**做的（以前是个开关，现在删了）：同基准的上一个照样被取代
 write(AA, 'f.md', 'F1');
 const aaC5 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
-check('导新的更新包 → 上一个被取代清掉', aaC5.superseded, [path.basename(aaC4.file as string)]);
-check('于是 changes 里始终只有一个更新包', fs.readdirSync(changesDir), [path.basename(aaC5.file as string)]);
+check('导新的更新包 → 同基准的上一个被取代清掉', aaC5.superseded, [path.basename(aaC4.file as string)]);
+check(
+	'于是 changes 里每个基准各留一份（老那份给还站在老基准上的机器）',
+	fs.readdirSync(changesDir).sort(),
+	[path.basename(aaC3.file as string), path.basename(aaC5.file as string)].sort(),
+);
 
-// 28. 一次导两种的顺序：**先完整副本、后更新包**
+// 28b. 文件名要**一眼看得懂**：哪种包 + 第几代到第几代 + 目标状态（用户提的："包起名太费解"）
+check('完整包文件名：完整 + 第几代 + 目标状态', path.basename(FILE_FULL).includes('我的笔记-完整-1代-状态'), true);
+check(
+	'文件名里的状态编号就是包头部那个（接收方该落到的状态）',
+	path.basename(FILE_FULL).includes(info.header.stateId?.id ?? '没有编号'),
+	true,
+);
+check('更新包文件名：更新 + 从第几代到第几代', path.basename(FILE_CHANGES).includes('我的笔记-更新-1代到2代-状态'), true);
+check(
+	'更新包文件名里的状态编号也是头部那个',
+	path.basename(FILE_CHANGES).includes(changed.header?.stateId?.id ?? '没有编号'),
+	true,
+);
+check(
+	'文件名以包 ID 前几位收尾（同秒连导两个不会互相覆盖），不再带时间戳',
+	/-\d+代(到\d+代)?-状态[0-9a-f]{16}-[0-9a-f]{6}\.lsave$/.test(path.basename(FILE_FULL)),
+	true,
+);
+check('名字里没有那串时间戳了', /\d{8}-\d{6}/.test(path.basename(FILE_FULL)), false);
+// 老名字（full / changes）照样认得出类型 —— 老包读不出头部时不该掉进"类型未知"
+const legacyNames = path.join(OUT, 'legacy-names');
+fs.mkdirSync(legacyNames, { recursive: true });
+fs.writeFileSync(path.join(legacyNames, '旧的-full-20260101-000000-cccccc.lsave'), 'nope');
+fs.writeFileSync(path.join(legacyNames, '新的-更新-1代到2代-状态abcdef-20260101-000000-dddddd.lsave'), 'nope');
+const legacyListed = await listBundles(legacyNames);
+check(
+	'读不出头部时按文件名认类型（新老两种写法都认）',
+	legacyListed.map(item => `${item.name.split('-')[0]}:${item.mode}`).sort(),
+	['新的:changes', '旧的:full'],
+);
+fs.rmSync(legacyNames, { recursive: true, force: true });
+
+// 28c. 一次导两种的顺序：**先完整副本、后更新包**
 // 老顺序（先更新、后完整）会演出一幕很怪的戏：先把老更新包当"被取代的"清掉、
 // 再生成一个内容一模一样的更新包，最后完整包又把新的那个取代一遍（用户报过）
 check('两个都勾：先完整副本、后更新包', plannedExportModes({ changes: true, full: true }), ['full', 'changes']);
@@ -1729,6 +1777,218 @@ check(
 	pvRealInfo.header.deleted.map(entry => entry.path).sort(),
 	pvAfterDelete.deleted,
 );
+
+// 47. 「从状态 a 到状态 b」：本地有 a、b 两份完整包时，能导 a→b 的更新包
+//
+// 场景（用户提的）：两台机器都站在第 1 代（都应用过完整包 a），X 这边后来重立了基准
+// （第 2 代那份完整包 b），对方还停在 a 上。按**最新基准**导的更新包对它是"基于一份
+// 它没有的完整副本"（只能逐文件合并）；按 **a 当起点**导才是接着它那份基准的确定性更新。
+// 起点 / 终点都是"本地那几份完整包"，最新（当前仓库）也是一个可选的状态。
+// 用一套**全新的**目录与状态文件：前面那些用例已经占用了 machineX / transfer3 这些路径
+const AB_X = path.join(ROOT, 'machine-ab-x');
+const AB_Y = path.join(ROOT, 'machine-ab-y');
+const AB_Z = path.join(ROOT, 'machine-ab-z');
+const AB_OUT = path.join(ROOT, 'transfer-ab');
+const AB_STATE_X = path.join(ROOT, 'state-ab-x.json');
+const AB_STATE_Y = path.join(ROOT, 'state-ab-y.json');
+const AB_STATE_Z = path.join(ROOT, 'state-ab-z.json');
+for (const dir of [AB_X, AB_Y, AB_Z, AB_OUT]) fs.mkdirSync(dir, { recursive: true });
+const AB_T0 = Date.now();
+
+// a：两台机器共同的起点
+write(AB_X, 'a.md', 'A1', AB_T0);
+write(AB_X, 'b.md', 'B1', AB_T0 + 1000);
+const abFull1 = await exportBundle({ ...exportOptions(AB_X, AB_STATE_X), outDir: AB_OUT });
+const AB_FULL_A = abFull1.file as string;
+check('完整包 a ＝ 第 1 代', abFull1.header?.targetGeneration, 1);
+const abPlanY1 = await planBundleApply(applyOptions(AB_Y, AB_STATE_Y, AB_FULL_A));
+await executeBundlePlan(abPlanY1, applyOptions(AB_Y, AB_STATE_Y, AB_FULL_A));
+check('Y 站在第 1 代上', (await loadState(AB_STATE_Y)).generation, 1);
+
+// b：X 重立基准（第 2 代），Y 没收到
+write(AB_X, 'a.md', 'A2 改长一点', AB_T0 + 60_000);
+write(AB_X, 'b.md', 'B2', AB_T0 + 61_000);
+write(AB_X, 'c.md', 'C1', AB_T0 + 62_000);
+const abFull2 = await exportBundle({ ...exportOptions(AB_X, AB_STATE_X), outDir: AB_OUT });
+const AB_FULL_B = abFull2.file as string;
+check('完整包 b ＝ 第 2 代', abFull2.header?.targetGeneration, 2);
+const abInfoA = await readBundleInfo(AB_FULL_A);
+
+const AB_FINGERPRINT_A = baselineOfBundle(abInfoA.header) as string;
+const AB_FINGERPRINT_B = abFull2.header?.baselineHash as string;
+
+// ① 默认那条路（按最新基准导）对 Y 来说是"基于一份它没有的完整副本"
+const abNaive = await planBundleExport({ ...exportOptions(AB_X, AB_STATE_X, 'changes'), outDir: AB_OUT });
+check('默认起点＝我最新那份完整副本（第 2 代）', abNaive.anchorGeneration, 2);
+check('预览里也带着那份的基准指纹', abNaive.anchorFingerprint, AB_FINGERPRINT_B);
+
+// ② 指定起点 ＝ a（**按基准指纹认，不按世代号**）：对方收到的就是接着自己那份基准的更新
+const abC1 = await exportBundle({
+	...exportOptions(AB_X, AB_STATE_X, 'changes'),
+	outDir: AB_OUT,
+	baseFingerprint: AB_FINGERPRINT_A,
+});
+const abC1Info = await readBundleInfo(abC1.file as string);
+check('起点是 a 那份（第 1 代），不是最新那份', abC1Info.header.baseGeneration, 1);
+check('基准指纹＝a 那份完整副本的（对方一比正好 match）', abC1Info.header.baselineHash, AB_FINGERPRINT_A);
+check('终点还是"最新"：第 3 代', abC1Info.header.targetGeneration, 3);
+check('自 a 以来变过的三个文件都装进来了', abC1Info.header.entries.map(entry => entry.path), ['a.md', 'b.md', 'c.md']);
+check('每个条目都带上"站在 a 上的人手里那一版"', typeof abC1Info.header.entries[0]?.baseSize, 'number');
+check('报告里写清是哪一份完整副本', abC1.anchor, {
+	generation: 1,
+	hash: AB_FINGERPRINT_A,
+	file: AB_FULL_A,
+	name: path.basename(AB_FULL_A),
+	stateId: abInfoA.header.stateId?.id ?? null,
+	checkpoint: false,
+	targetGeneration: 3,
+	targetHash: null,
+});
+check('导出结果那句带上基准指纹', describeExportRange(abC1), `（第 1 代 → 最新 · 基准 ${AB_FINGERPRINT_A}）`);
+
+// ③ Y（还在第 1 代）应用它：快速通道、零冲突，直接追上
+const abPlanY2 = await planBundleApply(applyOptions(AB_Y, AB_STATE_Y, abC1.file as string));
+check('跟这个包同一份完整副本 → 快速通道', abPlanY2.report.mode, 'fast');
+check('基准对得上', abPlanY2.report.baselineMatch, 'match');
+check('一代都不落后', abPlanY2.report.generationGap, 0);
+check('零冲突', abPlanY2.report.conflicts, 0);
+const abResY = await executeBundlePlan(abPlanY2, applyOptions(AB_Y, AB_STATE_Y, abC1.file as string));
+check('内容追上了', [read(AB_Y, 'a.md'), read(AB_Y, 'b.md'), read(AB_Y, 'c.md')], ['A2 改长一点', 'B2', 'C1']);
+check('两边状态编号一致（用户要的那句话）', abResY.stateIdCompare, 'match');
+const abStateY = await loadState(AB_STATE_Y);
+check('Y 的世代跟上了（1 → 3）', abStateY.generation, 3);
+check('但它的基准仍是第 1 代那份（它没收到 b）', abStateY.bundle?.fullGeneration, 1);
+
+// ④ 差量包：从 a **到 b 那一刻**（b ＝ 第 2 代那份完整副本）
+// X 在 b 之后又改了 a.md —— 差量包里必须装 **b 那一刻**的版本，不是现在的
+write(AB_X, 'a.md', 'A3 比 b 那一刻更新', AB_T0 + 120_000);
+const abCheckpoint = await exportBundle({
+	...exportOptions(AB_X, AB_STATE_X, 'changes'),
+	outDir: AB_OUT,
+	baseFingerprint: AB_FINGERPRINT_A,
+	toFingerprint: AB_FINGERPRINT_B,
+});
+const abCpInfo = await readBundleInfo(abCheckpoint.file as string);
+check('差量包的终点是第 2 代', abCpInfo.header.targetGeneration, 2);
+check('差量包带上目的地那份完整副本的指纹', abCpInfo.header.targetBaselineHash, AB_FINGERPRINT_B);
+check(
+	'差量包文件名写明区间与终点状态',
+	path.basename(abCheckpoint.file as string).includes('我的笔记-更新-1代到2代-状态'),
+	true,
+);
+check(
+	'文件名里的状态编号＝终点那一刻的（不是我现在仓库的）',
+	path.basename(abCheckpoint.file as string).includes(abCpInfo.header.stateId?.id ?? '没有编号'),
+	true,
+);
+check(
+	'"到最新"那种包文件名写的是「起点代到终点代」',
+	path.basename(abC1.file as string).includes('我的笔记-更新-1代到3代-状态'),
+	true,
+);
+check('差量包带上**终点那一刻**的状态编号', abCpInfo.header.stateId?.id, (await readBundleInfo(AB_FULL_B)).header.stateId?.id);
+const abEntry = abCpInfo.header.entries.find(entry => entry.path === 'a.md');
+const abBytes = abEntry ? (await readEntry(abCheckpoint.file as string, abCpInfo, abEntry)).toString('utf8') : '';
+check('装的是 b 那一刻的内容，不是"现在的仓库"', abBytes, 'A2 改长一点');
+check('差量包的报告写明"内容到那一代为止"', describeExportRange(abCheckpoint), `（第 1 代 → 第 2 代 · 基准 ${AB_FINGERPRINT_A}）`);
+const abStateX = await loadState(AB_STATE_X);
+check('导差量包不推进本机世代（我还是第 3 代）', abStateX.generation, 3);
+check('也不动本机的基准（仍是第 2 代那份）', abStateX.bundle?.fullGeneration, 2);
+check('差量包记的状态编号是终点那一刻的', abStateX.bundleLog.at(-1)?.stateId, abCpInfo.header.stateId?.id);
+check('差量包会被标出来（界面上不能当成"我现在的状态"）', abStateX.bundleLog.at(-1)?.checkpoint, true);
+
+// 同一份差量包不重复生成（内容由两份完整包决定，重导只是白写一遍）
+const abAgain = await exportBundle({
+	...exportOptions(AB_X, AB_STATE_X, 'changes'),
+	outDir: AB_OUT,
+	baseFingerprint: AB_FINGERPRINT_A,
+	toFingerprint: AB_FINGERPRINT_B,
+});
+check('已经导过 → 不重复生成', abAgain.file, null);
+checkTrue('并说明是因为已经导过了', (abAgain.reason ?? '').includes('已经导过了'), String(abAgain.reason));
+
+// ⑤ Z 也站在第 1 代上：应用差量包 → 正好落在 b 那一刻
+const abPlanZ1 = await planBundleApply(applyOptions(AB_Z, AB_STATE_Z, AB_FULL_A));
+await executeBundlePlan(abPlanZ1, applyOptions(AB_Z, AB_STATE_Z, AB_FULL_A));
+const abPlanZ2 = await planBundleApply(applyOptions(AB_Z, AB_STATE_Z, abCheckpoint.file as string));
+check('站在第 1 代上收差量包：快速通道', abPlanZ2.report.mode, 'fast');
+check('零冲突', abPlanZ2.report.conflicts, 0);
+const abResZ = await executeBundlePlan(abPlanZ2, applyOptions(AB_Z, AB_STATE_Z, abCheckpoint.file as string));
+check('Z 落在 b 那一刻：a.md 是 b 那一版', read(AB_Z, 'a.md'), 'A2 改长一点');
+check('Z 也拿到了 b 那一刻新增的 c.md', read(AB_Z, 'c.md'), 'C1');
+check('Z 的状态编号跟 b 那一刻一致', abResZ.stateIdCompare, 'match');
+check('Z 的世代 ＝ 差量包的终点（2）', (await loadState(AB_STATE_Z)).generation, 2);
+
+// ⑤b 把同一份差量包发给**已经站在 b（终点）上**的机器：不该只报"基准对不上"，
+//     要认出"这个包的目的地就是你的基准"—— 里面没有它缺的东西（用户实测报过这个场景：
+//     把"32 → 36"的包发给一台已经站在第 36 代上的机器，只看到一句"基准对不上"）
+const AB_W = path.join(ROOT, 'machine-ab-w');
+const AB_STATE_W = path.join(ROOT, 'state-ab-w.json');
+fs.mkdirSync(AB_W, { recursive: true });
+const abPlanW1 = await planBundleApply(applyOptions(AB_W, AB_STATE_W, AB_FULL_B));
+await executeBundlePlan(abPlanW1, applyOptions(AB_W, AB_STATE_W, AB_FULL_B));
+const abPlanW2 = await planBundleApply(applyOptions(AB_W, AB_STATE_W, abCheckpoint.file as string));
+check('站在终点上的机器：基准对不上（包从更老的起点算）', abPlanW2.report.baselineMatch, 'mismatch');
+check('但认得出来"这包要送到的地方就是我的基准"', abPlanW2.report.targetIsMine, true);
+check('它要送到的那份指纹＝我的基准', abPlanW2.report.targetBaseline, AB_FINGERPRINT_B);
+check('没有任何要写的动作（东西都齐了）', [abPlanW2.report.adds, abPlanW2.report.overwrites, abPlanW2.report.deletes], [0, 0, 0]);
+check('包里点名的文件全都已经一致', abPlanW2.report.synchronized, abCpInfo.header.entries.length);
+
+// ⑤c 真正的坑：**两代同名**。同一代可以有好几份完整副本（各机器各导一份），
+//     按世代选会挑错那一份 —— 用户实测的"基准对不上"就是这么来的。
+//     认指纹之后，两份都列得出来、也各选得中。
+const AB_TWIN = path.join(ROOT, 'transfer-ab-twin');
+fs.mkdirSync(AB_TWIN, { recursive: true });
+const twinSource = path.join(ROOT, 'twin-source.md');
+fs.writeFileSync(twinSource, 'twin');
+const twinModern = Date.now() + 60_000;
+// 手工造一份"同一条血脉、同一个世代、但内容不同"的完整包（模拟对方自己导的那份）
+const twinFile = path.join(AB_TWIN, 'full', '对方的-full-20260101-000000-eeeeee.lsave');
+await writeBundle(twinFile, {
+	format: BUNDLE_FORMAT,
+	version: BUNDLE_VERSION,
+	bundleId: 'twin-bundle',
+	parentBundleId: null,
+	created: twinModern,
+	mode: 'full',
+	vault: '对方的笔记',
+	lineage: abInfoA.header.lineage,
+	source: { copyId: 'other-copy', generation: 1 },
+	baseGeneration: null,
+	targetGeneration: 1,
+	baselineHash: 'aaaaaaaaaaaaaaaa',
+	stateId: { id: 'bbbbbbbbbbbbbbbb', files: 1, dirs: 0, unverified: 0 },
+	deleted: [],
+	emptyDirs: [],
+}, [{ path: 'twin.md', abs: twinSource, size: 4, mtime: twinModern }]);
+const twinOptions = anchorOptions(
+	await listFullAnchors(AB_TWIN, abInfoA.header.lineage),
+	'from',
+	{ generation: null, hash: null, file: null },
+);
+check('同代的两份完整副本都在选项里（按指纹分得开）', Object.keys(twinOptions).sort(), ['', 'aaaaaaaaaaaaaaaa']);
+checkTrue('选项里带着世代与指纹', (twinOptions['aaaaaaaaaaaaaaaa'] ?? '').includes('第 1 代 · 基准 aaaaaaaaaaaaaaaa'), twinOptions['aaaaaaaaaaaaaaaa'] ?? '');
+
+// ⑥ 指定的状态找不到 → **明确报错**，绝不悄悄换一份（换一份就是把内容完全不同的包发出去）
+let abMissingFrom = '';
+try {
+	await exportBundle({
+		...exportOptions(AB_X, AB_STATE_X, 'changes'),
+		outDir: AB_OUT,
+		baseFingerprint: 'ffffffffffffffff',
+	});
+} catch (error) {
+	abMissingFrom = error instanceof Error ? error.message : String(error);
+}
+checkTrue('找不到起点时报错并说明', abMissingFrom.includes('ffffffffffffffff'), abMissingFrom);
+checkTrue('报错里列出"现在有哪些指纹"', abMissingFrom.includes(AB_FINGERPRINT_A), abMissingFrom);
+const abMissingPreview = await planBundleExport({
+	...exportOptions(AB_X, AB_STATE_X, 'changes'),
+	outDir: AB_OUT,
+	toFingerprint: 'ffffffffffffffff',
+});
+checkTrue('预览不抛错，把原因写在界面上', (abMissingPreview.problem ?? '').includes('ffffffffffffffff'), String(abMissingPreview.problem));
+check('预览里没有状态', [abMissingPreview.anchorGeneration, abMissingPreview.targetGeneration], [null, null]);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

@@ -1,5 +1,6 @@
 import { formatTime } from '../utils/format';
 import type { BundleLogEntry, PluginState, StateIdInfo } from '../sync/state';
+import type { ExportOutcome } from './export';
 
 /**
  * 同步包更新记录：**像 git log 那样，把"收发过哪些包"摊开**。
@@ -32,6 +33,9 @@ export function describeLogEntry(entry: BundleLogEntry): string {
 			? `第 ${entry.target} 代 · 立基准`
 			: `第 ${entry.base ?? '?'} → ${entry.target} 代`,
 	);
+	// 差量包：内容到 target 那一代**为止**，导它的时候我这边什么都没推进 —— 得说清楚，
+	// 不然这一条里的状态编号会被当成"我现在的状态"
+	if (entry.checkpoint) parts.push(`送到第 ${entry.target} 代那一刻的状态`);
 	// 状态编号：两台机器日志里最后一条一比，就知道两边到底同不同步（世代号做不到这件事）
 	if (entry.stateId) parts.push(`状态 ${entry.stateId}`);
 	if (entry.vault) parts.push(`来自「${entry.vault}」`);
@@ -65,6 +69,36 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
 	const scope = [`${info.files} 个文件`, ...(info.dirs > 0 ? [`${info.dirs} 个文件夹`] : [])].join(' · ');
 	return `${info.id}（${scope}`
 		+ `${info.unverified > 0 ? ` · 其中 ${info.unverified} 个没能校验内容` : ''}）`;
+}
+
+/**
+ * 同步包界面上那一行「本机现在站在哪儿」——**世代与状态编号必须一起写**。
+ *
+ * 为什么不能只写世代号：它只是节奏号（每导出一个包 +1，两台机器各自 +1 会碰号），
+ * 回答不了"两边文件一样吗"；状态编号才回答得了。用户专门提过要两个一起看。
+ */
+export function describeLocalState(state: PluginState): string {
+	const bundle = state.bundle;
+	const anchor = bundle?.fullGeneration !== null && bundle?.fullGeneration !== undefined
+		? `基于第 ${bundle.fullGeneration} 代完整副本${bundle.fullFile ? `（${bundle.fullFile}）` : ''}`
+		: '还没有基准（没导过、也没应用过完整副本）';
+	const id = state.stateId ? `状态 ${state.stateId.id}` : '状态编号还没算过（下次导出 / 应用时会有）';
+	return `本机：第 ${state.generation} 代 · ${anchor} · ${id}`;
+}
+
+/**
+ * 一次导出结果里那句"从哪一份到哪一份"（通知与弹窗里用）。
+ *
+ * 差量包要点明**内容到那一刻为止**（它不代表你现在的仓库）；起点一律带上**基准指纹**——
+ * 对方「更新记录」顶上写的就是它，对不上就是"基准对不上"（世代号会碰号，光看代认不出来）。
+ */
+export function describeExportRange(outcome: ExportOutcome): string {
+	const anchor = outcome.anchor;
+	if (!anchor) return '';
+	const base = anchor.hash ? `基准 ${anchor.hash}` : '基准未知';
+	return anchor.checkpoint
+		? `（第 ${anchor.generation} 代 → 第 ${anchor.targetGeneration} 代 · ${base}）`
+		: `（第 ${anchor.generation} 代 → 最新 · ${base}）`;
 }
 
 /**

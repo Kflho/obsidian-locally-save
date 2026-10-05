@@ -1,20 +1,21 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
-import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
+import type { BundleDeletedEntry, BundleEntry, BundleHeader, BundleInfo, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
 import { listingHashOfFiles } from './baseline';
+import { describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
+import type { BundleAnchor } from './anchor';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { fingerprint } from '../sync/hash-cache';
 import { cachedHash, copyRef, loadState, pruneHashes, saveState } from '../sync/state';
-import type { PluginState } from '../sync/state';
+import type { PluginState, StateIdInfo, BundleLogEntry } from '../sync/state';
 import { computeStateId } from '../sync/state-id';
 import type { Inventory, FileRecord } from '../sync/types';
-import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
 import { toNative, dirnameRel } from '../utils/paths';
 import { yieldIfDue, yieldToUi } from '../utils/async';
@@ -45,6 +46,29 @@ export interface ExportOptions {
 	 * 所以改成由调用方明确指定，一次调用导一种，要两种就调两次。
 	 */
 	mode: 'full' | 'changes';
+	/**
+	 * **这次更新包从哪个状态开始**：`null` / 不填 ＝ 我状态里那份最新的（原来的行为）；
+	 * 给一个**基准指纹**（16 位十六进制）＝ 接着**那一份**完整副本往后算。
+	 *
+	 * 为什么给指纹而不是世代号：世代号是每台机器各数各的节奏号，两边的"第 32 代"
+	 * 完全可能是两份不同的完整副本（用户实测踩过：按代选锚，对面报「基准对不上」）。
+	 * 指纹（`bundle/baseline.ts`）才是"这是哪一份东西"的判据 —— 也就是对方
+	 * 「更新记录」顶上那行「基准：第 N 代 · 指纹 xxxx」里那个值。
+	 *
+	 * **找不到那一份时明确报错**，绝不悄悄换一份：包头部记的 `baseGeneration` /
+	 * `baselineHash` 决定接收方怎么比对，偷偷换一份等于骗它。
+	 */
+	baseFingerprint?: string | null;
+	/**
+	 * **这次更新包到哪个状态为止**：`null` / 不填 ＝ 最新（当前仓库）。
+	 *
+	 * 给一个基准指纹 ＝ 送到**那一份完整副本记着的那一刻**：内容取自那份包的负载
+	 * （不是你现在的仓库 —— b 那一刻的版本可能早就被改过了）。于是能导一份
+	 * "从 a 到 b"的差量包：对方站在 a 上，收下就正好等于 b，状态编号当场对得上。
+	 *
+	 * 同样：**找不到就报错**，不悄悄改成"到最新" —— 那会把内容完全不同的包发给对方。
+	 */
+	toFingerprint?: string | null;
 	/** 同步包文件夹；实际会写进它的 `full` / `changes` 子目录 */
 	outDir: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
@@ -90,6 +114,11 @@ export interface ExportOutcome {
 	fileBytes: number;
 	/** 是不是"以完整包为基准累积"的更新包 */
 	cumulative: boolean;
+	/**
+	 * 这个更新包**基于哪一份完整副本**（完整包为 null）。
+	 * 界面上要写出来：光有世代号对不上号，状态编号才认得出是对方手里那一份。
+	 */
+	anchor: ExportAnchor | null;
 	/** 这次顺手删掉了哪些被取代的旧更新包（文件名，已排序） */
 	superseded: string[];
 	/**
@@ -105,9 +134,48 @@ export interface SupersededReport {
 	kept: { name: string; why: string }[];
 }
 
+/** 更新包基于的那份完整副本（界面上把"第几代 + 基准指纹 + 状态编号 + 包名"都写出来） */
+export interface ExportAnchor {
+	/** 起点：从第几代开始 */
+	generation: number;
+	/**
+	 * 起点那份完整副本的**基准指纹** —— 选起点要认的就是它：
+	 * 对方「更新记录」顶上写着「基准：第 N 代 · 指纹 xxxx」，照那个选。
+	 * （世代号两台机器会碰号，只看代可能选到另一份东西 —— 用户实测踩过。）
+	 */
+	hash: string | null;
+	file: string | null;
+	name: string | null;
+	/** 起点那份完整包记的状态编号（旧版本导的包没有 → null） */
+	stateId: string | null;
+	/** 终点到哪儿：`checkpoint` ＝ 某一份完整副本那一刻（不是当前仓库） */
+	checkpoint: boolean;
+	/** 终点世代：接收方应用之后到达的世代 */
+	targetGeneration: number;
+	/** 终点那份完整副本的基准指纹（只有差量包有） */
+	targetHash: string | null;
+}
+
 /** 文件名里不能有的字符换成下划线（仓库名可能含 : / 之类） */
 function safeName(name: string): string {
 	return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'vault';
+}
+
+/**
+ * 这些文件路径涉及到的**所有上级目录**（有文件的目录会随文件写入被顺带建出来，
+ * 所以它们不算"空文件夹"）。差量包按终点那份包的清单算，普通包按当前仓库算。
+ */
+function dirsContainingPaths(paths: Iterable<string>): Set<string> {
+	const covered = new Set<string>();
+	for (const file of paths) {
+		let dir = dirnameRel(file);
+		while (dir) {
+			if (covered.has(dir)) break;
+			covered.add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+	return covered;
 }
 
 /**
@@ -136,12 +204,89 @@ interface BundleWork {
 	inventory: Inventory;
 	/** 上次导出（任何类型）时仓库的样子：每个条目的 `base` —— 接收方最可能就停在这个版本 */
 	previous: Record<string, FileRecord>;
-	/** 上次导出**完整包**时的样子：更新包以它为基准累积；还没立过基准时是 null */
-	anchor: Record<string, FileRecord> | null;
+	/** 这次更新包**从哪个状态**开始（一份完整副本）；还没立过基准时是 null */
+	anchor: BundleAnchor | null;
+	/**
+	 * 这次更新包**到哪个状态为止**：
+	 * - `null` ＝ 最新（当前仓库，含刚改的东西）—— 默认；
+	 * - 有值 ＝ 另一份完整副本：导的是"从起点到那一份"的差量，内容取自那份包的负载。
+	 */
+	target: BundleAnchor | null;
+	/**
+	 * 条目 / 删除项的 `base` 从哪儿取：
+	 * - `anchor`：**这次明确指定了起点**（`options.baseGeneration`）—— 对方就站在那份完整副本上，
+	 *   它手里是这个文件的哪一版，只有那份清单知道（拿"我上次导出的样子"当 base 会把
+	 *   对方正常的旧版本误判成"它也改过"，满屏冲突副本）；
+	 * - `previous`：默认那条路 —— 接收方**最可能**停在我上次导出的那一版上（原行为，不动）。
+	 */
+	baseFrom: 'anchor' | 'previous';
 	/** 自上次完整包以来各文件经历过的中间版本 */
 	history: Record<string, FileRecord[]>;
 	picked: string[];
 	deleted: BundleDeletedEntry[];
+	/**
+	 * 这一份"从 a 到 b"的差量包**已经导过了**（`changes/` 里躺着一份一模一样的）：
+	 * 记下那份包的文件名，调用方据此不重复生成（内容由两份完整包决定，重导只是白写一遍）。
+	 */
+	existing: string | null;
+}
+
+/**
+ * 这次更新包**从哪个状态**开始（**只读**）。
+ *
+ * 默认（没指定）＝ 状态里那份最新的，行为与以前完全一致，一个包都不多读。
+ * 指定了指纹时去**磁盘上**把那份完整包找回来（完整副本是还原点，一直躺在 `full/` 里）；
+ * 找不到就报错 —— 换成"最新那份"会让包头部记错基准，接收方按它比对只会得出错误结论。
+ */
+async function resolveAnchor(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
+	const fromState: BundleAnchor | null = state.bundle?.fullFiles
+		? {
+			generation: state.bundle.fullGeneration ?? state.generation,
+			hash: state.bundle.fullHash ?? null,
+			files: state.bundle.fullFiles,
+			emptyDirs: [],
+			name: state.bundle.fullFile ?? '（状态里记着的那份完整副本，磁盘上已找不到）',
+			file: '',
+			stateId: state.stateId ?? null,
+			mtime: 0,
+		}
+		: null;
+
+	const requested = options.baseFingerprint ?? null;
+	if (requested === null) return fromState;
+	// 要的就是我自己这份基准：直接用状态里的清单（那份包文件被挪走 / 删了也照样能算）
+	if (fromState && fromState.hash === requested) return fromState;
+
+	const anchors = await listFullAnchors(options.outDir, state.lineage);
+	const found = pickAnchor(anchors, requested);
+	if (found) return found;
+
+	throw new Error(
+		`「更新包从哪个状态开始」选的是基准 ${requested}，但在 ${options.outDir} 里没有这一份完整副本。`
+		+ `${describeAnchorList(anchors)}。`
+		+ '先把那份完整副本拷进 full 目录（或从回收站捞回来），'
+		+ '或者把设置里「从哪个状态开始」改回「最新那份完整副本」',
+	);
+}
+
+/**
+ * 这次更新包**到哪个状态**为止（**只读**）。
+ *
+ * `null` ＝ 最新（当前仓库）；给了指纹就得在磁盘上找到那一份完整副本 ——
+ * 找不到同样报错，不能悄悄改成"到最新"：那会把一份**内容完全不同**的包发给对方。
+ */
+async function resolveTarget(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
+	const requested = options.toFingerprint ?? null;
+	if (requested === null) return null;
+	const anchors = await listFullAnchors(options.outDir, state.lineage);
+	const found = pickAnchor(anchors, requested);
+	if (found) return found;
+	throw new Error(
+		`「更新包到哪个状态为止」选的是基准 ${requested}，但在 ${options.outDir} 里没有这一份完整副本。`
+		+ `${describeAnchorList(anchors)}。`
+		+ '先把那份完整副本拷进 full 目录（或从回收站捞回来），'
+		+ '或者把设置里「到哪个状态为止」改回「最新（当前仓库）」',
+	);
 }
 
 /**
@@ -158,14 +303,21 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 
 	/** 上次导出（任何类型）时仓库的样子：用来当每个文件的 base —— 接收方最可能就是这个版本 */
 	const previous = state.bundle?.files ?? {};
-	/** 上次导出**完整包**时的样子：更新包以它为基准累积 */
-	const anchor = state.bundle?.fullFiles ?? null;
+	/** 这次更新包从哪个状态开始（默认就是我状态里最新的那份完整副本） */
+	const anchor = mode === 'changes' ? await resolveAnchor(options, state) : null;
+	/** 这次更新包到哪个状态为止（null ＝ 最新，也就是当前仓库） */
+	const target = mode === 'changes' ? await resolveTarget(options, state) : null;
 	/** 自上次完整包以来各文件经历过的中间版本 */
 	const history = state.bundle?.history ?? {};
+	// 明确指定过起点（＝对着"还站在那份完整副本上"的对方导的）：base 取那份清单里的版本
+	const baseFrom: 'anchor' | 'previous' = options.baseFingerprint !== null && options.baseFingerprint !== undefined
+		? 'anchor'
+		: 'previous';
+	const anchorFiles = anchor?.files ?? null;
 
-	if (mode === 'changes' && !anchor) {
+	if (mode === 'changes' && !anchorFiles) {
 		throw new Error(
-			'还没导出过完整副本：更新包是"以完整包为基准累积"的，没有基准就没法算。'
+			'还没导出过完整副本：更新包是"从某个状态到某个状态"的差量，没有起点就没法算。'
 			+ '请先用「完整副本」导一次（对方也必须先应用它）',
 		);
 	}
@@ -173,31 +325,83 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	// ------------------------------------------------------ 挑出要装进包的文件
 	const picked: string[] = [];
 	const deleted: BundleDeletedEntry[] = [];
+	const pushDeleted = (file: string, base: FileRecord) => {
+		const baseHash = cachedHash(state, file, base);
+		deleted.push({
+			path: file,
+			baseSize: base.size,
+			baseMtime: base.mtime,
+			...(baseHash ? { baseHash } : {}),
+		});
+	};
+
 	if (mode === 'full') {
 		picked.push(...inventory.files.keys());
+	} else if (target) {
+		// 「从 a 到 b」的差量：两边都是**完整清单**，直接比两份清单 ——
+		// 跟当前仓库没关系（b 那一刻的内容可能早就被改过了，它只存在于 b 那份包里）。
+		for (const [file, atTarget] of Object.entries(target.files)) {
+			const atAnchor = anchorFiles?.[file];
+			if (!atAnchor || !sameRecord(atTarget, atAnchor, DEFAULT_MTIME_TOLERANCE_MS)) picked.push(file);
+		}
+		for (const [file, atAnchor] of Object.entries(anchorFiles ?? {})) {
+			if (target.files[file]) continue;
+			// 到 b 为止它已经不在了 → 点名删除；站在 a 上的接收方手里就是 a 那一版
+			pushDeleted(file, atAnchor);
+		}
 	} else {
-		// 成员：自**完整包**以来变过的（累积）—— 这样接收方永远只需要应用最新的那一个，
-		// 漏掉中间几个也不会少内容
+		// 成员：自**起点那份完整包**以来变过的（累积）—— 这样接收方永远只需要应用最新的那一个，
+		// 漏掉中间几个也不会少内容。指定了老起点时，"变过"是相对那份老清单算的，
+		// 于是这一份包就把中间那几代的内容一起带上了（对方不必先要一份完整副本）。
 		for (const [file, record] of inventory.files) {
-			const atAnchor = anchor?.[file];
+			const atAnchor = anchorFiles?.[file];
 			if (!atAnchor || !sameRecord(record, atAnchor, DEFAULT_MTIME_TOLERANCE_MS)) picked.push(file);
 		}
-		// 删除清单同理：自完整包以来"没了"的文件
-		for (const [file, atAnchor] of Object.entries(anchor ?? {})) {
+		// 删除清单同理：自起点以来"没了"的文件
+		for (const [file, atAnchor] of Object.entries(anchorFiles ?? {})) {
 			if (inventory.files.has(file)) continue;
-			// base 用上次导出的记录（更贴近接收方手里的版本），没有就用完整包时的
-			const base = previous[file] ?? atAnchor;
-			const baseHash = cachedHash(state, file, base);
-			deleted.push({
-				path: file,
-				baseSize: base.size,
-				baseMtime: base.mtime,
-				...(baseHash ? { baseHash } : {}),
-			});
+			// base：站在起点的接收方手里就是起点那一版；默认那条路仍用"上次导出时的样子"
+			// （更贴近接收方手里的版本），没有就用完整包时的
+			pushDeleted(file, baseFrom === 'anchor' ? atAnchor : (previous[file] ?? atAnchor));
 		}
 	}
 	picked.sort();
-	return { state, inventory, previous, anchor, history, picked, deleted };
+
+	// 「从 a 到 b」的包，内容由**两份完整包**决定，重导只会写出一个一模一样的文件 ——
+	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）
+	const existing = target ? await findExistingCheckpoint(options, state, anchor, target) : null;
+
+	return { state, inventory, previous, anchor, target, baseFrom, history, picked, deleted, existing };
+}
+
+/**
+ * 已经导过这一份"从 a 到 b"的包了吗：`changes/` 里有没有一份**同一个起点、同一个终点、
+ * 同一份终点内容**的更新包（终点那份完整副本被重导过 → 状态编号变了 → 不算同一份）。
+ *
+ * 为什么靠"翻目录"而不是记在状态里：状态文件每轮同步都要读写，能少一个字段就少一个；
+ * 而包就在手边，条件完全可以从它自己身上看出来。删掉那个包就能重新导一份。
+ */
+async function findExistingCheckpoint(
+	options: ExportOptions,
+	state: PluginState,
+	anchor: BundleAnchor | null,
+	target: BundleAnchor,
+): Promise<string | null> {
+	const dir = bundleDirForMode(options.outDir, 'changes');
+	for (const item of await listFiles(dir)) {
+		if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
+		try {
+			const header = (await readBundleInfo(path.join(dir, item.name))).header;
+			if (header.mode !== 'changes' || header.lineage !== state.lineage) continue;
+			if (header.baseGeneration !== (anchor?.generation ?? null)) continue;
+			if (header.targetGeneration !== target.generation) continue;
+			if ((header.stateId?.id ?? null) !== (target.stateId?.id ?? null)) continue;
+			return item.name;
+		} catch {
+			// 读不出头部：不是我们的包，跳过
+		}
+	}
+	return null;
 }
 
 /** 「导出预览」要看的东西：这次会装哪些文件、点名删哪些、大概多大 */
@@ -212,6 +416,15 @@ export interface BundleExportPreview {
 	deleted: string[];
 	/** 更新包基于的那份完整副本是第几代；null ＝ 还没立过基准 */
 	anchorGeneration: number | null;
+	/** 那份完整副本的**基准指纹** —— 选起点认的就是它（跟对方「更新记录」里那个对得上） */
+	anchorFingerprint: string | null;
+	/** 那份完整副本的文件名（界面上对得上号） */
+	anchorName: string | null;
+	/** 终点：null ＝ 最新（当前仓库）；有值 ＝ 送到那份完整副本那一刻（差量包） */
+	targetGeneration: number | null;
+	targetName: string | null;
+	/** 这一份"从 a 到 b"的包已经导过了（同名文件还在）：不会重复生成 */
+	existing: string | null;
 	/** 算不出来时的原因（例如"还没导过完整副本"）：预览照样打开，把原因写在界面上 */
 	problem?: string;
 }
@@ -226,7 +439,9 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 	try {
 		const work = await prepareBundle(options, options.mode);
 		let bytes = 0;
-		for (const file of work.picked) bytes += work.inventory.files.get(file)?.size ?? 0;
+		for (const file of work.picked) {
+			bytes += work.target ? (work.target.files[file]?.size ?? 0) : (work.inventory.files.get(file)?.size ?? 0);
+		}
 		return {
 			mode: options.mode,
 			fileCount: work.picked.length,
@@ -234,7 +449,12 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			bytes,
 			files: work.picked,
 			deleted: work.deleted.map(item => item.path),
-			anchorGeneration: work.state.bundle?.fullGeneration ?? null,
+			anchorGeneration: work.anchor?.generation ?? null,
+			anchorFingerprint: work.anchor?.hash ?? null,
+			anchorName: work.anchor?.name ?? null,
+			targetGeneration: work.target?.generation ?? null,
+			targetName: work.target?.name ?? null,
+			existing: work.existing,
 		};
 	} catch (error) {
 		return {
@@ -245,6 +465,11 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			files: [],
 			deleted: [],
 			anchorGeneration: null,
+			anchorFingerprint: null,
+			anchorName: null,
+			targetGeneration: null,
+			targetName: null,
+			existing: null,
 			problem: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -254,26 +479,68 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const started = Date.now();
 	const { mode } = options;
 	const work = await prepareBundle(options, mode);
-	const { state, inventory, previous, anchor, history, picked, deleted } = work;
+	const { state, inventory, previous, anchor, target, baseFrom, history, picked, deleted, existing } = work;
+	/** 终点是一份完整副本（差量包）：内容取自那份包，结束时到达它的世代 */
+	const checkpoint = target !== null;
+	const targetGeneration = checkpoint ? (target?.generation ?? state.generation + 1) : state.generation + 1;
+	/** 报告里那段"从第几代 · 状态 · 到第几代"（完整包没有基准） */
+	const anchorReport: ExportAnchor | null = mode === 'changes' && anchor
+		? {
+			generation: anchor.generation,
+			hash: anchor.hash,
+			file: anchor.file || null,
+			name: anchor.name,
+			stateId: anchor.stateId?.id ?? null,
+			checkpoint,
+			targetGeneration,
+			targetHash: checkpoint ? (target?.hash ?? null) : null,
+		}
+		: null;
+
+	/** 没写包的那几种情况共用一份结果（省得每处抄一遍字段） */
+	const emptyOutcome = (reason: string): ExportOutcome => ({
+		file: null,
+		reason,
+		entryCount: 0,
+		deletedCount: 0,
+		dirCount: 0,
+		emptyDirCount: 0,
+		payloadBytes: 0,
+		durationMs: Date.now() - started,
+		header: null,
+		parentBundleId: state.lastExportedBundleId,
+		cumulative: true,
+		anchor: anchorReport,
+		fileBytes: 0,
+		superseded: [],
+		keptChanges: [],
+	});
+
+	if (mode === 'changes' && existing) {
+		// 差量包的内容由**两份完整包**决定，重导只会写出一模一样的文件 —— 直说，别写
+		options.log.debug(`更新包：第 ${anchor?.generation} → ${target?.generation} 代的差量包已经导过了（${existing}）`);
+		return emptyOutcome(
+			`这一份「第 ${anchor?.generation} → ${target?.generation} 代」的差量包已经导过了（${existing}），`
+			+ '内容一模一样，没有重复生成；删掉那个包就能重导',
+		);
+	}
 
 	if (mode === 'changes' && picked.length === 0 && deleted.length === 0) {
-		options.log.debug('更新包：自上次完整包以来没有任何变化');
-		return {
-			file: null,
-			reason: '自上次完整副本以来没有任何变化，不需要导出',
-			entryCount: 0,
-			deletedCount: 0,
-			dirCount: 0,
-			emptyDirCount: 0,
-			payloadBytes: 0,
-			durationMs: Date.now() - started,
-			header: null,
-			parentBundleId: state.lastExportedBundleId,
-			cumulative: true,
-			fileBytes: 0,
-			superseded: [],
-			keptChanges: [],
-		};
+		options.log.debug('更新包：起点与终点之间没有任何变化');
+		return emptyOutcome(checkpoint
+			? `第 ${anchor?.generation} 代与第 ${target?.generation} 代之间没有任何变化，不需要导出`
+			: `自第 ${anchor?.generation ?? '?'} 代完整副本以来没有任何变化，不需要导出`);
+	}
+
+	/**
+	 * 差量包（终点是一份完整副本）：每个文件的内容**从那份包的负载里取**。
+	 * 读一次它的头部与尾部拿到负载起点，再按条目的 offset 逐段搬。
+	 */
+	let checkpointInfo: BundleInfo | null = null;
+	let checkpointEntries: Map<string, BundleEntry> | null = null;
+	if (checkpoint && target) {
+		checkpointInfo = await readBundleInfo(target.file);
+		checkpointEntries = new Map(checkpointInfo.header.entries.map(entry => [entry.path, entry]));
 	}
 
 	// ------------------------------------------------------ 组装源文件清单
@@ -292,28 +559,49 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	await yieldToUi();
 	let lastYieldAt = Date.now();
 	for (const file of picked) {
-		const record = inventory.files.get(file);
-		if (!record) continue;
 		// 这一步（算指纹）不报进度：数字只认"打进包里几个文件"，见 writeBundle 那边的回调。
 		// 循环本身是纯 CPU 的（命中缓存时一个 I/O 都没有），按时间让一帧，界面别僵住。
 		lastYieldAt = await yieldIfDue(lastYieldAt);
 
-		const hash = await fingerprint(options.vaultRoot, state, file, record, true);
-		// base：上次导出时的版本（按顺序应用的人正好停在这儿）
-		const base = previous[file];
+		// base：**站在起点的接收方**手里是这一版。默认那条路取"我上次导出时的样子"
+		// （接收方最可能停在那儿）；明确指定了起点时只能取那份清单里的版本 ——
+		// 拿我上次导出的（更新的）那一版当 base，会把对方正常的旧版本误判成"它也改过"。
+		const base = baseFrom === 'anchor' ? anchor?.files[file] : previous[file];
 		const baseHash = base ? cachedHash(state, file, base) : null;
 		// 中间版本：更早的那些（跳过包的人停在其中一个）
 		const carried = nextHistory[file] ?? [];
+		const baseFields = {
+			...(mode === 'changes' && base ? { baseSize: base.size, baseMtime: base.mtime } : {}),
+			...(mode === 'changes' && baseHash ? { baseHash } : {}),
+			...(mode === 'changes' && carried.length > 0 ? { history: carried.map(item => ({ ...item })) } : {}),
+		};
 
+		if (checkpoint) {
+			const entry = checkpointEntries?.get(file);
+			if (!entry || !checkpointInfo) continue;
+			sources.push({
+				path: file,
+				// 内容不从仓库读：a→b 的包里装的是 **b 那一刻**的字节
+				abs: '',
+				from: { file: target?.file ?? '', offset: checkpointInfo.payloadOffset + entry.offset },
+				size: entry.size,
+				mtime: entry.mtime,
+				...(entry.hash ? { hash: entry.hash } : {}),
+				...baseFields,
+			});
+			continue;
+		}
+
+		const record = inventory.files.get(file);
+		if (!record) continue;
+		const hash = await fingerprint(options.vaultRoot, state, file, record, true);
 		sources.push({
 			path: file,
 			abs: toNative(options.vaultRoot, file),
 			size: record.size,
 			mtime: record.mtime,
 			...(hash ? { hash } : {}),
-			...(mode === 'changes' && base ? { baseSize: base.size, baseMtime: base.mtime } : {}),
-			...(mode === 'changes' && baseHash ? { baseHash } : {}),
-			...(mode === 'changes' && carried.length > 0 ? { history: carried.map(item => ({ ...item })) } : {}),
+			...baseFields,
 		});
 
 		// 这一版导出去之后，它就成了"以前的版本"，记进历史供下一个包使用
@@ -324,50 +612,82 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 
 	const now = Date.now();
 	const bundleId = randomUUID();
-	const targetGeneration = state.generation + 1;
-	// 空目录：有文件的目录会随文件写入被顺带建出来，**空文件夹不记就永远传不过去**
-	const covered = new Set<string>();
-	for (const file of inventory.files.keys()) {
-		let dir = dirnameRel(file);
-		while (dir) {
-			if (covered.has(dir)) break;
-			covered.add(dir);
-			dir = dirnameRel(dir);
-		}
-	}
-	const emptyDirs = [...inventory.dirs].filter(dir => !covered.has(dir)).sort();
-	// 文件名带上包 ID 的前几位：时间戳只精确到秒，同一秒内连导两个会互相覆盖
-	const file = path.join(
-		bundleDirForMode(options.outDir, mode),
-		`${safeName(options.vaultName)}-${mode === 'full' ? 'full' : 'changes'}-${formatStamp(now)}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
-	);
+	/** 哪些目录"有文件"（它们的上级目录都算）：差量包按终点那份包的清单算 */
+	const covered = dirsContainingPaths(checkpoint ? Object.keys(target?.files ?? {}) : [...inventory.files.keys()]);
+	// 空目录：有文件的目录会随文件写入被顺带建出来，**空文件夹不记就永远传不过去**。
+	// 差量包用的是**终点那份包记着的**空文件夹清单（它那一刻的样子），不是当前仓库的
+	const emptyDirs = checkpoint
+		? [...(target?.emptyDirs ?? [])].sort()
+		: [...inventory.dirs].filter(dir => !covered.has(dir)).sort();
 
 	/**
 	 * 这一份包的**基准指纹**（见 `bundle/baseline.ts`）：
 	 * - 导完整包 ＝ 立一份新基准 → 指纹由它自己的清单算出来（接收方也能重算，不用信任头部）；
-	 * - 导更新包 → 带上"我基于的那份完整副本"的指纹（我手里只有变过的那部分，算不出来）；
-	 *   旧状态文件没有这个令牌（升级上来的）就留空 → 对方判成"说不清"，界面会说明。
+	 * - 导更新包 → 带上"我基于的**那一份**完整副本"的指纹（我手里只有变过的那部分，算不出来）。
+	 *   指定了老基准时带的就是老那份的指纹：站在那份上的接收方一比正好是 `match`。
+	 *   旧状态文件 / 旧包没有这个令牌就留空 → 对方判成"说不清"，界面会说明。
 	 */
 	const freshBaseline = mode === 'full' ? listingHashOfFiles(inventory.files) : null;
-	const baselineHash = mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null);
+	const baselineHash = mode === 'full' ? freshBaseline : (anchor?.hash ?? null);
 
 	/**
-	 * **状态编号**：导出完这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
+	 * **状态编号**：这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
 	 *
 	 * 写进包头部 → 接收方应用完算一个自己的跟它比：相同就是"两边文件内容一致"。
 	 * 世代号做不到这件事（两台各自 +1 会碰号、内容对不上也看不出来），用户提的
 	 * "需要一个编号让用户能确定当前文件状态"就是这个。
 	 *
+	 * **差量包（到某一份完整副本）例外**：它送到的是 b 那一刻，不是我现在的仓库 ——
+	 * 所以直接带上**那份包记着的状态编号**，接收方应用完一比正好是"跟对方完全一致"；
+	 * 我自己的 `state.stateId` 这一刻并没有重算（也不该拿它冒充 b）。
+	 *
 	 * 放在写包**之前**：头部要先写、偏移量提前算好（不回写）。这一步不算进度 ——
 	 * 进度只认"打进包里几个文件"；指纹基本都在缓存里（上面那个循环刚算过变过的那些），
 	 * 冷缓存时才真要读一遍仓库。
 	 */
-	const stateIdInfo = await computeStateId({
-		vaultRoot: options.vaultRoot,
-		state,
-		files: inventory.files,
-		dirs: inventory.dirs,
-	});
+	const stateIdInfo: StateIdInfo | null = checkpoint
+		? (target?.stateId ?? null)
+		: await computeStateId({
+			vaultRoot: options.vaultRoot,
+			state,
+			files: inventory.files,
+			dirs: inventory.dirs,
+		});
+	/** 我自己的状态编号：差量包不重算（它不是我现在的仓库，不该拿它冒充） */
+	const ownStateId = checkpoint ? null : stateIdInfo;
+
+	/**
+	 * 文件名：**一眼能看出这是哪种包、从第几代到第几代、落到哪个状态**。
+	 *
+	 * ```
+	 * 我的笔记-完整-36代-状态3f9a2c1d4e5f6a7b-e34cc7.lsave
+	 * 我的笔记-更新-32代到37代-状态3f9a2c1d4e5f6a7b-5f4807.lsave
+	 * ```
+	 *
+	 * 为什么改成这样：原来的 `xxx-full-20261005-191243-1d15cf.lsave` 只有"哪种包 + 什么时候"，
+	 * 文件夹里攒了几个之后根本认不出谁是谁 —— 得逐个点开看报告才知道它接的是哪一代
+	 * （用户提的："包起名太费解"）。现在：
+	 * - **完整 / 更新**：中文，不用再猜 full / changes；
+	 * - **第几代到第几代**：完整包写它立的基准世代；更新包写「起点代到终点代」——
+	 *   终点就是接收方应用完到达的世代（差量包的终点是它送到的那一刻）；
+	 * - **目标状态**：包头部记的那个状态编号（见 `sync/state-id.ts`）＝ **接收方应用完
+	 *   应该落在哪个状态**。世代号会碰号，状态编号才认得出是不是同一份东西；
+	 *   对不上时打开列表一看便知（列表里每行也写着同一个编号）。
+	 *
+	 * **时间戳去掉了**（用户提的："状态后面那一长串数字没用"）：文件名里本来就只有"什么时候导的"
+	 * 这一条信息，而列表里每一行都有修改时间、更新记录里也写着；一串 15 位数字反而把名字撑长。
+	 * **同秒连导两个靠末尾那 6 位包 ID**（随机，不会撞）—— 这个名字只是给人看的，
+	 * 认包一律读头部，改它不影响任何判断逻辑。
+	 */
+	const generationLabel = mode === 'full'
+		? `${targetGeneration}代`
+		: `${anchor?.generation ?? '?'}代到${targetGeneration}代`;
+	const stateLabel = stateIdInfo?.id ? `状态${stateIdInfo.id}` : '状态未记';
+	const file = path.join(
+		bundleDirForMode(options.outDir, mode),
+		`${safeName(options.vaultName)}-${mode === 'full' ? '完整' : '更新'}-${generationLabel}`
+		+ `-${stateLabel}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
+	);
 
 	const { header } = await writeBundle(
 		file,
@@ -382,12 +702,16 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			lineage: state.lineage,
 			source: copyRef(state),
 			// 完整包免校验（baseGeneration 为 null）。
-			// 更新包说"我以第几代的完整包为基准"：接收方只要**应用过那个完整包**
+			// 更新包说"我从**哪一份**完整副本往后算"：接收方只要**应用过那一份**
 			// （也就是世代 ≥ 基准世代）就能收，不必逐个按顺序应用。
-			baseGeneration: mode === 'changes' ? (state.bundle?.fullGeneration ?? state.generation) : null,
+			// 这个值取的是**这次实际用的起点**（可能在设置里指定了老那份），不是"我最新那份"。
+			baseGeneration: mode === 'changes' ? (anchor?.generation ?? state.generation) : null,
 			targetGeneration,
 			...(baselineHash ? { baselineHash } : {}),
-			stateId: stateIdInfo,
+			// 差量包：把"目的地那份完整副本"的指纹也带上 —— 接收方据此认出
+			// "这个包要送到的地方，正好就是我现在站的那份基准"（那时它其实什么都不缺）
+			...(checkpoint && target?.hash ? { targetBaselineHash: target.hash } : {}),
+			...(stateIdInfo ? { stateId: stateIdInfo } : {}),
 			deleted,
 			emptyDirs,
 		},
@@ -396,42 +720,58 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		(written, _total, writtenPath) => options.onProgress?.(written, progressTotal, writtenPath),
 	);
 
-	// 包写成功了才推进世代与基准
-	state.bundle = {
-		lastExport: now,
-		files: Object.fromEntries(inventory.files),
-		// 导完整包 ＝ 重新立基准：更新包的基准与中间版本记录一起清零
-		// （这正是"包会越滚越大"的节制阀，所以完整包不是可有可无的）
-		fullFiles: mode === 'full' ? Object.fromEntries(inventory.files) : anchor,
-		fullGeneration: mode === 'full' ? targetGeneration : (state.bundle?.fullGeneration ?? null),
-		// 基准令牌：导完整包 ＝ 换一份新基准（指纹换成新的）；导更新包不动它
-		fullHash: mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null),
-		// 界面上要能说清"我站在哪份完整副本上"，所以文件名也记下来
-		fullFile: mode === 'full' ? path.basename(file) : (state.bundle?.fullFile ?? null),
-		history: mode === 'full' ? {} : nextHistory,
-		// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
-		dirs: [...inventory.dirs],
-	};
+	/**
+	 * 包写成功了才推进世代与基准。
+	 *
+	 * **差量包（到某一份完整副本）什么都不推进**：它代表的不是"我现在的仓库"（内容是 b 那一刻的），
+	 * 所以我这边没有"导出过一次当前状态"可言 —— 世代不动、基准不动、状态编号不动、
+	 * 欠对方的那笔回传也不结清（我这半的最新改动它并没有带上）。
+	 */
+	if (!checkpoint) {
+		state.bundle = {
+			lastExport: now,
+			files: Object.fromEntries(inventory.files),
+			// 导完整包 ＝ 重新立基准：更新包的基准与中间版本记录一起清零
+			// （这正是"包会越滚越大"的节制阀，所以完整包不是可有可无的）
+			//
+			// **更新包不动我自己的基准**：设置里指定了起点，那是"这次对着谁导"，不是"我站在哪"。
+			// 我自己的基准仍然是我最新那份完整副本（`fullFiles` / `fullGeneration` / `fullHash` 原样）。
+			fullFiles: mode === 'full' ? Object.fromEntries(inventory.files) : (state.bundle?.fullFiles ?? null),
+			fullGeneration: mode === 'full' ? targetGeneration : (state.bundle?.fullGeneration ?? null),
+			// 基准令牌：导完整包 ＝ 换一份新基准（指纹换成新的）；导更新包不动它
+			fullHash: mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null),
+			// 界面上要能说清"我站在哪份完整副本上"，所以文件名也记下来
+			fullFile: mode === 'full' ? path.basename(file) : (state.bundle?.fullFile ?? null),
+			history: mode === 'full' ? {} : nextHistory,
+			// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
+			dirs: [...inventory.dirs],
+		};
+		state.generation = targetGeneration;
+		// 该发的都发出去了：欠对方的那笔回传结清（见 state.pendingReturn）
+		state.pendingReturn = null;
+		// 我现在的状态编号（更新记录顶部与每条都显示它；对方应用完会算一个跟它比）
+		if (ownStateId) state.stateId = { ...ownStateId, at: now };
+	}
 	state.lastExportedBundleId = bundleId;
-	state.generation = targetGeneration;
 	pruneHashes(state, new Set(inventory.files.keys()));
-	// 该发的都发出去了：欠对方的那笔回传结清（见 state.pendingReturn）
-	state.pendingReturn = null;
-	// 我现在的状态编号（更新记录顶部与每条都显示它；对方应用完会算一个跟它比）
-	state.stateId = { ...stateIdInfo, at: now };
 	// 记一笔"我导出过什么"（界面上的「更新记录」）—— 只在包写成功、状态要落盘时才记
-	appendBundleLog(state, {
+	const logEntry: BundleLogEntry = {
 		at: now,
 		direction: 'export',
 		mode,
 		bundleId,
 		file: path.basename(file),
-		base: mode === 'changes' ? (state.bundle.fullGeneration ?? null) : null,
+		// 记录里记的是**这个包从哪一代到哪一代**（指定了起点 / 终点时就是指定的那两代）——
+		// 界面上"第 N → M 代"那行要跟包头部对得上
+		base: mode === 'changes' ? (anchor?.generation ?? null) : null,
 		target: targetGeneration,
 		entries: sources.length,
 		deleted: deleted.length,
-		stateId: stateIdInfo.id,
-	});
+		...(checkpoint ? { checkpoint: true } : {}),
+	};
+	// 差量包记的是**终点那一刻**的状态编号（接收方应用完对的就是它），不是我当前的
+	if (stateIdInfo) logEntry.stateId = stateIdInfo.id;
+	appendBundleLog(state, logEntry);
 	await saveState(options.stateFile, state);
 
 	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
@@ -442,7 +782,10 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const superseded = prune.removed;
 
 	options.log.debug(
-		`导出${mode === 'full' ? '完整' : '累积更新'}包：${file}（${sources.length} 个文件，${header.payloadBytes} 字节）`
+		`导出${mode === 'full' ? '完整' : (checkpoint ? '差量' : '累积更新')}包：${file}（${sources.length} 个文件，${header.payloadBytes} 字节`
+		+ `${anchorReport
+			? `，第 ${anchorReport.generation} → ${checkpoint ? anchorReport.targetGeneration : '最新'} 代`
+			: ''}）`
 		+ (superseded.length > 0 ? `；顺手清掉 ${superseded.length} 个被它取代的旧更新包` : '')
 		+ (prune.kept.length > 0 ? `；changes 里还有 ${prune.kept.length} 个更新包没动（${prune.kept.map(item => item.why).join('、')}）` : ''),
 	);
@@ -460,26 +803,34 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		header,
 		parentBundleId: state.lastExportedBundleId,
 		cumulative: mode === 'changes',
+		anchor: anchorReport,
 		superseded,
 		keptChanges: prune.kept,
 	};
 }
 
 /**
- * 删掉被新包**完全取代**的旧更新包 —— 让 `changes/` 里最多只留**最新那一个**。
+ * 删掉被新包**完全取代**的旧更新包 —— 让 `changes/` 里**每一份基准最多只留最新那一个**。
  *
- * 为什么可以这么干脆：更新包是"自完整副本累积"的，任何更新的更新包、
- * 或一份更新的完整副本，都包含旧更新包的全部内容（所以文档里才敢说
- * "永远只需要应用最新的一个"）。留着它们只有两个后果：占地方，
- * 以及让人以为"包越攒越多、是不是漏应用了什么"（用户报过这个疑问）。
+ * 为什么可以这么干脆：更新包是"自某份完整副本累积"的，**同一份基准**下任何更新的更新包
+ * 都包含旧包的全部内容（所以文档里才敢说"永远只需要应用最新的一个"）；
+ * 一份**完整副本**更是完整清单，把谁取代了都不奇怪。留着它们只有两个后果：占地方，
+ * 以及让人以为"包越攒越多了、是不是漏应用了什么"（用户报过这个疑问）。
+ *
+ * **"同一份基准"这条不能省**（指定基准的功能上线后加上的）：
+ * 一个基于第 32 代的包，跟一个基于第 36 代的包，是给**两台不同状态的机器**用的 ——
+ * 新一代的那个并不包含老那个能用的东西（站在第 32 代上的机器收第 36 代基准的包
+ * 只能逐文件合并）。所以更新包只清"**同一个 `baseGeneration`** 且世代更小"的，
+ * 别的基准一律留着（并说明为什么），否则用户会发现"给我那台老机器准备的包不见了"。
  *
  * 只删**确定**能删的，条件缺一不可：
  * - 同一个 `changes` 目录里的 `.lsave`（别的目录不碰）；
  * - 是**更新包**（完整包不碰：那是你的还原点）；
  * - 同一条血脉（`lineage` 一致）—— 别的机器导的包不动；
+ * - 跟新包**基于同一份完整副本**（新包自己是完整副本时免这一条：它是完整清单，谁都能取代）；
  * - 世代**严格更小**；而且不是刚写出来的那个。
  *
- * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导更新包、再导完整包，
+ * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导完整包、再导更新包，
  * 不排除它的话，用户明明要了两个，最后只剩完整包一个。
  *
  * 内容安全性：新包（或与它同代的那份完整包）含有旧包的全部内容，删掉不丢东西；
@@ -496,6 +847,8 @@ async function removeSupersededChanges(
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
 	keepPaths.add(path.resolve(keep));
+	/** 新包基于哪一份基准；新包是完整副本时为 null（＝不受这条限制） */
+	const base = header.mode === 'full' ? null : (header.baseGeneration ?? null);
 	const removed: string[] = [];
 	const kept: { name: string; why: string }[] = [];
 	for (const item of await listFiles(dir)) {
@@ -512,6 +865,13 @@ async function removeSupersededChanges(
 		// 到这儿它就是一个"看着该被取代"的更新包了：没删就得说清为什么
 		if (other.lineage !== header.lineage) {
 			kept.push({ name: item.name, why: '不是同一条血脉（多半是另一台机器导的）' });
+			continue;
+		}
+		if (header.mode !== 'full' && (other.baseGeneration ?? null) !== base) {
+			kept.push({
+				name: item.name,
+				why: `基于第 ${other.baseGeneration ?? '?'} 代，跟这个包的基准不是同一份（各有各的接收方）`,
+			});
 			continue;
 		}
 		if (other.targetGeneration >= header.targetGeneration) {

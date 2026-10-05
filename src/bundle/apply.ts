@@ -233,6 +233,17 @@ export interface ApplyReport {
 	/** 这个包说的基准指纹（旧包没有就是 null） */
 	bundleBaseline: string | null;
 	/**
+	 * **差量包要送到的那份完整副本的指纹**（普通更新包 / 旧包没有 → null）。
+	 *
+	 * 用来认出这种情况：这个包的目的地**正好就是我这边的基准** ——
+	 * 那它点名要送的东西我全都有，应用它不会改动任何文件（用户实测遇到过：
+	 * 把"第 32 → 36 代"的包发给一台**已经站在第 36 代**上的机器，
+	 * 那边只看到一句"基准对不上"，看不出这其实是白跑一趟）。
+	 */
+	targetBaseline: string | null;
+	/** 这个包要送到的地方，就是我现在的基准（＝它对我没有新东西） */
+	targetIsMine: boolean;
+	/**
 	 * **导出方导完那一刻的状态编号**（包里记的，见 `sync/state-id.ts`）。
 	 * 应用完接收方算一个自己的跟它比 —— 相同就是"两边文件内容一致"。旧包没有 → null。
 	 */
@@ -728,6 +739,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		baselineMatch: compareBaseline(state.bundle?.fullHash ?? null, header),
 		myBaseline: state.bundle?.fullHash ?? null,
 		bundleBaseline: baselineOfBundle(header),
+		targetBaseline: header.targetBaselineHash ?? null,
+		targetIsMine: (header.targetBaselineHash ?? null) !== null
+			&& header.targetBaselineHash === state.bundle?.fullHash,
 		peerStateId: header.stateId ?? null,
 		forced: strictness !== 'normal',
 		adds,

@@ -42,8 +42,8 @@ export class BundleManagerModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '管理同步包' });
 		contentEl.createEl('p', {
-			text: '这里列出同步包文件夹里的所有包（完整副本与更新包）。选中一个可以打开它所在的文件夹、'
-				+ '复制路径，或者删掉它 —— 删除只是挪进回收站，底下那个「清空回收站」才是真删。',
+			text: '包文件夹里的所有包。选中一行可以应用、打开所在文件夹、复制路径或删除 —— '
+				+ '「挪进回收站」还能捞回来，底下那一行才是真删。',
 			cls: 'locally-save-hint',
 		});
 
@@ -72,6 +72,8 @@ export class BundleManagerModal extends Modal {
 			// 管理界面里"应用"是把包丢给导入弹窗：那边会先算一份报告让人看清再动手
 			onAction: item => new ApplyBundleModal(this.app, this.plugin, item.file).open(),
 			showTrash: true,
+			// 「我现在基于第几代、状态编号是什么」——管包的时候最需要对上号
+			showPosition: true,
 			emptyText: '这个文件夹里还没有 .lsave 文件（先去「导出同步包」导一个）',
 		});
 		void this.list.refresh();
