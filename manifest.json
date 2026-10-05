@@ -1,7 +1,7 @@
 {
 	"id": "locally-save",
 	"name": "Locally Save",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"minAppVersion": "1.7.0",
 	"description": "Syncs your vault to a local folder copy in seconds, and exports changes as a single transferable file you can carry on a USB drive.",
 	"author": "KahoTAT",
