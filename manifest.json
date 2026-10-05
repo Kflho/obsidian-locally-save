@@ -1,7 +1,7 @@
 {
 	"id": "locally-save",
 	"name": "Locally Save",
-	"version": "0.8.0",
+	"version": "0.9.0",
 	"minAppVersion": "1.7.0",
 	"description": "Packs your vault (or just the changes since the last full bundle) into a single transferable .lsave file you can carry on a USB drive or cloud folder — no network calls.",
 	"author": "KahoTAT",
