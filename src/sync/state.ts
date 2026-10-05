@@ -103,6 +103,27 @@ export interface HashRecord {
 	hash: string;
 }
 
+/**
+ * **状态编号**：整个仓库现在长什么样的短指纹（算法见 `sync/state-id.ts`）。
+ *
+ * 世代号回答不了"两边的文件一样吗"（它只是节奏号，两台各自 +1 会碰号），
+ * 状态编号能：**编号相同 ＝ 文件内容一致**。导出时写进包头部，应用完跟自己的比一比，
+ * 更新记录里每条都记着 —— 打开日志就能确定两边到底同不同步。
+ */
+export interface StateIdInfo {
+	id: string;
+	/** 参与编号的文件数 / 目录数（目录含空文件夹） */
+	files: number;
+	dirs: number;
+	/** 其中内容没能核验（单个超过 64MB / 读失败）的文件数，按"大小 + 时间"顶上的 */
+	unverified: number;
+}
+
+/** 存在状态文件里的状态编号（多一个"什么时候算的"） */
+export interface StateIdRecord extends StateIdInfo {
+	at: number;
+}
+
 export interface PluginState {
 	version: 1;
 	/** 这份副本的身份：第一次建状态时生成，之后不变（只用于排查问题） */
@@ -164,6 +185,14 @@ export interface PluginState {
 		changes: number;
 		deletes: number;
 	} | null;
+	/**
+	 * **我现在的状态编号**：上一次导出 / 应用之后算的那个（见 `sync/state-id.ts`）。
+	 *
+	 * 它就是"我这台机器现在的内容指纹"，跟包里那个一比就知道两边同不同步：
+	 * 更新记录顶部显示它、每条记录也带着当时的值。老状态文件没有 → null，界面提示
+	 * "下次导出 / 应用时会有"。
+	 */
+	stateId: StateIdRecord | null;
 }
 
 /** 一条"收发过同步包"的记录（界面上按时间倒着列） */
@@ -184,6 +213,8 @@ export interface BundleLogEntry {
 	/** 包里装了几个文件 / 点名删了几个 */
 	entries: number;
 	deleted: number;
+	/** 这一次导出 / 应用之后，我这边的状态编号（见 `sync/state-id.ts`）：两台机器的日志一比就知道同不同步 */
+	stateId?: string;
 }
 
 export function emptyState(): PluginState {
@@ -200,6 +231,19 @@ export function emptyState(): PluginState {
 		hashes: {},
 		bundleLog: [],
 		pendingReturn: null,
+		stateId: null,
+	};
+}
+
+/** 状态文件里的状态编号：字段类型不对（手改过、半截写入）就当没有，别让界面显示个假的 */
+function normalizeStateId(raw: StateIdRecord | null | undefined): StateIdRecord | null {
+	if (!raw || typeof raw.id !== 'string' || !raw.id) return null;
+	return {
+		id: raw.id,
+		files: typeof raw.files === 'number' ? raw.files : 0,
+		dirs: typeof raw.dirs === 'number' ? raw.dirs : 0,
+		unverified: typeof raw.unverified === 'number' ? raw.unverified : 0,
+		at: typeof raw.at === 'number' ? raw.at : 0,
 	};
 }
 
@@ -235,6 +279,8 @@ export async function loadState(absPath: string): Promise<PluginState> {
 		hashes: raw.hashes ?? {},
 		bundleLog: Array.isArray(raw.bundleLog) ? raw.bundleLog : [],
 		pendingReturn: raw.pendingReturn ?? null,
+		// 老状态文件没有这一项 → null：界面提示"下次导出 / 应用时会算一个"
+		stateId: normalizeStateId(raw.stateId),
 	};
 }
 

@@ -12,6 +12,7 @@ import { excludePatterns } from '../sync/runner';
 import { fingerprint } from '../sync/hash-cache';
 import { VAULT_TRASH_DIR } from '../sync/runner';
 import { cachedHash, copyRef, loadState, pruneHashes, saveState } from '../sync/state';
+import { computeStateId } from '../sync/state-id';
 import type { Inventory, FileRecord } from '../sync/types';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
@@ -222,7 +223,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		// 循环本身是纯 CPU 的（命中缓存时一个 I/O 都没有），按时间让一帧，界面别僵住。
 		lastYieldAt = await yieldIfDue(lastYieldAt);
 
-		const hash = await fingerprint(options.vaultRoot, state, file, record, settings.rememberFingerprints);
+		const hash = await fingerprint(options.vaultRoot, state, file, record, true);
 		// base：上次导出时的版本（按顺序应用的人正好停在这儿）
 		const base = previous[file];
 		const baseHash = base ? cachedHash(state, file, base) : null;
@@ -275,6 +276,24 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const freshBaseline = mode === 'full' ? listingHashOfFiles(inventory.files) : null;
 	const baselineHash = mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null);
 
+	/**
+	 * **状态编号**：导出完这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
+	 *
+	 * 写进包头部 → 接收方应用完算一个自己的跟它比：相同就是"两边文件内容一致"。
+	 * 世代号做不到这件事（两台各自 +1 会碰号、内容对不上也看不出来），用户提的
+	 * "需要一个编号让用户能确定当前文件状态"就是这个。
+	 *
+	 * 放在写包**之前**：头部要先写、偏移量提前算好（不回写）。这一步不算进度 ——
+	 * 进度只认"打进包里几个文件"；指纹基本都在缓存里（上面那个循环刚算过变过的那些），
+	 * 冷缓存时才真要读一遍仓库。
+	 */
+	const stateIdInfo = await computeStateId({
+		vaultRoot: options.vaultRoot,
+		state,
+		files: inventory.files,
+		dirs: inventory.dirs,
+	});
+
 	const { header } = await writeBundle(
 		file,
 		{
@@ -293,6 +312,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			baseGeneration: mode === 'changes' ? (state.bundle?.fullGeneration ?? state.generation) : null,
 			targetGeneration,
 			...(baselineHash ? { baselineHash } : {}),
+			stateId: stateIdInfo,
 			deleted,
 			emptyDirs,
 		},
@@ -322,6 +342,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	pruneHashes(state, new Set(inventory.files.keys()));
 	// 该发的都发出去了：欠对方的那笔回传结清（见 state.pendingReturn）
 	state.pendingReturn = null;
+	// 我现在的状态编号（更新记录顶部与每条都显示它；对方应用完会算一个跟它比）
+	state.stateId = { ...stateIdInfo, at: now };
 	// 记一笔"我导出过什么"（界面上的「更新记录」）—— 只在包写成功、状态要落盘时才记
 	appendBundleLog(state, {
 		at: now,
@@ -333,14 +355,15 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		target: targetGeneration,
 		entries: sources.length,
 		deleted: deleted.length,
+		stateId: stateIdInfo.id,
 	});
 	await saveState(options.stateFile, state);
 
 	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
-	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩
-	const prune = settings.pruneSupersededBundles
-		? await removeSupersededChanges(options, header, file)
-		: { removed: [], kept: [] };
+	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩。
+	// 一律清理（以前是个设置项）：更新包是累积的，旧包留着纯占地、还让人以为漏应用了；
+	// 没删掉的那些会在报告里如实说明理由（别的血脉 / 世代不比新包小）
+	const prune = await removeSupersededChanges(options, header, file);
 	const superseded = prune.removed;
 
 	options.log.debug(

@@ -2,8 +2,10 @@ import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { APPLY_CHOICES, executeBundlePlan, findApplyChoice, planBundleApply } from '../bundle/apply';
-import type { ApplyChoice, ApplyPlan } from '../bundle/apply';
+import type { ApplyChoice, ApplyPlan, ApplyResult } from '../bundle/apply';
 import type { ConflictStrategy } from '../sync/types';
+import type { StateIdInfo } from '../sync/state';
+import { describeStateId } from '../bundle/log';
 import { exportBundle, plannedExportModes } from '../bundle/export';
 import type { ExportOutcome } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
@@ -15,7 +17,7 @@ import { loadState } from '../sync/state';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
-import { bringWindowForward, focusWindow } from './modal-layout';
+import { focusWindow } from './modal-layout';
 import { offerBaselineReset } from './reset-baseline-modal';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -311,10 +313,10 @@ export class ApplyBundleModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
-		// 双击 .lsave 进来的：Obsidian 可能还在别的窗口后面；顺便把窗口顶到最大，
-		// 别让"应用要跑一会儿"看起来像卡死（想关掉的话：设置里的「打开包时最大化窗口」）
-		if (this.plugin.settings.bundleWindowMaximize) bringWindowForward();
-		else focusWindow();
+		// 双击 .lsave 进来的：Obsidian 可能还在别的窗口后面 —— 把它叫到前台，
+		// 别让"点了没反应"。**不动窗口大小**（以前有个"最大化"开关，删了：
+		// 进度有状态栏，插件不该替用户决定窗口多大）
+		focusWindow();
 		contentEl.createEl('h2', { text: '打开同步包' });
 		contentEl.createEl('p', {
 			text: '选一个 .lsave 文件，这里会先算一遍"应用之后会变成什么样"，确认无误再动手。',
@@ -393,7 +395,9 @@ export class ApplyBundleModal extends Modal {
 		new Setting(contentEl)
 			.setName('这次不执行包里的删除')
 			.setDesc('包里点名要删的文件这次一律留着（默认照删，删掉的那份会进回收目录）。'
-				+ '对方那台机器的基准不对时用这个兜一下 —— 不然它会把"我没有、但基准里有"的文件当成自己删过，'
+				+ '跟上面「以我为准」不是一回事：那个只保护**你改过**的文件，'
+				+ '对方删掉、你没动过的照样会跟着删 —— 想一个都不删就勾这个。'
+				+ '对方那台机器的基准不对时用它兜一下：不然它会把"我没有、但基准里有"的文件当成自己删过，'
 				+ '要求你这边也删掉')
 			.addToggle(toggle => toggle
 				.setValue(this.skipDeletions)
@@ -694,6 +698,22 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
+		// 状态编号：包里记着"导出方导完那一刻整个仓库长什么样"。应用完这边会算一个自己的跟它比，
+		// **一样就是两边文件内容一致** —— 世代号（会碰号）和基准指纹（只说明祖先是同一份）
+		// 都回答不了这句话，用户专门提过要这么个编号。
+		if (report.peerStateId) {
+			this.reportEl.createEl('p', {
+				text: `包里记的状态编号：${describeStateId(report.peerStateId)}`
+					+ ' —— 应用之后你这台会算一个自己的，**一样就是两边的文件完全一致**。',
+				cls: 'locally-save-hint',
+			});
+		} else {
+			this.reportEl.createEl('p', {
+				text: '这个包是**旧版本**导的，没记状态编号 —— 应用完没法跟对方直接对账，只能逐文件看。',
+				cls: 'locally-save-hint',
+			});
+		}
+
 		// 没有可做的事就**大声说出来**：用户看到"写入 0、跳过 1"很容易以为应用失败了
 		// （报过：拿到对方发来的包、打开一看"没应用"，其实本地早就是那一版了）
 		if (plan.actions.length === 0 && plan.foldersToRemove.length === 0) {
@@ -843,6 +863,25 @@ export class ApplyBundleModal extends Modal {
 		await this.runApply();
 	}
 
+	/**
+	 * 应用完的一句话：**我这台的状态编号 vs 包里记的那个**。
+	 *
+	 * 相同 ＝ 两边的文件内容一致（用户要的就是这个结论）；不同 ＝ 多半是我这边还有对方没有的
+	 * 改动（那笔"欠回传"，报告里也列了）；旧包没记 → 如实说"比不了"，不硬下结论。
+	 */
+	private stateIdSentence(result: ApplyResult, peer: StateIdInfo | null): string {
+		const mine = `状态 ${result.stateId.id}`;
+		switch (result.stateIdCompare) {
+			case 'match':
+				return `✓ 跟对方完全一致（${mine}）`;
+			case 'mismatch':
+				return `${mine}，跟对方导出时的 ${peer?.id ?? '?'} 不一样`
+					+ '（就差你这边还没发出去的那些改动）';
+			default:
+				return `${mine}（对方那个包没记编号，比不了）`;
+		}
+	}
+
 	private async runApply(): Promise<void> {
 		const plan = this.plan;
 		const file = this.current;
@@ -860,11 +899,10 @@ export class ApplyBundleModal extends Modal {
 				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '应用中' }),
 			});
 			this.plugin.reportProgress(null);
-			this.plugin.settings.showLastSyncInStatusBar
-				&& this.plugin.statusBar.setSummary(
-					`同步包已应用（写入 ${result.written}`
-					+ `${result.foldersCreated > 0 ? `、文件夹 ${result.foldersCreated}` : ''}）`,
-				);
+			this.plugin.statusBar.setSummary(
+				`同步包已应用（写入 ${result.written}`
+				+ `${result.foldersCreated > 0 ? `、文件夹 ${result.foldersCreated}` : ''}）`,
+			);
 
 			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
@@ -887,17 +925,22 @@ export class ApplyBundleModal extends Modal {
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
 			if (owed > 0) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
 
+			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
+			// "两边到底一不一样"就是他最想知道的那句。
+			const sameSentence = this.stateIdSentence(result, plan.report.peerStateId);
+
 			// 什么都没写 / 没删 / 没建：说明本来就已经是包里那一版了，
 			// 别报成"写入 0、跳过 N"那样让人以为应用失败了
 			const didNothing = result.written === 0 && result.deleted === 0 && result.moved === 0
 				&& result.foldersCreated === 0 && result.foldersRemoved === 0;
 			if (didNothing && result.failed.length === 0) {
 				new Notice(
-					`同步包里的内容本来就已经在本地了（${result.skipped} 个文件一致），没有改动任何东西`,
+					`同步包里的内容本来就已经在本地了（${result.skipped} 个文件一致），没有改动任何东西`
+					+ `；${sameSentence}`,
 					8000,
 				);
 			} else {
-				new Notice(`同步包已应用：${parts.join('、')}`, 9000);
+				new Notice(`同步包已应用：${parts.join('、')}；${sameSentence}`, 9000);
 			}
 			this.close();
 		} catch (error) {
@@ -936,9 +979,7 @@ export class ApplyBundleModal extends Modal {
 
 			const outcome = await this.plugin.runSync();
 			if (!outcome) return '副本同步被跳过（上一次同步还在跑）';
-			if (this.plugin.settings.showLastSyncInStatusBar) {
-				this.plugin.statusBar.setSummary('同步包已应用 · 副本已同步');
-			}
+			this.plugin.statusBar.setSummary('同步包已应用 · 副本已同步');
 			return `副本已同步（${describeRecord(recordFromOutcome(outcome))}）`;
 		} catch (error) {
 			// 包已经应用成功了，副本没跟上只是"备份旧一点"，不该让前者看起来失败

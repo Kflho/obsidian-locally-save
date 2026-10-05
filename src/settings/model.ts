@@ -44,17 +44,32 @@ export const SYNC_INTERVAL_OPTIONS: Record<string, string> = {
 	'180': '每 3 小时',
 };
 
-/** 保存后延迟多久再同步（秒）：给连续打字留出停顿，别每敲一个字就同步一次 */
+/**
+ * 保存之后隔多久同步一次：**0 ＝ 不同步**。
+ *
+ * 以前是"开关 + 间隔"两项，改成一个下拉：开关关掉时那个间隔项就藏在面板里，
+ * 等于一个设置还得配一个依赖它的设置，用户看着就是"设置怎么这么多"。
+ */
 export const SAVE_DELAY_OPTIONS: Record<string, string> = {
-	'10': '10 秒',
-	'30': '30 秒',
-	'60': '1 分钟',
-	'300': '5 分钟',
+	'0': '不同步',
+	'10': '停顿 10 秒后同步',
+	'30': '停顿 30 秒后同步',
+	'60': '停顿 1 分钟后同步',
+	'300': '停顿 5 分钟后同步',
 };
 
 export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
 	full: '完整副本（整个仓库）',
 	changes: '仅改动（自上次导出后变过的文件）',
+};
+
+/** 更新包攒到多大就提醒换基准（`bundle/size-warn.ts` 会解析这个字符串） */
+export const SIZE_LIMIT_OPTIONS: Record<string, string> = {
+	'': '200 MB（默认）',
+	'100MB': '100 MB',
+	'500MB': '500 MB',
+	'1GB': '1 GB',
+	'0': '不提醒',
 };
 
 /** 同步包文件的后缀由格式模块定义，这里只用于界面提示 */
@@ -66,10 +81,6 @@ export interface PluginSettings {
 	enabled: boolean;
 	/** 控制台输出级别 */
 	logLevel: LogLevel;
-	/** 插件加载时弹一条通知 */
-	startupNotice: boolean;
-	/** 上面那条通知的文案 */
-	greeting: string;
 
 	// ------------------------------------------------------------ 同步目标
 	/** 同步到的本地文件夹（绝对路径），副本就放在这里 */
@@ -90,12 +101,8 @@ export interface PluginSettings {
 	syncOnStartup: boolean;
 	/** 定时同步间隔（分钟），0 = 关 */
 	autoSyncInterval: number;
-	/** 保存笔记后自动同步 */
-	syncAfterSave: boolean;
-	/** 保存后等多久再同步（秒），避免连续打字时反复触发 */
+	/** 保存笔记后隔多久同步一次（秒）；**0 ＝ 不同步** */
 	syncAfterSaveDelay: number;
-	/** 状态栏显示上次同步时间 */
-	showLastSyncInStatusBar: boolean;
 
 	// ------------------------------------------------------------ 同步包
 	/** 同步包放哪儿；**留空＝放在同步目标文件夹的 `.lsave/bundles` 下** */
@@ -104,33 +111,16 @@ export interface PluginSettings {
 	bundleVerify: boolean;
 	/** 把 .lsave 拖到 Obsidian 窗口上时，自动打开"应用同步包"对话框 */
 	dropBundleToApply: boolean;
-	/**
-	 * 打开"应用同步包"对话框时，把 **Obsidian 窗口本身**顶到最大并叫到前台。
-	 *
-	 * 应用一个包要跑"扫仓库 + 校验 + 写文件"，这期间界面只有一句"正在……"：
-	 * 窗口小、或者还在后面，看着就像卡死了。
-	 */
-	bundleWindowMaximize: boolean;
-	/** 记住文件内容指纹：世代对不上时靠"内容"而不是"时间"判断本地改没改过 */
-	rememberFingerprints: boolean;
 	/** 每次同步成功后，把这一次的改动导成一个包（几乎不额外花时间） */
 	autoExportChanges: boolean;
 	/** 每次同步成功后，导一份完整包（每次都重写整个仓库，慢，默认关） */
 	autoExportFull: boolean;
 	/**
-	 * 导出更新包之后，删掉被它取代的旧更新包。
-	 *
-	 * 更新包是"自完整副本累积"的：新包包含旧包的全部内容，旧包留着只是占地方，
-	 * 还会让人以为"包越攒越多、是不是漏了什么"。只删同血脉、同基准世代、世代更小的更新包；
-	 * 完整包（还原点）与别的机器导的包一个都不碰。
-	 */
-	pruneSupersededBundles: boolean;
-	/**
 	 * 更新包攒到多大就提醒"该换基准了"（写法见 `bundle/size-warn.ts`）。
 	 *
 	 * 更新包是累积的、越攒越大；大到接近完整副本时，它唯一的好处（传得小）就没了。
 	 * 到点会弹窗问：要不要重导一份完整副本当新基准（更新包从零重新累积）。
-	 * 留空＝默认 200MB；填 0 ＝ 关掉这个提醒。
+	 * 取值来自 `SIZE_LIMIT_OPTIONS`：留空 ＝ 默认 200MB，`0` ＝ 不提醒。
 	 */
 	bundleSizeWarnLimit: string;
 
@@ -141,15 +131,13 @@ export interface PluginSettings {
 	ribbonExportIcon: boolean;
 	/** 左侧栏：打开同步包并应用 */
 	ribbonApplyIcon: boolean;
-	/** 在右下角状态栏显示状态 */
+	/** 在右下角状态栏显示状态（含上次同步的时间与结果、进行中的进度） */
 	showStatusBar: boolean;
 }
 
 export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
 	logLevel: 'error',
-	startupNotice: true,
-	greeting: '插件已加载',
 
 	targetDir: '',
 	syncDirection: 'both',
@@ -160,19 +148,15 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 
 	syncOnStartup: false,
 	autoSyncInterval: 0,
-	syncAfterSave: false,
-	syncAfterSaveDelay: 30,
-	showLastSyncInStatusBar: true,
+	// 0 ＝ 不同步：会往磁盘写文件的事，默认都得用户自己点头
+	syncAfterSaveDelay: 0,
 
 	bundleDir: '',
 	bundleVerify: true,
 	dropBundleToApply: true,
-	bundleWindowMaximize: true,
-	rememberFingerprints: true,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
-	pruneSupersededBundles: true,
 	bundleSizeWarnLimit: '',
 
 	ribbonSyncIcon: true,
@@ -229,11 +213,15 @@ export function coerceBundleMode(value: unknown): 'full' | 'changes' {
  */
 export function settingsFrom(data: unknown): PluginSettings {
 	const raw = (data ?? {}) as Record<string, unknown>;
+	/**
+	 * 「保存后同步」的迁移：老 data.json 里是**开关 + 间隔**两项，现在合成一个下拉（0 ＝ 不同步）。
+	 * 关着的时候必须落到 0 —— 不这么写的话，用户原本没开自动同步，升级后会因为
+	 * 存着的那个 30 秒而突然开始往磁盘写（这类"静悄悄改了行为"是最不能接受的）。
+	 */
+	const saveDelay = raw.syncAfterSave === false ? 0 : raw.syncAfterSaveDelay;
 	return {
 		enabled: coerceBoolean(raw.enabled, DEFAULT_SETTINGS.enabled),
 		logLevel: coerceLogLevel(raw.logLevel),
-		startupNotice: coerceBoolean(raw.startupNotice, DEFAULT_SETTINGS.startupNotice),
-		greeting: coerceText(raw.greeting, DEFAULT_SETTINGS.greeting),
 
 		targetDir: coerceText(raw.targetDir, DEFAULT_SETTINGS.targetDir),
 		syncDirection: coerceDirection(raw.syncDirection),
@@ -248,23 +236,22 @@ export function settingsFrom(data: unknown): PluginSettings {
 			Object.keys(SYNC_INTERVAL_OPTIONS).map(Number),
 			DEFAULT_SETTINGS.autoSyncInterval,
 		),
-		syncAfterSave: coerceBoolean(raw.syncAfterSave, DEFAULT_SETTINGS.syncAfterSave),
 		syncAfterSaveDelay: coerceNumberChoice(
-			raw.syncAfterSaveDelay,
+			saveDelay,
 			Object.keys(SAVE_DELAY_OPTIONS).map(Number),
 			DEFAULT_SETTINGS.syncAfterSaveDelay,
 		),
-		showLastSyncInStatusBar: coerceBoolean(raw.showLastSyncInStatusBar, DEFAULT_SETTINGS.showLastSyncInStatusBar),
 
 		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
-		bundleWindowMaximize: coerceBoolean(raw.bundleWindowMaximize, DEFAULT_SETTINGS.bundleWindowMaximize),
-		rememberFingerprints: coerceBoolean(raw.rememberFingerprints, DEFAULT_SETTINGS.rememberFingerprints),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
-		pruneSupersededBundles: coerceBoolean(raw.pruneSupersededBundles, DEFAULT_SETTINGS.pruneSupersededBundles),
-		bundleSizeWarnLimit: coerceText(raw.bundleSizeWarnLimit, DEFAULT_SETTINGS.bundleSizeWarnLimit),
+		bundleSizeWarnLimit: coerceChoice(
+			raw.bundleSizeWarnLimit,
+			Object.keys(SIZE_LIMIT_OPTIONS),
+			DEFAULT_SETTINGS.bundleSizeWarnLimit,
+		),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
 		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),

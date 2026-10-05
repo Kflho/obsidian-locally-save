@@ -9,9 +9,9 @@
  *   1. 每个设置字段都有且只有一条声明式定义（多了少了都算失败）
  *   2. 每条定义都有名字；下拉框的默认值必须在自己的选项里
  *   3. 读取控件值返回的是下拉框认得的合法值（data.json 里可能有旧版本脏数据）
- *   4. 依赖其它开关的 visible / disabled 谓词跟着设置变化
+ *   4. 依赖其它开关的谓词（visible / disabled）跟着设置变化
  *   5. 写入控件值时收敛脏数据并存盘
- *   6. settingsFrom（读盘那条路）与字段表用的是同一套收敛规则
+ *   6. settingsFrom（读盘那条路）与字段表用的是同一套收敛规则；老字段的迁移也要对
  *   7. 面板结构：按功能分页、页内分组有标题且不重名
  */
 import type { App } from "obsidian";
@@ -121,12 +121,13 @@ for (const def of definitions) {
 	);
 }
 
-// 4. 依赖其它开关的谓词：「提示文案」跟着「加载时弹出提示」走
-const greetingVisible = (s: Partial<PluginSettings>) =>
-	(defsOf(createTab(s).tab).find(def => def.control?.key === 'greeting')?.visible as () => boolean)();
-check("提示文案：默认（开启动提示）显示", greetingVisible({ startupNotice: true }), true);
-check("提示文案：关掉启动提示后不显示", greetingVisible({ startupNotice: false }), false);
-check("启动提示开关本身不设 visible", byKey(definitions, 'startupNotice')?.visible, undefined);
+// 4. 依赖其它开关的谓词：「删除前先备份」跟着「同步删除」走
+// （以前还有一对：启动提示 + 提示文案，那两项已经删掉了 —— 启动不再弹通知）
+const trashDisabled = (s: Partial<PluginSettings>) =>
+	(defsOf(createTab(s).tab).find(def => def.control?.key === 'deletedToTrash')?.control?.disabled as () => boolean)();
+check("「删除前先备份」：开着删除传播时可用", trashDisabled({ propagateDeletions: true }), false);
+check("「删除前先备份」：关掉删除传播后变灰", trashDisabled({ propagateDeletions: false }), true);
+check("删除传播开关本身不设 disabled", byKey(definitions, 'propagateDeletions')?.control?.disabled, undefined);
 
 // 5. 写入时收敛脏数据并保存
 const { tab: writeTab, settings: written, saveCount } = createTab();
@@ -136,10 +137,10 @@ await writeTab.setControlValue('logLevel', 'debug');
 check("下拉合法值原样写入", written.logLevel, 'debug');
 await writeTab.setControlValue('enabled', 'yes');
 check("开关脏数据收敛为默认值", written.enabled, DEFAULT_SETTINGS.enabled);
-await writeTab.setControlValue('greeting', '自定义文案');
-check("普通字段直接写入", written.greeting, '自定义文案');
+await writeTab.setControlValue('bundleDir', 'D:/我的同步包');
+check("普通字段直接写入", written.bundleDir, 'D:/我的同步包');
 checkTrue("写入后触发存盘", saveCount() >= 4, `saveSettings 调用 ${saveCount()} 次`);
-check("默认设置未被测试污染", settings.greeting, DEFAULT_SETTINGS.greeting);
+check("默认设置未被测试污染", settings.bundleDir, DEFAULT_SETTINGS.bundleDir);
 
 // 6. settingsFrom：读盘那条路与字段表共用收敛规则
 check("settingsFrom(默认值) 原样返回", settingsFrom(DEFAULT_SETTINGS), DEFAULT_SETTINGS);
@@ -147,11 +148,32 @@ check("settingsFrom(null) 得到默认值", settingsFrom(null), DEFAULT_SETTINGS
 check("settingsFrom(缺字段) 补齐默认值", settingsFrom({ enabled: false }), { ...DEFAULT_SETTINGS, enabled: false });
 check(
 	"settingsFrom(脏数据) 全部收敛",
-	settingsFrom({ enabled: 'yes', logLevel: 'xyz', startupNotice: 1, greeting: 42, ribbonIcon: null, showStatusBar: 'on' }),
+	settingsFrom({ enabled: 'yes', logLevel: 'xyz', syncAfterSaveDelay: 7, bundleSizeWarnLimit: '999TB', ribbonIcon: null, showStatusBar: 'on' }),
 	DEFAULT_SETTINGS,
 );
 checkTrue("settingsFrom 不把未知字段带进来", !('legacyField' in settingsFrom({ legacyField: 1 })), '多余的键会写回 data.json');
 check("日志级别白名单", [...LOG_LEVELS], ['silent', 'error', 'debug']);
+
+// 6b. 迁移：老 data.json 是「保存后同步」开关 + 间隔两项，现在合成一个下拉（0 ＝ 不同步）。
+// **关着的时候必须落到 0** —— 不然原本没开自动同步的人，升级后会因为存着的 30 秒突然开始写盘。
+check(
+	"老配置：保存后同步是关的 → 落到「不同步」",
+	settingsFrom({ syncAfterSave: false, syncAfterSaveDelay: 30 }).syncAfterSaveDelay,
+	0,
+);
+check(
+	"老配置：开着的话，原来的间隔保留",
+	settingsFrom({ syncAfterSave: true, syncAfterSaveDelay: 300 }).syncAfterSaveDelay,
+	300,
+);
+check(
+	"已经被删掉的设置项不会残留（读盘时直接丢掉）",
+	Object.keys(settingsFrom({ startupNotice: true, greeting: '你好', rememberFingerprints: false, pruneSupersededBundles: false })),
+	Object.keys(DEFAULT_SETTINGS),
+);
+// 更新包大小提醒：以前是自由文本（认 200MB / 500KB / 1GB / 留空 / 0），现在只认下拉里那几个
+check("大小提醒：下拉选项外的值收敛到默认", settingsFrom({ bundleSizeWarnLimit: '300MB' }).bundleSizeWarnLimit, '');
+check("大小提醒：选项内的值原样保留", settingsFrom({ bundleSizeWarnLimit: '1GB' }).bundleSizeWarnLimit, '1GB');
 
 // 7. 面板结构：按"用户要干什么"分页，页内同类的事挨在一起
 const pages = tab.getSettingDefinitions() as unknown as AnyDefinition[];
