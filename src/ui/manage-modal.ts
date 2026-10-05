@@ -57,15 +57,10 @@ export class BundleManagerModal extends Modal {
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '管理同步包' });
-		contentEl.createEl('p', {
-			text: '包文件夹里的所有包。选中一行可以应用、打开所在文件夹、复制路径或删除 —— '
-				+ '「挪进回收站」还能捞回来，底下那一行才是真删。',
-			cls: 'locally-save-hint',
-		});
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('默认用设置里那个「同步包文件夹」；在这里改只影响这个窗口，不会动设置')
+			.setDesc('只影响这个窗口，不动设置')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
@@ -86,10 +81,8 @@ export class BundleManagerModal extends Modal {
 		// ------------------------------------------------ 立新基准（要点一的第一件事）
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
-			.setName('以本机现状立一份新完整包')
-			.setDesc('本机比基准领先时，更新包会一直按老基准累积、越滚越大。'
-				+ '点它会按现在的仓库导一份新完整副本、并把基准换过去：之后的更新包从零开始攒，'
-				+ '这份完整包同时是一份备份（仓库文件一个都不动）')
+			.setName('立新基准')
+			.setDesc('按本机现状导一份新完整副本并换基准：更新包从此从零累积。仓库文件不动')
 			.addButton(button => button
 				.setButtonText('立新基准…')
 				.onClick(() => { void this.confirmResetBaseline(); }));

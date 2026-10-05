@@ -21,6 +21,39 @@
 }
 
 /* ---------------------------------------------------------------- 弹窗 */
+/*
+ * **弹窗要够宽**：这些框里一行是「名字 + 一句说明 + 控件」，Obsidian 默认的模态框偏窄，
+ * 说明文字一长就折成三四行、跟下一项糊在一起（用户报的"文字堵一起"）。
+ * 1.13+ 用 `--modal-width`，旧版本用 `width`（两边都写，互不冲突）。
+ */
+.modal.locally-save-modal {
+	--modal-width: min(780px, 92vw);
+	width: min(780px, 92vw);
+}
+
+.locally-save-modal .setting-item {
+	/* 说明允许换行，但别把控件挤没 */
+	align-items: flex-start;
+	flex-wrap: wrap;
+	gap: 0.5em 0.75em;
+}
+
+.locally-save-modal .setting-item-info {
+	flex: 1 1 22em;
+	min-width: 0;
+}
+
+.locally-save-modal .setting-item-description {
+	line-height: 1.5;
+}
+
+.locally-save-modal .setting-item-control {
+	flex: 0 1 auto;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 0.4em;
+}
+
 .locally-save-modal h2 {
 	margin-top: 0;
 }
