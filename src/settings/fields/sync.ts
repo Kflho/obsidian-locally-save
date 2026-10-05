@@ -1,8 +1,6 @@
 import {
-	CONFLICT_OPTIONS,
 	DEFAULT_SETTINGS,
 	coerceBoolean,
-	coerceConflict,
 	coerceAnchorFingerprint,
 	coerceText,
 } from '../model';
@@ -20,12 +18,13 @@ import type LocallySavePlugin from '../../main';
 import type { FieldSection } from './types';
 
 /**
- * 「同步包」一页：包放哪儿、什么时候自动留、应用时默认怎么处理。
+ * 「同步包」一页：包放哪儿、什么时候自动留、应用 / 管理包。
  *
  * 0.8.0 起这是插件**唯一**的一条通道：**完整副本（基准 + 还原点）+ 更新包（天天搬）**。
  * 原来那一组"同步到本地文件夹副本"的设置（目标文件夹 / 同步方向 / 删除传播）
  * 随那条通道一起删掉了 —— 共用目录那种用法交给 Remotely Save 这类走云的插件，
  * 这里只做"不联网的单文件搬运"。
+ * 0.11.0 又把「应用同步包时的默认处理」那一组删了：应用只剩"严格同步"一种语义。
  */
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
@@ -95,33 +94,6 @@ export const SYNC_SECTION: FieldSection = {
 					desc: '默认「最新（当前仓库）」；选一份完整副本则导到那一刻为止（内容取自那份包，不是你现在的仓库）',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
 					coerce: value => coerceAnchorFingerprint(value),
-				},
-			],
-		},
-		{
-			heading: '应用同步包时的默认处理',
-			fields: [
-				{
-					key: 'conflictStrategy',
-					name: '两边都改了怎么办',
-					desc: '「应用方式」选「按设置」时按这条办。默认留两份：新的占原名，旧的那份进回收目录的「冲突」文件夹',
-					control: { type: 'dropdown', options: CONFLICT_OPTIONS },
-					coerce: value => coerceConflict(value),
-				},
-				{
-					key: 'propagateDeletions',
-					name: '包里删掉的文件，这边也删',
-					desc: '关掉的话，包里点名要删的一律留着（本地改过的一律不删，不受这一项影响）',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.propagateDeletions),
-				},
-				{
-					key: 'deletedToTrash',
-					name: '删除前先备份',
-					desc: '删掉的文件挪进回收目录（`仓库/.trash/locally-save/`），还能捞回来。'
-						+ '强制两档（以包为准 / 完全镜像）一定备份，不看这一项',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.deletedToTrash),
 				},
 			],
 		},

@@ -262,6 +262,74 @@ check(
 	(await loadState(STATE_CP_C)).bundle?.fullHash,
 );
 
+/** 回收目录里某个文件的备份内容（严格档下被覆盖 / 挪走的那一份都在这儿） */
+function findBackups(root: string, rel: string): string[] {
+	const base = path.join(root, '.trash', 'locally-save');
+	const wanted = rel.split('/').pop() as string;
+	const out: string[] = [];
+	const walk = (dir: string): void => {
+		if (!fs.existsSync(dir)) return;
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const next = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				walk(next);
+				continue;
+			}
+			if (entry.name === wanted) out.push(fs.readFileSync(next, 'utf8'));
+		}
+	};
+	walk(base);
+	return out;
+}
+
+// 6. **严格同步**（更新包默认那一档）：应用完**仓库 == 包送到的状态**，状态编号当场对上。
+//    本地改动一律先进回收目录（严格档必然先备份），本地多出来的文件也挪走 ——
+//    "再狠一点"要的就是这个：应用完两边编号完全相同。
+const SX = path.join(ROOT, 'machine-strict');
+const STATE_SX = path.join(ROOT, 'state-strict.json');
+fs.mkdirSync(SX, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(SX, STATE_SX, cpFull.file as string)),
+	applyOptions(SX, STATE_SX, cpFull.file as string),
+);
+check('（前置）它站在 P0 上', (await loadState(STATE_SX)).bundle?.fullHash, p0);
+
+// 三种本地分歧：包里点名要改的、本地独有的（包里没有）、包里没提到的（下面第二台机器）
+write(SX, 'a.md', 'A1 我改过', T_CP + 300_000);
+write(SX, 'mine.md', 'MINE', T_CP + 300_000);
+const strictOptions = { ...applyOptions(SX, STATE_SX, cpLink1.file as string), strictness: 'mirror' as const };
+const strictPlan = await planBundleApply(strictOptions);
+check('严格档：报告里 forced 成立、不降级', [strictPlan.report.strictness, strictPlan.report.forced], ['mirror', true]);
+check('严格档：本地独有那个文件也要挪走', strictPlan.report.localExtras, 1);
+const strictResult = await executeBundlePlan(strictPlan, strictOptions);
+check('应用完 a.md 就是包里的那一版（哪怕我改过）', read(SX, 'a.md'), 'A2 改过');
+check('本地独有的文件挪走了', read(SX, 'mine.md'), null);
+checkTrue('它的内容还在回收目录里', findBackups(SX, 'mine.md').includes('MINE'), JSON.stringify(findBackups(SX, 'mine.md')));
+checkTrue('我改过的那一版也留着（严格档必然先备份）', findBackups(SX, 'a.md').includes('A1 我改过'), JSON.stringify(findBackups(SX, 'a.md')));
+check('**状态编号与包完全一致**（用户要的那句话）', strictResult.stateIdCompare, 'match');
+check('本机站到的点就是那份包送到的那一点', (await loadState(STATE_SX)).bundle?.fullHash, p1);
+
+// 剩下的一种情况（诚实地说清）：**包没提到、而我又改过的文件** —— 包里没有它的字节，
+// 谁也变不出对方手里那一版；它会随我下次导出的更新包过去，对方应用完两边才一致。
+const SX2 = path.join(ROOT, 'machine-strict2');
+const STATE_SX2 = path.join(ROOT, 'state-strict2.json');
+fs.mkdirSync(SX2, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(SX2, STATE_SX2, cpFull.file as string)),
+	applyOptions(SX2, STATE_SX2, cpFull.file as string),
+);
+write(SX2, 'b.md', 'B1 我改的（包没提到它）', T_CP + 300_000);
+const residualOptions = { ...applyOptions(SX2, STATE_SX2, cpLink1.file as string), strictness: 'mirror' as const };
+const residualPlan = await planBundleApply(residualOptions);
+const residualResult = await executeBundlePlan(residualPlan, residualOptions);
+check('包没提到的本地改动留在原地（包里没有它的字节）', read(SX2, 'b.md'), 'B1 我改的（包没提到它）');
+check('所以编号这时还差一点，如实说出来', residualResult.stateIdCompare, 'mismatch');
+checkTrue(
+	'报告里算得出「我这边还有几个改动没发出去」（下次导出更新包会带上）',
+	(residualPlan.report.pendingChanges ?? 0) >= 1,
+	String(residualPlan.report.pendingChanges),
+);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 0) process.exitCode = 1;

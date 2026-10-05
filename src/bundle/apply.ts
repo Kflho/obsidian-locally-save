@@ -25,28 +25,28 @@ import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../syn
  * `planBundleApply()` 只读不写：把包和本地逐条比一遍，给出报告；接收方看过之后再
  * `executeBundlePlan()` 真正落盘。所以"打开包"这一步是安全的，可以随便点。
  *
- * ## 核心：包就是"对方"，交给我们那套比对引擎
+ * ## 核心：包就是"对方"，应用完与包严格一致
  *
- * 完整包 = 一份**完整清单**，和"本地文件夹副本"在结构上是同一种东西。所以这里
- * **复用 `planSync()` 的三方比对**（基准 vs 本地 vs 包），而不是另发明一套规则：
+ * **界面上的手动应用只有一种语义：严格同步**（`strictness: 'mirror'`，见 `APPLY_CHOICES`）——
+ * 包里点名的文件一律用包里的版本（本地那份先进回收目录）、`header.deleted` 点名的照删、
+ * 本地多出来的文件也挪进回收目录。应用完**仓库 == 包送到的状态**，两边的状态编号当场可比
+ * （见 `sync/state-id.ts`）。这是「基准点链条」能成立的前提：链条上的每个点内容都是确定的，
+ * 谁也不必猜着合，文件也就不会冲突。
  *
- * | | 本地副本同步 | 同步包应用 |
- * |---|---|---|
- * | 增 / 删 / 改 | 三方比对 | **同一套** |
- * | 冲突 | 留两份（**新的占原名**）/ 以本地为准 / 以副本为准 | **同一套设置** |
- * | 删除 | 基准检查 + 传播开关 | **同一套** |
- * | 移动 | 认出来就直接改名 | **同一套** |
+ * **合并那条路（`normal`）仍然在**，交给 `sync/diff.ts` 的三方比对（基准 vs 本地 vs 包）：
+ * 本地改过的保留、分歧留两份、本机独有的文件不动。它现在只有两条调用链在用 ——
+ * 自动收包（`incoming.ts`）与接链（`chain.ts`）：那两处的边界是"只应用不会动到本地已有东西的包"，
+ * 合并语义正好对上（完整副本从来不自动应用）。界面上不再给这个选择。
  *
- * 应用时用"仅下载"方向 —— 包是只读的，不能往里写；但冲突裁决仍听设置
- * （`directionDecidesConflict: false`），所以"新的那份占原名"这条规则和副本那边完全一致。
- *
- * 三个细节在比对结果之上再修一下（都是"包里没有基准时"才用得上）：
+ * `normal` 档在比对结果之上再修三个细节：
  * 1. 本地这份是**我以前发过的中间版本**（`entry.history`）→ 不是本地改动，直接覆盖；
  * 2. 本地这份**比包还旧**（没有 base 可比时）→ 那是旧副本，直接覆盖；
- * 3. 其余"两边都改过"的，才真的留冲突副本。
+ * 3. 其余"两边都改过"的，才真的留冲突副本（进回收目录的「冲突」文件夹）。
  *
- * 于是"本地有、包里没有"也交给了基准判断，不需要用户先选立场：
- * 基准里也有 → 对方删了它（按传播开关处理）；基准里没有 → 我独有的文件，一律保留。
+ * **更新包里"本地有、包里没有"不等于对方删了它**（它只装变过的文件）：删除只认
+ * `header.deleted` 点名的清单；只有完整包才是完整清单。严格档下"包里送到的状态"由
+ * `baseline`（本机站的基准点）＋ 条目 − 点名删除算出来 —— 那个 `baseline` 之所以可信，
+ * 是因为 `checkAncestor` 要求包的起点与本机站的基准点**完全相等**。
  */
 
 const TOLERANCE = DEFAULT_MTIME_TOLERANCE_MS;
@@ -60,21 +60,25 @@ export interface ApplyChoice {
 	key: string;
 	label: string;
 	strictness: ApplyStrictness;
-	/** 本次临时覆盖"两边都改过时听谁的"；不填就跟随设置 */
+	/** 本次临时覆盖"两边都改过时听谁的"；只有 `normal` 档会用到（不填 ＝ `keep-both`） */
 	conflictStrategy?: ConflictStrategy;
 }
 
 /**
- * 「应用方式」的选项 —— **按包的类型给两套**。
+ * 「应用方式」的选项 —— **两类包各只剩一项**（0.11 起界面上不再给选择）。
  *
- * **完整副本没有选项**：它就是"另一台机器此刻的完整样子"，应用方式固定是镜像。
- * 合并它会有无穷多种结果（本机改过的算谁的、本机独有的留不留、删除传不传播），
- * 每一种都能配出一个"既不等于包、又不等于本机"的仓库 —— 之后导出的更新包 `base` 就对不上，
- * 两台机器开始互相报"基准对不上"。收掉选择权，语义就只剩一句：**应用完，仓库就是那个包**。
+ * **完整副本是镜像**：它就是"另一台机器此刻的完整样子"。合并它会有无穷多种结果
+ * （本机改过的算谁的、本机独有的留不留、删除传不传播），每一种都能配出一个
+ * "既不等于包、又不等于本机"的仓库 —— 之后导出的更新包 `base` 就对不上，
+ * 两台机器开始互相报"基准对不上"。
  *
- * **更新包只有"只动包里点名文件"的几档**：它只装自起点那一点以来变过的文件，
- * 包里没有**什么也不代表** —— 拿它清仓库一次就清空（报过的 bug）。
- * 所以它给的是：按设置 / 以包为准 / 两边都留 / 以我为准。
+ * **更新包是严格同步**：它的起点必须与本机站的基准点**完全相等**（`checkAncestor`），
+ * 所以"包送到的状态"是确定的 ＝ 我站的那一点 ＋ 条目 − 点名删除。
+ * 旧版本担心的"没提到的文件会被当成该删、一次清空仓库"在链条模型下不成立。
+ *
+ * 表留着是为了让"引擎支持哪几档"有个单一出处（`test/bundle.test.ts` 守着它）；
+ * 界面（`ui/bundle-modal.ts`）**不读它**：手动应用一律严格档。
+ * 合并那条路（`strictness: 'normal'`）只剩自动收包（`incoming.ts`）与接链（`chain.ts`）在用。
  */
 export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 	full: [
@@ -86,26 +90,10 @@ export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 	],
 	changes: [
 		{
-			key: 'normal',
-			label: '按设置（安全）：本地改过的保留，两边都改过时按设置处理',
-			strictness: 'normal',
-		},
-		{
-			key: 'listed-wins',
-			label: '以包为准：包里点名的文件一律用包里的版本（本地那份先挪进回收目录），没提到的一个不动',
-			strictness: 'listed-wins',
-		},
-		{
-			key: 'keep-both',
-			label: '两边都留（最保险）：我改过的保留原名，包里的版本存进回收目录的「冲突」文件夹',
-			strictness: 'normal',
-			conflictStrategy: 'keep-both',
-		},
-		{
-			key: 'local-wins',
-			label: '以我为准：包里点名的改动不覆盖我改过的文件（我没动过的照包对齐）',
-			strictness: 'normal',
-			conflictStrategy: 'local-wins',
+			key: 'strict',
+			label: '严格同步（更新包只有这一种）：包里点名的文件一律用包里的版本（本地那份先挪进回收目录），'
+				+ '点名的删除照删，包里送到的状态里没有的本地文件也挪走 —— 应用完这个仓库就是包里的样子',
+			strictness: 'mirror',
 		},
 	],
 };
@@ -129,26 +117,23 @@ export interface ApplyOptions {
 	file: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
-	/** 本次临时覆盖冲突裁决；不填就跟随设置 */
+	/** 本次临时覆盖冲突裁决；只有合并那条路（`strictness: 'normal'`）会用到 */
 	conflictStrategy?: ConflictStrategy;
 	/**
-	 * **强硬程度**（本次应用有多"以包为准"）。
+	 * **本次应用有多"以包为准"**。
 	 *
-	 * - **完整副本忽略它**：完整副本一律镜像（见 `mirrorFull`），传什么都不影响结果；
-	 * - `normal`（默认）：按设置 —— 本地改过的保留、分歧留两份、我独有的文件不动
-	 * - `listed-wins`（界面「以包为准」）：**只对包里点名的文件以包为准** —— 包里点名的文件一律
-	 *   （本地改过的那份进回收目录的「冲突」文件夹），包里**没提到**的一个不动。
-	 *   这是"我改坏了，想退回对方发来的那一版"用的那一档；因为不动没提到的文件，
-	 *   更新包（只有变过的那部分）也能开放它。
-	 * - `bundle-wins` / `mirror`：**只对完整副本有过意义**（现在它一律镜像，所以这两个值
-	 *   在引擎里已经走不到那条分支）。留在类型里是为了兼容旧调用方：
-	 *   传给**更新包**会被 clamp 成 `normal`（`strictnessDowngraded` 标出来）——
-	 *   更新包只装变过的文件，拿它清仓库会一次清空。
+	 * - `mirror`（界面上的手动应用一律用它）：**应用完仓库 == 包送到的状态** ——
+	 *   包里点名的用包里的版本（本地那份进回收目录）、`header.deleted` 点名的照删、
+	 *   本地多出来的也挪进回收目录。完整副本与更新包走的是同一套语义；
+	 * - `normal`（不填时的默认）：走 `planSync` 三方比对 —— 本地改过的保留、分歧留两份、
+	 *   我独有的文件不动。**只有自动收包（`incoming.ts`）与接链（`chain.ts`）在用**：
+	 *   那条路的边界是"只应用不会动到本地已有东西的包"，合并语义正好对上；
+	 * - `listed-wins` / `bundle-wins`：引擎里还留着（测试守着），界面上已经不给选。
 	 *
 	 * 排除规则命中的东西（配置目录等）都不动。
 	 */
 	strictness?: ApplyStrictness;
-	/** 本次临时覆盖"删不删多余文件"；不填就跟随设置 */
+	/** 本次临时覆盖"删不删多余文件"；只有 `normal` 那条路会用到 */
 	propagateDeletions?: boolean;
 	/**
 	 * **强制与包一致**：让本机变成和包一模一样。
@@ -160,17 +145,13 @@ export interface ApplyOptions {
 	 * 默认关。排除规则命中的东西（配置目录等）不参与，所以"一致"是指"参与同步的那部分一致"。
 	 */
 	force?: boolean;
-	/** 被删掉的本地版本先进回收目录（默认跟随设置里的「删除前先备份」） */
-	keepBackup?: boolean;
 	/**
-	 * **这次不执行包里的删除**（界面上的一个勾）。
+	 * 被删掉 / 被覆盖的本地版本先进回收目录。
 	 *
-	 * 什么时候用：对方那台机器的基准不对时（比如它的 `sync-state.json` 是从另一台机器
-	 * 拷过去的，仓库却比状态旧），它会把"我没有、但基准里有"的文件报成"我删掉了它们"，
-	 * 于是这个包要求删掉你本地明明还在的文件（用户报过：两个 schedule 文件）。
-	 * 勾上它，包里点名要删的一律留着 —— 先别动，等两边的基准对齐了再说。
+	 * **严格档（`mirror` / `bundle-wins`）忽略这一项、必然备份**：那几个档会覆盖 / 挪走
+	 * 本地已有的东西，"关掉回收 + 严格档" = 不可恢复的批量删除，这个组合不给走。
 	 */
-	skipDeletions?: boolean;
+	keepBackup?: boolean;
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
@@ -195,7 +176,7 @@ export interface ApplyReport {
 		emptyDirCount: number;
 		payloadBytes: number;
 	};
-	/** 本次实际采用的策略（界面回显：是跟随设置还是临时覆盖） */
+	/** 本次实际采用的冲突裁决（严格档必然是 `remote-wins`：分歧一律听包的） */
 	conflictStrategy: ConflictStrategy;
 	propagateDeletions: boolean;
 	keepBackup: boolean;
@@ -239,11 +220,6 @@ export interface ApplyReport {
 	 * 应用完接收方算一个自己的跟它比 —— 相同就是"两边文件内容一致"。旧包没有 → null。
 	 */
 	peerStateId: StateIdInfo | null;
-	/**
-	 * 请求的强硬程度被降级了（更新包 + 以包为准/完全镜像 → 按设置）。
-	 * 界面上要说明白：不然用户以为自己选了"完全一致"，实际没生效。
-	 */
-	strictnessDowngraded: boolean;
 	/** 本地停在"对方发过的中间版本"上、直接覆盖的数量 */
 	historyMatches: number;
 	/** 要删的本地文件总数 */
@@ -252,8 +228,13 @@ export interface ApplyReport {
 	keptDeletes: number;
 	/** 其中"本地有、包里没有、且基准里也有"的（＝对方删过的） */
 	extraDeletes: number;
-	/** 按"这次不执行包里的删除"跳过的（包里点名要删、但这次留着） */
-	deletesSkipped: number;
+	/**
+	 * 严格档（「严格同步」）下"本地多出来、要挪进回收目录"的文件数。
+	 *
+	 * 它也算在 `deletes` 里（通知里报的总数要对得上），单独拎出来是为了让界面说清楚：
+	 * "删 3 个"里有 2 个其实是我自己新建的、包里送到的状态里没有它们。
+	 */
+	localExtras: number;
 	/** 本地与包已经完全一致的条目数 */
 	synchronized: number;
 	/**
@@ -467,32 +448,35 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * - 本机改过的文件被包的版本覆盖（旧的同样进回收目录）；
 	 * - 包里没提到的目录也跟着清掉。
 	 *
-	 * 更新包不受影响：它只装"变过的那部分"，仍然是"只动它点名的文件"那一套
-	 * （包里没提到 ≠ 对方删了它）。那边**没有共同祖先就直接拒收**（见 `checkAncestor`），
+	 * 更新包也是同一套：它的起点必须与本机站的基准点**完全相等**（`checkAncestor`），
+	 * 所以"包送到的状态"同样确定 ＝ 我站的那一点 ＋ 条目 − 点名删除；
+	 * 不在其中的本地文件（自己新建的、对方删过的）一样挪进回收目录。那边**没有共同祖先就直接拒收**，
 	 * 所以也不存在"合出一个乱七八糟的状态"。
 	 */
 	const mirrorFull = header.mode === 'full';
-	// **更新包不开放破坏性方式**（引擎层兜底，不只靠界面）：
-	// 更新包里只装了变过的文件，"以包为准 / 完全镜像"会把它没提到的文件全当成"该删"，
-	// 一次就把仓库清空。所以不是完整副本时，这两档一律降级成 normal 并在报告里标出来。
-	// （`listed-wins`（以包为准）不在此列：它只动包里点名的那些，更新包也能用。）
-	const destructive = requested === 'bundle-wins' || requested === 'mirror';
-	// 完整副本一律是镜像档；更新包用不了破坏性两档（降级成按设置）
-	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : (destructive ? 'normal' : requested);
-	const strictnessDowngraded = !mirrorFull && strictness !== requested;
+	/**
+	 * **更新包也开放"严格同步"**（0.11 起：完整副本与更新包一样，应用完就是包）。
+	 *
+	 * 旧版本把更新包上的"以包为准 / 完全镜像"降级成按设置，理由是"包里没提到的文件会被当成该删，
+	 * 一次清空仓库"。**那条理由在链条模型下不成立了**：更新包的起点必须与本机站的基准点**完全相等**
+	 * （`checkAncestor` 拦在前面），所以"包送到的状态"是确定的 ——
+	 * ＝ 我站的那一点 ＋ 包里点名的条目 − 包里点名的删除。镜像它就是"变成那份状态"，不会清空。
+	 */
+	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : requested;
+	/** 严格档：应用完**仓库 == 包送到的状态**（完整副本自带完整清单；更新包按起点清单补全） */
+	const strict = strictness === 'mirror' || strictness === 'bundle-wins';
 	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
 	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
-	const conflictStrategy = strictness === 'normal'
-		? (options.conflictStrategy ?? settings.conflictStrategy)
+	// 合并那条路（`normal`）只剩自动收包与接链在用（界面上一律走严格档）：
+	// "两边都改了怎么办"那个设置项已经删了 —— 这里的默认值就是它的历史默认值。
+	const conflictStrategy: ConflictStrategy = strictness === 'normal'
+		? (options.conflictStrategy ?? 'keep-both')
 		: 'remote-wins';
-	const propagateDeletions = strictness === 'normal'
-		? (options.propagateDeletions ?? settings.propagateDeletions)
-		: true;
-	const keepBackup = strictness === 'normal'
-		? (options.keepBackup ?? settings.deletedToTrash)
-		// 强制档必然要删东西（可能一次删很多），**强制先备份**：
-		// 关掉回收目录 + 强制 = 不可恢复的批量删除，这个组合不给走
-		: true;
+	// 删除传播与备份只在"合并"那条路上听调用方/设置；严格档必然传播、必然先备份
+	const propagateDeletions = strictness === 'normal' ? (options.propagateDeletions ?? true) : true;
+	// **应用必然先备份**：严格档会覆盖/挪走本地东西，强制档更可能一次删很多 ——
+	// "关掉回收目录 + 严格档" = 不可恢复的批量删除，这个组合不给走
+	const keepBackup = strictness !== 'normal' || (options.keepBackup ?? true);
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
@@ -573,10 +557,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let moves = 0;
 	/** 本地多出来、这次要删的（对方删过的，或镜像档下我独有的） */
 	let extraDeletes = 0;
+	/** 严格档下"本地多出来、要挪走"的文件数（见报告里的 `localExtras`） */
+	let localExtras = 0;
 	const localDeleted = new Set(header.deleted.map(item => item.path));
-	/** 这次按用户的选择跳过的删除（包里点名要删，但留着） */
-	let deletesSkipped = 0;
-	const skipDeletes = options.skipDeletions === true;
 
 	// ------------------------------------------- 不走三方比对的两条路
 	//
@@ -587,6 +570,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	//   - 不搞三方比对、不按设置合并：合并出来的状态既不等于包、也不等于本机，
 	//     下一次导出的更新包 `base` 就对不上，两台机器开始互相报"基准对不上"。
 	//
+	// **严格镜像（更新包的「严格同步」档）**：应用完**仓库 == 包送到的状态** ——
+	//   - 包里点名的文件：一律用包里的版本（本地动过的那份先挪进回收目录）；
+	//   - `header.deleted` 点名的照删；
+	//   - **本地多出来的文件全挪进回收目录**（不在"包送到的状态"里的，一个不留）——
+	//     更新包的"送到的状态" ＝ 我站的那一点 ＋ 条目 − 点名删除（起点相等由 checkAncestor 保证）。
+	//
 	// **`listed-wins`（界面「以包为准」，只给更新包）**：只动**包里点名**的文件 ——
 	//   - 条目一律用包里的版本（不管包里那份是新的还是旧的），本地改过的那份进回收目录；
 	//   - `header.deleted` 点名的照删；
@@ -594,7 +583,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	//
 	// 两条都不能走三方比对：因为"只有本地改了、包里没改"时三方比分会判成"上传"（本地说了算），
 	// 在包的方向上被过滤掉 —— 那就不叫"以包为准"了。
-	if (mirrorFull || strictness === 'listed-wins') {
+	if (mirrorFull || strict || strictness === 'listed-wins') {
 		// ① 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
 		for (const entry of header.entries) {
 			const here = local.files.get(entry.path);
@@ -615,28 +604,36 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				kind: 'write',
 				path: entry.path,
 				entry,
-				// 本地那份动过的先挪进回收目录，别让"以包为准"顺手把本地改动抹掉
+				// 本地那份动过的先挪进回收目录 —— 严格档下 `keepBackup` 本来就是 true
+				// （见上面那段：强制档必然先备份），绝不让"严格同步"顺手抹掉本地改动
 				backup: localChanged && keepBackup,
 			});
 		}
 
 		// ② 包里**没有**的本地文件
-		if (mirrorFull) {
-			// 镜像的承诺就是"仓库 == 包"：全删（连本机新建的也删）。
-			// 走的是 `delete` 动作，所以开着回收目录时它们都进回收目录，捞得回来。
+		if (mirrorFull || strict) {
+			/**
+			 * "包送到的状态"里有哪些文件：
+			 * - 完整副本：包自己的完整清单（`entries`）；
+			 * - 更新包：**我站的那一点**（`baseline`，起点相等由 `checkAncestor` 保证）
+			 *   ＋ 包里点名的条目 − 包里点名的删除。
+			 * 不在这个集合里的本地文件（我自己新建的、对方删过的、以及那边压根没有的）
+			 * 一律挪进回收目录 —— 这就是"严格同步"的承诺：应用完仓库 == 包。
+			 */
+			const kept = new Set<string>(mirrorFull ? [] : Object.keys(baseline));
+			for (const entry of header.entries) kept.add(entry.path);
+			for (const item of header.deleted) kept.delete(item.path);
 			for (const file of local.files.keys()) {
-				if (entriesByPath.has(file)) continue;
+				if (kept.has(file)) continue;
 				deletes++;
+				if (!localDeleted.has(file)) localExtras++;
+				// 走 `delete` 动作：开着回收目录时它们都进回收目录，捞得回来
 				actions.push({ kind: 'delete', path: file });
 			}
 		} else {
 			// `listed-wins`：只删 `header.deleted` **点名**的那些，其余一个不动
 			for (const item of header.deleted) {
 				if (!local.files.has(item.path)) continue;
-				if (skipDeletes) {
-					deletesSkipped++;
-					continue;
-				}
 				deletes++;
 				actions.push({ kind: 'delete', path: item.path });
 			}
@@ -680,10 +677,6 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				// 所以：更新包只按它**点名**的删除清单（`header.deleted`）删；
 				// 只有完整包才是"完整清单"，那时"基准里有、包里没有"确实是对方删过它。
 				if (header.mode !== 'full' && !localDeleted.has(action.path)) break;
-				if (skipDeletes) {
-					deletesSkipped++;
-					break;
-				}
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
@@ -792,8 +785,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	for (const item of header.deleted) {
 		const here = local.files.get(item.path);
 		if (!here) continue;
-		// 强制档下这些会被删掉，就不算"保留"了 —— 除非这次勾了"不执行包里的删除"
-		if (!skipDeletes && strictness !== 'normal' && strictness !== 'listed-wins') continue;
+		// 严格档下这些会被删掉，就不算"保留"了
+		if (strictness !== 'normal' && strictness !== 'listed-wins') continue;
 		const base = baseline[item.path];
 		const stillBase = base && here.size === base.size && Math.abs(here.mtime - base.mtime) <= TOLERANCE;
 		if (!stillBase) keptDeletes++;
@@ -868,7 +861,6 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		propagateDeletions,
 		keepBackup,
 		strictness,
-		strictnessDowngraded,
 		baselineMatch: compareBaseline(state.bundle?.fullHash ?? null, header),
 		myBaseline: state.bundle?.fullHash ?? null,
 		bundleBaseline: baselineOfBundle(header),
@@ -886,7 +878,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		deletes,
 		keptDeletes,
 		extraDeletes,
-		deletesSkipped,
+		localExtras,
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
 		pendingChanges: anchor ? pendingChanges : null,

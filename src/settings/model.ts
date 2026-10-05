@@ -1,6 +1,5 @@
 import { BUNDLE_ROOT_DIR, BUNDLE_SUBDIR } from '../bundle/paths';
 import { DEFAULT_EXCLUDES } from '../sync/exclude';
-import type { ConflictStrategy } from '../sync/types';
 import { toNative } from '../utils/paths';
 
 /**
@@ -9,8 +8,8 @@ import { toNative } from '../utils/paths';
  * 面板怎么渲染不在这里（见 `fields/` 与 `tab.ts`）；这里只回答
  * "有哪些设置、默认是多少、脏数据怎么收敛"。
  *
- * 0.8.0 砍掉「同步到本地副本」通道之后，设置只剩三件事：
- * **包放在哪 / 什么时候自动留包 / 应用包时默认怎么处理**。
+ * 0.8.0 砍掉「同步到本地副本」通道、0.11.0 把应用收成"严格同步"之后，设置只剩两件事：
+ * **包放在哪 / 什么时候自动留包**。
  */
 
 /** 日志级别：控制台里输出多少（见 src/utils/log.ts） */
@@ -22,12 +21,6 @@ export const LOG_LEVEL_OPTIONS: Record<LogLevel, string> = {
 	silent: '不输出',
 	error: '只记错误',
 	debug: '全部输出（排查问题时用）',
-};
-
-export const CONFLICT_OPTIONS: Record<ConflictStrategy, string> = {
-	'keep-both': '两份都留（新的占原名，旧的存成冲突副本）',
-	'local-wins': '以我为准（我这边的改动留下）',
-	'remote-wins': '以包为准（用包里那一版）',
 };
 
 /** 自动留包间隔（分钟）：键是存进 data.json 的值，值是面板上的文案 */
@@ -73,15 +66,10 @@ export interface PluginSettings {
 	/** 不进包的文件：一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
 	excludePatterns: string;
 
-	// ------------------------------------------------------------ 应用同步包时的默认处理
-	// 这三项只在「应用方式＝按设置」（ApplyStrictness.normal）时生效；
-	// 对话框里选「以包为准 / 完全镜像」会各按各的规矩来，不看这里。
-	/** 包里点名要删的文件，这边也跟着删吗（关掉的话它们会留着） */
-	propagateDeletions: boolean;
-	/** 删掉的文件先挪进回收目录而不是直接删 */
-	deletedToTrash: boolean;
-	/** 两边都改了怎么办 */
-	conflictStrategy: ConflictStrategy;
+	// 0.11.0 删掉了「应用同步包时的默认处理」那一组三项（`propagateDeletions` /
+	// `deletedToTrash` / `conflictStrategy`）：应用只剩一种语义 ——
+	// **严格同步**（应用完仓库 == 包），没有可配的地方。合并那条路（`ApplyStrictness.normal`）
+	// 只剩引擎与测试在用，它的默认值写在 `bundle/apply.ts` 里。
 
 	// ------------------------------------------------------------ 自动留包
 	// 这三个只管**时机**，留不留、留哪种看下面的 autoExport* 两个开关。
@@ -143,9 +131,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
 	logLevel: 'error',
 
-	propagateDeletions: true,
-	deletedToTrash: true,
-	conflictStrategy: 'keep-both',
 	excludePatterns: DEFAULT_EXCLUDES,
 
 	syncOnStartup: false,
@@ -196,10 +181,6 @@ export function coerceText(value: unknown, fallback = ''): string {
 
 export function coerceLogLevel(value: unknown): LogLevel {
 	return coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel);
-}
-
-export function coerceConflict(value: unknown): ConflictStrategy {
-	return coerceChoice(value, ['keep-both', 'local-wins', 'remote-wins'] as const, DEFAULT_SETTINGS.conflictStrategy);
 }
 
 export function coerceBundleMode(value: unknown): 'full' | 'changes' {
@@ -258,9 +239,6 @@ export function settingsFrom(data: unknown): PluginSettings {
 		enabled: coerceBoolean(raw.enabled, DEFAULT_SETTINGS.enabled),
 		logLevel: coerceLogLevel(raw.logLevel),
 
-		propagateDeletions: coerceBoolean(raw.propagateDeletions, DEFAULT_SETTINGS.propagateDeletions),
-		deletedToTrash: coerceBoolean(raw.deletedToTrash, DEFAULT_SETTINGS.deletedToTrash),
-		conflictStrategy: coerceConflict(raw.conflictStrategy),
 		excludePatterns: coerceText(raw.excludePatterns, DEFAULT_SETTINGS.excludePatterns),
 
 		syncOnStartup: coerceBoolean(raw.syncOnStartup, DEFAULT_SETTINGS.syncOnStartup),

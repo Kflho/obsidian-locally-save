@@ -158,15 +158,20 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
      应用它一个文件都不会改，报告里那句 `targetIsMine` 就是这个结论）。
      **别退回"基准对不上也降级合并"**：更新包只有变过的那部分，基准不是同一份时
      "基准里有、包里没提到"会被当成"对方删过它"，一大片本机文件要没。
-  - 更新包那一套档位不变（`ApplyStrictness`：`normal` / `listed-wins` / `bundle-wins` / `mirror`）：
-    `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`）；
-    **`listed-wins`（界面叫「以包为准」）**只动包里点名的文件 —— 条目一律用包里的版本
+  - **档位表只剩引擎意义**（`ApplyStrictness`：`normal` / `listed-wins` / `bundle-wins` / `mirror`）：
+    界面上的手动应用一律 `mirror`（见下面「应用只剩一种语义」那条），`APPLY_CHOICES` 两张表
+    各只剩一项（`full` → `mirror`，`changes` → `strict`），`ui/bundle-modal.ts` **不读它**；
+    `test/bundle.test.ts` 守着这张表 —— 别再把它接回界面。
+    `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`），
+    现在只有 `incoming.ts`（自动收包）与 `chain.ts`（接链）在用；
+    **`listed-wins`** 只动包里点名的文件 —— 条目一律用包里的版本
     （不管包里那份是新的还是旧的；本地改过的那份进回收目录的「冲突」文件夹）、
     `header.deleted` 点名的照删，**包里没提到的一个不动**；
     强制档不走三方比对（"只有本地改了、包里没改"会被判成"上传"而在包的方向上过滤掉）；
-    强制档**必然先备份**（`keepBackup` 忽略用户设置）；
-    引擎层兜底：把 `bundle-wins` / `mirror` 传给更新包会 clamp 成 `normal`（`strictnessDowngraded` 标出来）。
-    （术语上别叫"回退"：包里那一版**可能比本地还新**，用户提过这个措辞不准确。）
+    严格档**必然先备份**（`keepBackup` 忽略调用方传的值）；
+    ~~引擎层兜底：把 bundle-wins / mirror 传给更新包会 clamp 成 normal~~ —— **0.11 起不 clamp 了**，
+    `strictnessDowngraded` 这个字段也一起删了（术语上别叫"回退"：包里那一版**可能比本地还新**，
+    用户提过这个措辞不准确。）
 - **更新包自带的 `base` 优先于本机记录**（`apply.ts` 里那个 `seed`）：包说"我以为你原来是这样"
   （`baseSize` / `baseMtime`），那比本机 `state.bundle.files` 里那份更贴近事实 ——
   本机记录只是"上次我这边记下的样子"，对方重新立过基准 / 我中间导过别的包时就过期了。
@@ -362,9 +367,9 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   发给对方。用户报过的现场：对方那台机器的**仓库比它的状态旧**（`sync-state.json` 还是从
   另一台机器拷过去的），于是凭空要求删掉我们本地明明还在的两个 schedule 文件。
   从"包自己的清单"出发还顺带解决"只拿到一半"（有些文件写失败）的情况：不会声称"我有"。
-- **「这次不执行包里的删除」**（`ApplyOptions.skipDeletions` → `report.deletesSkipped`）：
-  应用时的一个兜底勾选 —— 包里点名要删的一律留着，先不动。对方基准不对时用它扛一下，
-  而不是赌一把把本地文件删掉（删了虽然进回收目录，但用户根本不该被迫做这个决定）。
+- ~~**「这次不执行包里的删除」**（`ApplyOptions.skipDeletions` → `report.deletesSkipped`）~~
+  —— **0.11 删掉了**：应用只剩严格同步，包里点名的删除照删；本地改动在动手前会先存成一个更新包，
+  不必再让用户在"删"与"不删"之间赌一把（那条兜底本来就是为旧的合并语义准备的）。
 - **同步包更新记录（像 git log）**：`state.bundleLog`（`BundleLogEntry`，只留最近
   `BUNDLE_LOG_LIMIT = 100` 条，别把状态文件撑大 —— 它每次读写都要过一遍）＋
   `bundle/log.ts` 的 `appendBundleLog / describeLogEntry / describeBundlePosition /
@@ -377,6 +382,33 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   只装自上一个基准点以来的新改动，**不存在"越攒越大"**。想多留一个还原点随时可以在
   「导出同步包…」勾「完整副本」（管理窗口里那个「立新基准…」按钮 0.11 也一起删了：
   基准点自己往前走，手动换基准这件事不存在了）。旧 `data.json` 里那个字段留着不读即可。
+
+### 应用只剩一种语义：严格同步（0.11，用户拍板）
+
+- **界面上没有"应用方式"可选**：完整副本与更新包都走 `mirror` —— 包里点名的文件一律用包里的版本
+  （本地动过的那份先进回收目录）、`header.deleted` 点名的照删、**本地多出来的文件也挪进回收目录**。
+  应用完**仓库 == 包送到的状态**，状态编号当场一致（报告与通知里那句「✓ 跟对方完全一致」）。
+- **为什么更新包也敢镜像**：它的起点必须与本机站的基准点**完全相等**（`checkAncestor` 拦在前面），
+  所以"送到的状态"是确定的 ＝ 我站的那一点 ＋ 条目 − 点名删除；旧版本 clamp 成 `normal` 的理由
+  （"没提到的会被当成该删"）在链条模型下不成立 —— **clamp 与 `strictnessDowngraded` 一起删掉了**。
+- **应用前先把本机改动存成一个更新包**（`ui/bundle-modal.ts` 的 `parkLocalChanges`）——
+  严格档会覆盖/挪走本地东西，先落一个包才不丢；**存不下就不动手**（宁可这次不应用）。
+  **注意那个包的起点是"应用前那一点"**：对方导出这个包之后自己也往前走到新点了，
+  所以他**不能直接应用它**（`checkAncestor` 会判接不上），它此刻是一份**本地备份**。
+  「你的改动怎么再回到对方那边」= 把改动放回新点之后再导一份（`chain.ts` 的 `runChain`
+  就是这么干的：存改动 → 按顺序应用 → 放回）。**下一轮要问用户**：
+  手动应用这条路要不要也走"应用完把改动放回、再导一份对方能直接收的更新包"，
+  而不是让改动停在旧起点的那份备份里。
+- **删掉的设置与选项**（用户："那些同步设置留着反而破坏这个过程"）：`conflictStrategy` /
+  `propagateDeletions` / `deletedToTrash` 三项设置、对话框里的「这次不执行包里的删除」
+  （`ApplyOptions.skipDeletions` 与 `report.deletesSkipped`），以及 5 档 `APPLY_CHOICES`
+  （更新包只剩一项 `strict`）。**备份必然打开**（严格档强制 `keepBackup`）。
+- **合并那条路（`normal`）现在只有引擎与测试在用**（`planSync` 那套还在、`test/diff.test.ts` 照旧守着）：
+  **界面上的手动应用一律严格档**；自动收包（`incoming.ts`）暂时仍按 `normal` 调用（更保守 ——
+  自动那条路的边界是"只应用不会动到本地已有东西的包"，合并语义正好对上），接链（`chain.ts`）同理。
+  要不要把这两处也切到严格档，等用户用过手动那条路之后再定。
+- 还想知道的：**包没提到、而我又改过的文件**，包里没有它的字节，谁也变不出对方那一版 ——
+  它们留在原地，报告里会说"还差一点"，下次导出更新包会带上，对方应用完两边就一致了。
 
 ## 目录结构
 
@@ -408,6 +440,7 @@ test/              测试（manifest / exclude / diff / bundle / chain / auto-ex
   `toggle-enabled`。后两个"副本"命令现在是**过渡占位**（只弹指路通知），下一版删。
 - **设置字段名不许改名**（用户 `data.json` 里存着它），改名前要写迁移。
   0.11.0 删了 `bundleSizeWarnLimit`（链条模型下更新包不再越攒越大，"提醒换基准"没有前提了），
+  0.11.0 还删了 `conflictStrategy` / `propagateDeletions` / `deletedToTrash`（应用只剩严格同步），
   0.8.0 删了 `targetDir` / `syncDirection`（副本通道），0.7.0 一口气删了 6 项
   （`startupNotice` / `greeting` / `showLastSyncInStatusBar` / `bundleWindowMaximize` /
   `rememberFingerprints` / `pruneSupersededBundles`）—— 删掉的字段留在旧 `data.json` 里
@@ -415,7 +448,7 @@ test/              测试（manifest / exclude / diff / bundle / chain / auto-ex
   字段表不多不少**，加 / 删字段必须同时改它。
 - 现在的设置分四页：「通用」「同步包」「自动留包」「界面与交互」。
   「同步包」页里的分组：包放在哪 · 自动留包 · **更新包从哪个状态到哪个状态** ·
-  应用同步包时的默认处理 · 手动导出 · 管理 · 应用同步包 · 用 Obsidian 直接打开。
+  手动导出 · 管理 · 应用同步包 · 用 Obsidian 直接打开。
   那一组的两个下拉**选项是动态的**（`ControlSpec.dropdown.options` 允许给函数，
   `fields/types.ts` 的 `dropdownOptions()` 在两条渲染路径上都解析它）——
   "本地有几份完整包"要到渲染那一刻才知道。
@@ -423,7 +456,7 @@ test/              测试（manifest / exclude / diff / bundle / chain / auto-ex
 ## 改代码的流程
 
 ```bash
-npm test        # 819 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 826 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）—— 0 error 才算过
 ```
@@ -455,6 +488,11 @@ CI 直接红（本机却全绿）。发版流程里的 `npm test` 就是这道�
 
 ## 还没做的事
 
+- [ ] **应用前存下的那份改动怎么再流回对方**（见上面「应用只剩一种语义」那节最后一条）：
+      `parkLocalChanges` 存出来的包接在**应用前**那个基准点上，对方走到新点上了、应用不了它；
+      候选做法是照 `chain.ts` 的 `runChain`：应用完把改动**放回**新点之上，
+      再导一份「新点 → 新点＋我的改动」的更新包（对方站在新点上直接能收）。
+      代价：放回之后仓库 ≠ 包（状态编号会跟对方不一样），得让用户拍板要不要这样。
 - [ ] **自动接链的界面（引擎已按基准点链条改好，`test/chain.test.ts` 守着）**：
       `src/bundle/chain.ts` 的 `planChain()`（只读分析：按 `baselineHash` ∩ `targetBaselineHash` 认链 / 判本机这一点在不在链上 / 数出本机改动）
       与 `runChain()`（先把本机改动存到临时目录 → 按顺序应用链上的包 → 把改动放回），
