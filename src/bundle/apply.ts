@@ -7,7 +7,7 @@ import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
-import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
+import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { loadState, saveState } from '../sync/state';
 import type { StateIdInfo, StateIdRecord } from '../sync/state';
 import { compareStateId, computeStateId } from '../sync/state-id';
@@ -309,6 +309,21 @@ export interface ApplyPlan {
 	foldersToRemove: string[];
 	/** 执行阶段照着做的策略 */
 	options: { conflictStrategy: ConflictStrategy; propagateDeletions: boolean; keepBackup: boolean };
+}
+
+/**
+ * 这次应用会不会"动到本地已经有的东西"：删文件、删空文件夹、覆盖本地改动、产生冲突副本。
+ *
+ * 谁在问这件事：
+ * - 应用对话框 —— 要在动手前多问一句"确定吗"；
+ * - 自动应用（`bundle/incoming.ts`）—— **只有不破坏才算"可以自己动手"**，
+ *   一旦要删东西就退回去让人自己看。删除是唯一不可逆的动作，不赌。
+ */
+export function isDestructivePlan(plan: ApplyPlan): boolean {
+	return plan.actions.some(action => action.kind === 'delete')
+		|| plan.foldersToRemove.length > 0
+		|| plan.report.conflicts > 0
+		|| plan.report.forcedOverwrites > 0;
 }
 
 export interface ApplyResult {

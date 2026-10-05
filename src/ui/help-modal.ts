@@ -1,5 +1,4 @@
 import { Modal } from 'obsidian';
-import type { App } from 'obsidian';
 
 /**
  * 「同步包怎么用」说明窗口。
@@ -7,6 +6,9 @@ import type { App } from 'obsidian';
  * 为什么要专门做个窗口：同步包是**跨机器**用的，光看设置里那几行说明很难拼出
  * 完整流程（在哪台机器上点哪个、包里到底装了什么、什么时候该用完整副本）。
  * 与其让人去翻 README，不如在设置面板里直接放个按钮。
+ *
+ * 0.8.0 砍掉「同步到本地副本」通道之后，这份说明也收敛成一条线：
+ * **离线单文件搬运（+ 还原点）**，不走网络也不做"连续同步的文件夹副本"。
  */
 export class BundleHelpModal extends Modal {
 	onOpen(): void {
@@ -15,13 +17,18 @@ export class BundleHelpModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '同步包怎么用' });
 
-		contentEl.createEl('h3', { text: '两条通道，别混' });
-		const channels = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		channels.createEl('li', {
-			text: '本地同步：同一台机器上，仓库 ↔ 某个文件夹副本。走文件系统，几百 MB 只要几秒',
+		contentEl.createEl('h3', { text: '它就干一件事' });
+		contentEl.createEl('p', {
+			text: '把仓库（或自上次完整副本以来的改动）装进**一个文件**，'
+				+ '用 U 盘 / 网盘 / 聊天软件搬到另一台机器上应用。全程不联网。',
+			cls: 'locally-save-hint',
 		});
-		channels.createEl('li', {
-			text: '同步包：把仓库（或改动）装进**一个文件**，用 U 盘 / 网盘 / 聊天软件搬到另一台机器上应用',
+		contentEl.createEl('p', {
+			text: '想要"两台机器通过一个共用目录（网盘 / NAS / U 盘）一直自动同步"，'
+				+ '那不是这个插件要做的事 —— 用 Remotely Save + WebDAV / 坚果云这类走云的方案，'
+				+ '它们在这件事上更成熟。这里是**离线搬运 + 还原点**：包带校验和、带世代、'
+				+ '还带"两边内容一不一样"的状态编号。',
+			cls: 'locally-save-hint',
 		});
 
 		contentEl.createEl('h3', { text: '三步走' });
@@ -74,7 +81,7 @@ export class BundleHelpModal extends Modal {
 				+ '挪进回收站 / 彻底删除**',
 		});
 		clean.createEl('li', {
-			text: '「**挪进回收站**」只是挪走：默认落在"目标文件夹/.lsave/bundles-trash/时间戳"'
+			text: '「**挪进回收站**」只是挪走：落在**同步包文件夹**里的 `.lsave/bundles-trash/时间戳`'
 				+ '（跟 bundles 平级，不再套一层 .lsave），包没有真的消失，想反悔去那个目录里手动捞回来就行'
 				+ '（弹窗里也会把完整路径写出来）',
 		});
@@ -162,22 +169,10 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
-		contentEl.createEl('h3', { text: '应用完，本地副本要不要跟上？' });
-		contentEl.createEl('p', {
-			text: '对话框里有一项「应用后顺便同步到本地副本」（填了目标文件夹时默认开着）：'
-				+ '应用完再跑一次正常同步，把这次的改动推到副本。'
-				+ '不这么做的话，备份会在应用完包之后悄悄落后一截 —— 你以为它是新的，其实不是。',
-			cls: 'locally-save-hint',
-		});
-		contentEl.createEl('p', {
-			text: '顺序上有个讲究：包里删掉的文件，会先从副本里也清掉、再把基准划掉，然后才同步。'
-				+ '否则常规同步会把它们当成"本地缺了、该从副本取回"，刚删掉的文件又长回仓库。',
-			cls: 'locally-save-hint',
-		});
-
 		contentEl.createEl('h3', { text: '应用时按什么规则处理' });
 		contentEl.createEl('p', {
-			text: '和本地副本同步**同一套规则**（就是设置里那两个开关），没有"三种模式"那种死板的东西：',
+			text: '跟设置里那几条一样（「两边都改了怎么办」「包里删掉的文件，这边也删」「删除前先备份」），'
+				+ '没有"三种模式"那种死板的东西：',
 			cls: 'locally-save-hint',
 		});
 		const rules = contentEl.createEl('ul', { cls: 'locally-save-facts' });
@@ -186,7 +181,7 @@ export class BundleHelpModal extends Modal {
 				+ '输的那份挪进回收目录的「冲突」文件夹（`.trash/locally-save/冲突`），不留在仓库里',
 		});
 		rules.createEl('li', {
-			text: '本地有、包里没有、但基准里也有 → 对方删过它 → 按「同步删除」处理（关掉就取回来）。'
+			text: '本地有、包里没有、但基准里也有 → 对方删过它 → 按「包里删掉的文件，这边也删」处理（关掉就取回来）。'
 				+ '**这条只对完整副本成立**：完整副本是"完整清单"，而更新包只装变过的文件，'
 				+ '"没提到"什么也不代表 —— 更新包只按它**点名**的删除清单删，其余文件一律不动',
 		});
@@ -206,7 +201,7 @@ export class BundleHelpModal extends Modal {
 		dirs.createEl('li', {
 			text: '删除也传得过去，但要**过基准检查**：只有"上次同步时两边都有过"的文件夹，'
 				+ '才会因为对面没了而跟着删 —— 刚新建的文件夹绝不会被当成"对面删过它"。'
-				+ '这条与文件的删除规矩完全一致，也受「同步删除」开关管',
+				+ '这条与文件的删除规矩完全一致，也受「包里删掉的文件，这边也删」开关管',
 		});
 		dirs.createEl('li', {
 			text: '删的方式是 `rmdir`：**里面但凡还有东西就删不动**。所以哪怕判断错了，'
@@ -219,6 +214,22 @@ export class BundleHelpModal extends Modal {
 		dirs.createEl('li', {
 			text: '文件夹与同名文件撞车（本地是文件夹、包里是文件，或反过来）：默认档**如实报失败、不动那个文件夹**；'
 				+ '只有强制档才会把它挪进回收目录腾位置',
+		});
+
+		contentEl.createEl('h3', { text: '谁什么时候动手' });
+		const automation = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		automation.createEl('li', {
+			text: '**自动留包**：「同步包」页选留哪种包（留更新包 / 留完整包），「自动留包」页选什么时候留'
+				+ '（启动后 / 定时 / 保存后）。**自上次留包以来没有变化时一个包都不写**',
+		});
+		automation.createEl('li', {
+			text: '**自动应用收到的包**（默认关）：别人把包放进「同步包文件夹」后，插件每 30 秒看一眼 ——'
+				+ '**更新包只在完全不会动到本地已有的东西时**才自己应用（不删文件、不覆盖你改过的内容、'
+				+ '不产生冲突副本）；要删东西、或者两边都改过时只提示一句。'
+				+ '**完整副本从来不自动应用**（它可能删掉你本机独有的文件）',
+		});
+		automation.createEl('li', {
+			text: '两件事都是**会写盘的动作**，默认全关；真动手之前还有确认框，删除一律进回收目录',
 		});
 
 		contentEl.createEl('h3', { text: '双击 .lsave 直接用 Obsidian 打开' });

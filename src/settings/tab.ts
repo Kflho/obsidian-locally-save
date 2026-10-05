@@ -119,7 +119,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			}
 			case 'text': {
 				const value = this.getControlValue(field.key);
-				// 灰底提示可能是动态的（"留空＝跟着目标文件夹走"这类）
+				// 灰底提示可能是动态的（按当前设置算出来的一句提示）
 				const placeholder = placeholderOf(field.control, settings);
 				setting.addText(text => text
 					.setPlaceholder(placeholder)
@@ -197,7 +197,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			...(field.visible ? { visible: () => field.visible?.(settings()) === true } : {}),
 			control,
 		};
-		return definition as unknown as SettingDefinitionItem;
+		return definition as SettingDefinitionItem;
 	}
 
 	/**
@@ -220,7 +220,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 				});
 			},
 		};
-		return definition as unknown as SettingDefinitionItem;
+		return definition as SettingDefinitionItem;
 	}
 
 	/**

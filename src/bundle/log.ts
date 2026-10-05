@@ -40,6 +40,23 @@ export function describeLogEntry(entry: BundleLogEntry): string {
 }
 
 /**
+ * 状态栏那一行：最近一次导出 / 应用干了什么。
+ *
+ * 0.8.0 之前这句话来自「上次同步到本地副本」的记录（`LastSyncRecord`）。
+ * 副本通道砍掉之后改读**更新记录的最后一条** —— 只有一条真相来源：
+ * 状态栏那句话就是它的简版，用户点开「更新记录…」看到的是详情。
+ */
+export function describeLastActivity(state: PluginState): string {
+	const log = Array.isArray(state.bundleLog) ? state.bundleLog : [];
+	const last = log[log.length - 1];
+	if (!last) return '尚未留包';
+	const verb = last.direction === 'export' ? '上次留包' : '上次应用';
+	const kind = last.mode === 'full' ? '完整副本' : '更新包';
+	const deleted = last.deleted > 0 ? `（含 ${last.deleted} 个删除）` : '';
+	return `${verb} ${formatTime(last.at)} · ${kind} ${last.entries} 个文件${deleted}`;
+}
+
+/**
  * 状态编号怎么念：`3f9a2c1d（10378 个文件 · 4321 个文件夹）`。
  * 没能核验内容的文件必须写出来 —— 那种情况下编号不是完全的内容指纹。
  */

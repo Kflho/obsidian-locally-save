@@ -202,22 +202,6 @@ export async function ensureDir(absDir: string): Promise<void> {
 	await fs.promises.mkdir(absDir, { recursive: true });
 }
 
-/**
- * 复制文件并**把修改时间对齐到源文件**。
- *
- * 对齐 mtime 是整套机制的关键：比对靠"大小 + 修改时间"，
- * 复制后两边时间一致，下一轮才会认定"没变过"；否则每轮都会重传一遍。
- */
-export async function copyFilePreservingMtime(fromAbs: string, toAbs: string): Promise<FileRecord> {
-	const stat = await fs.promises.stat(fromAbs);
-	await ensureDir(path.dirname(toAbs));
-	await fs.promises.copyFile(fromAbs, toAbs);
-	// 用"秒 + 小数"传时间（Date 只有毫秒精度，会把亚毫秒的部分截掉，
-	// 两边就会差那么零点几毫秒 —— 虽然容差能兜住，但没必要留下这点偏差）
-	await fs.promises.utimes(toAbs, stat.atimeMs / 1000, stat.mtimeMs / 1000);
-	return { size: stat.size, mtime: stat.mtimeMs };
-}
-
 /** 删除文件；文件本来就不在也算成功（另一侧可能已经删过了） */
 export async function removeFile(absPath: string): Promise<void> {
 	try {

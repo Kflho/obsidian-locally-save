@@ -2,11 +2,9 @@ import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
 import { registerCommands } from './commands';
 import { LocallySaveSettingTab, settingsFrom } from './settings';
 import type { PluginSettings } from './settings';
-import { runSync as runSyncEngine } from './sync/runner';
-import type { SyncHost, SyncOutcome, SyncProgress, SyncRunOptions } from './sync/runner';
+import { describeLastActivity } from './bundle/log';
 import { STATE_FILE_NAME, loadState } from './sync/state';
-import { statusBarText } from './sync/summary';
-import { applyBundleAction, exportBundleAction, syncNow } from './ui/actions';
+import { applyBundleAction, checkIncomingBundles, exportBundleAction, exportBundlesNow } from './ui/actions';
 import { registerBundleDropTarget } from './ui/drop-watch';
 import { registerProtocolHandler } from './ui/protocol';
 import { SyncStatusBar } from './ui/progress';
@@ -14,31 +12,44 @@ import { pickIcon } from './ui/ribbon';
 import { createLogger } from './utils/log';
 import { toNative } from './utils/paths';
 
-/** 自动同步的检查节拍：每 30 秒看一次"到点了吗" */
+/** 自动留包的检查节拍：每 30 秒看一次"到点了吗" */
 const TICK_MS = 30_000;
 
 /**
  * 插件入口：只管生命周期与装配。
  *
- * 同步引擎通过 `SyncHost` 接口拿它需要的东西（仓库路径、状态文件、进度回调），
- * 所以引擎本身不 import obsidian，能在测试里拿临时目录直接跑。
+ * 0.8.0 砍掉「同步到本地副本」通道之后，插件只剩**同步包**一条线：
+ * 留包（导出：完整副本 / 更新包）与应用（导入）。仓库存放之外的读写都走
+ * `bundle/`，这里只提供它们要的东西（仓库路径、状态文件、配置目录、进度回调）。
  */
-export default class LocallySavePlugin extends Plugin implements SyncHost {
+export default class LocallySavePlugin extends Plugin {
 	settings!: PluginSettings;
 	/** 跟着设置走的日志器（见 utils/log.ts） */
 	readonly log = createLogger(() => this.settings.logLevel);
-	/** 状态栏那一格（进度与上次结果） */
+	/** 状态栏那一格（进度与上次留包的结果） */
 	statusBar!: SyncStatusBar;
 
-	/** 正在跑的同步：同一时间只允许一轮，避免两边互相打架 */
-	private syncing: Promise<SyncOutcome> | null = null;
-	/** 上一次同步完成的时间（定时同步靠它判断到没到点） */
-	private lastSyncAt = 0;
-	/** 保存事件攒到的"脏"时间：停下来多久之后才真的同步 */
-	private saveDirtyAt = 0;
-	private pendingSaveSync = false;
 	/**
-	 * 左侧栏的三个图标：同步、导出包、应用包。
+	 * 正在留包：定时触发看到它就让路。
+	 *
+	 * 真正的串行锁在 `ui/actions.ts` 的 `exportBundlesNow`（那里是所有留包入口的交汇点）；
+	 * 这个标记是给 `tick()` 用的 —— 不然一轮跑了 10 分钟时，每 30 秒的节拍都会去敲一次门。
+	 */
+	bundleBusy = false;
+	/**
+	 * 正在检查 / 应用"别人发来的包"（`autoApplyIncoming` 那条路）。
+	 *
+	 * 与 `bundleBusy` 分开记：两件事都会写文件（一个写包目录、一个写仓库），
+	 * 一拍之内不许同时开跑 —— 留包要扫仓库，正好扫到"应用到一半"的仓库就麻烦了。
+	 */
+	incomingBusy = false;
+	/** 上一次留包跑完的时间（定时留包靠它判断到没到点） */
+	lastBundleAt = 0;
+	/** 保存事件攒到的"脏"时间：停下来多久之后才真的留包 */
+	private saveDirtyAt = 0;
+	private pendingSave = false;
+	/**
+	 * 左侧栏的三个图标：留包、导出包、应用包。
 	 * 都先建好、再按设置切显隐 —— 改开关立刻生效，不用重载插件。
 	 */
 	private ribbonSyncEl: HTMLElement | null = null;
@@ -53,9 +64,9 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		// 左侧栏三个入口。图标名用运行时清单挑（类型上 IconName 就是 string，
 		// 写错了只会静默显示成空白方块，见 ui/ribbon.ts）
 		this.ribbonSyncEl = this.addRibbonIcon(
-			pickIcon(['refresh-cw', 'hard-drive', 'save']),
-			'Locally Save：立即同步到本地副本',
-			() => { void syncNow(this); },
+			pickIcon(['package-plus', 'archive', 'save']),
+			'Locally Save：立即留包（导出同步包）',
+			() => { void exportBundlesNow(this); },
 		);
 		this.ribbonExportEl = this.addRibbonIcon(
 			pickIcon(['package', 'archive', 'download']),
@@ -68,8 +79,8 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 			() => { applyBundleAction(this); },
 		);
 		this.refreshEntryPoints();
-		// 把"上次同步"从状态文件里读回来 —— 不然每次重启状态栏都变回"尚未同步"
-		await this.restoreLastSync();
+		// 把"上次留包 / 上次应用"从状态文件里读回来 —— 不然每次重启状态栏都变回"尚未留包"
+		await this.restoreLastActivity();
 
 		registerCommands(this);
 		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
@@ -80,16 +91,16 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		registerProtocolHandler(this);
 		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 
-		// 一个固定节拍管两种自动同步（定时 / 保存后），
+		// 一个固定节拍管两种自动留包（定时 / 保存后），
 		// 这样改设置立刻生效，不用重建定时器（重建最容易漏清旧的）
 		this.registerInterval(window.setInterval(() => this.tick(), TICK_MS));
 		this.registerEvent(this.app.vault.on('modify', () => {
 			this.saveDirtyAt = Date.now();
-			this.pendingSaveSync = true;
+			this.pendingSave = true;
 		}));
 
 		if (this.settings.syncOnStartup) {
-			this.app.workspace.onLayoutReady(() => { void syncNow(this, {}, '启动同步'); });
+			this.app.workspace.onLayoutReady(() => { void exportBundlesNow(this, '启动留包', { quiet: true }); });
 		}
 		this.log.debug(`已加载 v${this.manifest.version}`);
 	}
@@ -98,12 +109,12 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		this.log.debug('已卸载');
 	}
 
-	// ------------------------------------------------------------ SyncHost
-	/** 仓库根目录的绝对路径。vault API 出不了库，所以同步目标只能用文件系统访问 */
+	// ------------------------------------------------------------ 给 bundle/ 与界面用的东西
+	/** 仓库根目录的绝对路径。vault API 出不了库，所以读写包只能用文件系统访问 */
 	vaultRoot(): string {
 		const adapter = this.app.vault.adapter;
 		if (!(adapter instanceof FileSystemAdapter)) {
-			throw new Error('Locally Save 只支持桌面端：同步到仓库之外的文件夹需要文件系统访问');
+			throw new Error('Locally Save 只支持桌面端：读写仓库之外的文件需要文件系统访问');
 		}
 		return adapter.getBasePath();
 	}
@@ -123,7 +134,7 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		return this.app.vault.configDir;
 	}
 
-	reportProgress(progress: SyncProgress | null): void {
+	reportProgress(progress: { done: number; total: number; path: string; label?: string } | null): void {
 		this.statusBar.showProgress(progress);
 	}
 
@@ -135,40 +146,24 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		return false;
 	}
 
-	/** 跑一轮同步；已经有一轮在跑时返回 null */
-	runSync(options: SyncRunOptions = {}): Promise<SyncOutcome | null> {
-		if (this.syncing) {
-			new Notice('上一次同步还没跑完');
-			return Promise.resolve(null);
-		}
-		const task = runSyncEngine(this, options).finally(() => {
-			this.syncing = null;
-			this.lastSyncAt = Date.now();
-			// 同步可能被中断在任意一步，收工时把进度清掉
-			this.reportProgress(null);
-		});
-		this.syncing = task;
-		return task;
-	}
-
 	async loadSettings(): Promise<void> {
 		// 走 settingsFrom 而不是 Object.assign：data.json 里的脏值 / 缺失字段在这里一次性收敛
 		this.settings = settingsFrom(await this.loadData());
 	}
 
 	/**
-	 * 启动时把上次同步的结果读回来显示。
+	 * 启动时把"上次留包 / 上次应用"读回来显示。
 	 *
-	 * 那份记录存在状态文件里（`sync-state.json` 的 `lastSync`），不随重启丢 ——
-	 * 以前只存在内存里，于是每次重启状态栏都显示"尚未同步"，看着像记录丢了。
+	 * 那句话的真相在状态文件的**更新记录**里（`bundleLog` 的最后一条），
+	 * 不随重启丢 —— 0.8.0 之前它来自"上次同步到副本"的记录，那条通道已经砍掉了。
 	 */
-	private async restoreLastSync(): Promise<void> {
+	private async restoreLastActivity(): Promise<void> {
 		try {
 			const state = await loadState(this.stateFile());
-			if (state.lastSync) this.statusBar.setSummary(statusBarText(state.lastSync));
+			this.statusBar.setSummary(describeLastActivity(state));
 		} catch (error) {
-			// 读不到不影响用：状态栏继续显示"尚未同步"，下次同步会写新的
-			this.log.debug('读回上次同步记录失败', error);
+			// 读不到不影响用：状态栏继续显示"尚未留包"，下次留包会写新的
+			this.log.debug('读回上次留包记录失败', error);
 		}
 	}
 
@@ -178,26 +173,46 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 	}
 
 	// ------------------------------------------------------------ 内部
-	/** 自动同步的节拍：定时到点了、或者保存后静置够久了，就跑一轮 */
+	/**
+	 * 自动留包 / 自动应用的节拍：每 30 秒看一次"到点了吗、有没有新包"。
+	 *
+	 * 一拍里两件事，**先看别人发来的包**（它要写仓库），再决定要不要留包：
+	 * - 收包那条路由 `autoApplyIncoming` 管，只有"完全不会动到本地已有东西"的更新包才会自己应用；
+	 * - 留包那条路由两个「自动留包」开关管，都关着时什么都不做；
+	 * - 刚应用过东西的这一拍**不再留包**（那等于立刻生成回礼包，两边容易来回搬运）。
+	 */
 	private tick(): void {
 		if (!this.settings.enabled) return;
-		if (this.syncing) return;
+		if (this.bundleBusy || this.incomingBusy) return;
+		void this.runTick();
+	}
+
+	/** 一拍的实际内容（异步）：先收包，再留包 */
+	private async runTick(): Promise<void> {
+		const acted = await checkIncomingBundles(this);
+		if (acted || this.bundleBusy || this.incomingBusy) return;
+		this.tickExport();
+	}
+
+	/** 留包那一半：定时到点了、或者保存后静置够久了，就留一轮 */
+	private tickExport(): void {
+		if (!this.settings.autoExportChanges && !this.settings.autoExportFull) return;
 
 		const minutes = this.settings.autoSyncInterval;
-		if (minutes > 0 && Date.now() - this.lastSyncAt >= minutes * 60_000) {
-			void syncNow(this, {}, '定时同步');
+		if (minutes > 0 && Date.now() - this.lastBundleAt >= minutes * 60_000) {
+			void exportBundlesNow(this, '定时留包', { quiet: true });
 			return;
 		}
 
-		// 保存后同步：0 ＝ 不同步（一个下拉管这件事，不再有单独的开关）
+		// 保存后留包：0 ＝ 不留（一个下拉管这件事，不再有单独的开关）
 		const saveDelay = this.settings.syncAfterSaveDelay;
 		if (
-			this.pendingSaveSync
+			this.pendingSave
 			&& saveDelay > 0
 			&& Date.now() - this.saveDirtyAt >= saveDelay * 1000
 		) {
-			this.pendingSaveSync = false;
-			void syncNow(this, {}, '保存后同步');
+			this.pendingSave = false;
+			void exportBundlesNow(this, '保存后留包', { quiet: true });
 		}
 	}
 

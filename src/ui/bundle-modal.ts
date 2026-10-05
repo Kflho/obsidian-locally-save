@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { APPLY_CHOICES, executeBundlePlan, findApplyChoice, planBundleApply } from '../bundle/apply';
+import { APPLY_CHOICES, executeBundlePlan, findApplyChoice, isDestructivePlan, planBundleApply } from '../bundle/apply';
 import type { ApplyChoice, ApplyPlan, ApplyResult } from '../bundle/apply';
 import type { ConflictStrategy } from '../sync/types';
 import type { StateIdInfo } from '../sync/state';
@@ -10,14 +10,10 @@ import { exportBundle, plannedExportModes } from '../bundle/export';
 import type { ExportOutcome } from '../bundle/export';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
-import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
-import { removeFromTarget } from '../sync/runner';
-import { loadState } from '../sync/state';
-import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
-import { focusWindow } from './modal-layout';
+import { focusWindow, markDestructive } from './modal-layout';
 import { offerBaselineReset } from './reset-baseline-modal';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -39,7 +35,7 @@ export class ExportBundleModal extends Modal {
 	private wantFull = false;
 	/** 用户自己填的值（可能为空 ＝ 用默认） */
 	private outDir: string;
-	/** 留空时会用的默认位置：显示成灰底提示，而不是预先填进输入框 */
+	/** 设置里那个包目录：显示成灰底提示，而不是预先填进输入框 */
 	private defaultDir: string;
 	private statusEl!: HTMLElement;
 	private whereEl!: HTMLElement;
@@ -55,12 +51,12 @@ export class ExportBundleModal extends Modal {
 		// 只显示"用户自己填的"；留空就是留空，别把默认值预先填进去 ——
 		// 那样用户一删就变成"没填路径"，还得自己猜默认在哪儿
 		this.outDir = plugin.settings.bundleDir.trim();
-		this.defaultDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		this.defaultDir = bundleBaseDir(plugin.settings);
 	}
 
-	/** 此刻实际会用的根目录：填了用填的，留空就跟着目标文件夹走 */
+	/** 此刻实际会用的根目录：在这个窗口里改过就用改的，否则就是设置里那个 */
 	private effectiveDir(): string {
-		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.outDir }, this.plugin.settings.targetDir);
+		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.outDir });
 	}
 
 	onOpen(): void {
@@ -97,9 +93,9 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('留空＝跟着目标文件夹走（灰字就是那个位置）；完整包与更新包分别放在它的 full 与 changes 子目录里')
+			.setDesc('默认用设置里那个「同步包文件夹」；在这里改只影响这一次导出。完整包与更新包分别放在它的 full 与 changes 子目录里')
 			.addText(text => text
-				.setPlaceholder(this.defaultDir || '先填设置里的「目标文件夹」，或在这里指定一个路径')
+				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.outDir)
 				.onChange(value => {
 					this.outDir = value.trim();
@@ -135,7 +131,7 @@ export class ExportBundleModal extends Modal {
 		const modes = this.wantedModes();
 		const base = this.effectiveDir();
 		if (!base) {
-			this.whereEl.setText('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个路径。');
+			this.whereEl.setText('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
 			return;
 		}
 		if (modes.length === 0) {
@@ -145,7 +141,7 @@ export class ExportBundleModal extends Modal {
 		const targets = modes
 			.map(mode => `${mode === 'full' ? '完整副本' : '更新包'} → ${bundleDirForMode(base, mode)}`)
 			.join('；');
-		this.whereEl.setText(`会写到：${targets}${this.outDir === '' ? '（留空＝跟着目标文件夹）' : ''}`);
+		this.whereEl.setText(`会写到：${targets}`);
 	}
 
 	/** 勾了哪几种，以及导出顺序：**先完整副本、后更新包**（见 plannedExportModes） */
@@ -154,10 +150,10 @@ export class ExportBundleModal extends Modal {
 	}
 
 	private async run(): Promise<void> {
-		// 留空 ＝ 用默认（跟着目标文件夹走），不是"没填路径"
+		// 这个窗口里没填就用设置里那个，不是"没填路径"
 		const outDir = this.effectiveDir();
 		if (!outDir) {
-			new Notice('还没法确定位置：先在设置里填「目标文件夹」，或在这里填一个同步包文件夹');
+			new Notice('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个');
 			return;
 		}
 		const modes = this.wantedModes();
@@ -279,8 +275,6 @@ export class ApplyBundleModal extends Modal {
 	/** 下拉框现在摆的是哪一套选项（按选中包的类型换） */
 	private choicesFor: 'full' | 'changes' | null = null;
 	private keepBackup: boolean;
-	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
-	private alsoSyncCopy: boolean;
 	/** 这次不执行包里的删除（对方基准不对时的兜底） */
 	private skipDeletions = false;
 	private pathInput: TextComponent | null = null;
@@ -299,12 +293,10 @@ export class ApplyBundleModal extends Modal {
 	constructor(app: App, plugin: LocallySavePlugin, initialPath?: string) {
 		super(app);
 		this.plugin = plugin;
-		// 只显示"用户自己填的"，留空就是留空（灰字提示默认位置）
+		// 只显示"用户自己填的"，留空就是留空（灰字提示设置里那个包目录）
 		this.dir = plugin.settings.bundleDir.trim();
-		this.defaultDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		this.defaultDir = bundleBaseDir(plugin.settings);
 		this.keepBackup = plugin.settings.deletedToTrash;
-		// 配了副本就默认顺手同步 —— 不然备份会在应用完包之后悄悄落后一截
-		this.alsoSyncCopy = plugin.settings.targetDir.trim() !== '';
 		// 拖进来的包（或命令带过来的路径）：打开就直接检查它
 		this.current = initialPath?.trim() ? initialPath.trim() : null;
 	}
@@ -331,9 +323,9 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('留空＝跟着目标文件夹走（灰字就是那个位置）。会列出它的 full 与 changes 两个子目录里的包')
+			.setDesc('默认用设置里那个「同步包文件夹」。会列出它的 full 与 changes 两个子目录里的包')
 			.addText(text => text
-				.setPlaceholder(this.defaultDir || '先填设置里的「目标文件夹」，或在这里指定一个路径')
+				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
 				.onChange(value => {
 					this.dir = value.trim();
@@ -407,16 +399,8 @@ export class ApplyBundleModal extends Modal {
 				}));
 
 		// 应用完顺手带上本地副本：不然后备会在应用包之后悄悄落后一截
-		const target = this.plugin.settings.targetDir.trim();
-		new Setting(contentEl)
-			.setName('应用后顺便同步到本地副本')
-			.setDesc(target
-				? `应用完再跑一次正常同步，把这次的改动推到「${target}」；包删掉的文件也会从副本里清掉`
-				: '还没设置「目标文件夹」，这一项用不上（设置 → 本地同步 → 目标文件夹）')
-			.addToggle(toggle => toggle
-				.setValue(this.alsoSyncCopy)
-				.setDisabled(!target)
-				.onChange(value => { this.alsoSyncCopy = value; }));
+		// 0.8.0 砍掉「同步到本地副本」通道之后这一项没了 —— 包是唯一的搬运格式：
+		// 想让另一台机器跟上，就把包拷过去应用（那台机器自己再留一份包回传）。
 
 		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -462,9 +446,9 @@ export class ApplyBundleModal extends Modal {
 		}
 	}
 
-	/** 此刻实际要去找的根目录：填了用填的，留空就跟着目标文件夹走 */
+	/** 此刻实际要去找的根目录：在这个窗口里改过就用改的，否则就是设置里那个 */
 	private effectiveDir(): string {
-		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir }, this.plugin.settings.targetDir);
+		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir });
 	}
 
 	/** 选中一个包：只读地算一遍，把报告画出来 */
@@ -796,19 +780,19 @@ export class ApplyBundleModal extends Modal {
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
 		const strategyText: Record<ConflictStrategy, string> = {
 			'keep-both': '留两份 —— 新的那份占原名，旧的那份存成冲突副本',
-			'local-wins': '以本地为准（包里的版本不覆盖本地）',
-			'remote-wins': '以包为准（本地改动会被覆盖）',
+			'local-wins': '以我为准（包里的版本不覆盖我这边的改动）',
+			'remote-wins': '以包为准（我改过的会被包里那一版覆盖）',
 		};
-		// 这一档是不是"这一趟特意选的"：选了就别再说"与副本同步同一套规则"，
+		// 这一档是不是"这一趟特意选的"：选了就别再说"按设置里那套规则"，
 		// 否则用户会以为设置里那条还在起作用
 		const overrode = this.currentChoice().conflictStrategy !== undefined
 			|| this.currentChoice().strictness !== 'normal';
 		const loserText = report.strictness === 'listed-wins'
 			? '本地那份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突）'
 			: '输的那一份会**挪进回收目录的「冲突」文件夹**（仓库/.trash/locally-save/冲突），'
-				+ '不留在仓库里 —— 留在原地的冲突副本会跟着同步传到对面去';
+				+ '不留在仓库里 —— 留在原地的冲突副本会跟着下一个包传到对面去';
 		this.reportEl.createEl('p', {
-			text: `${overrode ? '这一趟按你选的方式' : '与本地副本同步同一套规则'}：`
+			text: `${overrode ? '这一趟按你选的方式' : '按设置里那套规则'}：`
 				+ `两边都改过时 ${strategyText[report.conflictStrategy]}。`
 				+ `${loserText}。`
 				+ (report.strictness === 'listed-wins'
@@ -830,7 +814,7 @@ export class ApplyBundleModal extends Modal {
 
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
-				text: '注意：这个包来自另一条血脉（另一份独立的副本）。应用后会认祖，之后就能按世代快速同步了。',
+				text: '注意：这个包来自另一条血脉（另一台机器独立立的基准）。应用后会认祖，之后就能按世代快速对上了。',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -856,7 +840,7 @@ export class ApplyBundleModal extends Modal {
 		if (!plan || !file) return;
 
 		// 防呆第三层：真要删文件 / 覆盖本地改动之前，把账摊开让人再点一次
-		if (isDestructive(plan)) {
+		if (isDestructivePlan(plan)) {
 			new ConfirmApplyModal(this.app, plan, () => { void this.runApply(); }).open();
 			return;
 		}
@@ -917,9 +901,6 @@ export class ApplyBundleModal extends Modal {
 				parts.push(`失败 ${result.failed.length}：${shown.join('；')}${more}`);
 			}
 
-			const copyNote = await this.syncCopyIfWanted(plan);
-			if (copyNote) parts.push(copyNote);
-
 			// 欠账式回传：**不立刻生成回礼包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
 			// 只在通知里提一句"你这边还有 N 个改动没发出去"，它们会随下次导出更新包一起带过去。
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
@@ -957,49 +938,10 @@ export class ApplyBundleModal extends Modal {
 		this.plugin.reportProgress(null);
 		this.contentEl.empty();
 	}
-
-	/**
-	 * 应用完把本地副本也带上。
-	 *
-	 * 两步走，顺序要紧：
-	 * 1. 先把「这次删掉的路径」从副本里也清掉，并把它们从基准里划掉 ——
-	 *    不这么做的话，接下来那次常规同步会把它们当成"本地缺了、该从副本取回"，
-	 *    于是**刚删掉的文件又长回仓库**（「同步删除」关着时必然如此）；
-	 * 2. 再跑一次正常同步，把新增 / 修改推上去。
-	 */
-	private async syncCopyIfWanted(plan: ApplyPlan): Promise<string> {
-		const target = this.plugin.settings.targetDir.trim();
-		if (!this.alsoSyncCopy || !target) return '';
-
-		try {
-			const removed = plan.actions
-				.filter(action => action.kind === 'delete')
-				.map(action => action.path);
-			await removeFromTarget(this.plugin, target, removed, this.plugin.settings.deletedToTrash);
-
-			const outcome = await this.plugin.runSync();
-			if (!outcome) return '副本同步被跳过（上一次同步还在跑）';
-			this.plugin.statusBar.setSummary('同步包已应用 · 副本已同步');
-			return `副本已同步（${describeRecord(recordFromOutcome(outcome))}）`;
-		} catch (error) {
-			// 包已经应用成功了，副本没跟上只是"备份旧一点"，不该让前者看起来失败
-			new Notice(`同步包已应用，但同步到本地副本失败：${describe(error)}`, 9000);
-			this.plugin.log.error('应用后同步副本失败', error);
-			return '副本同步失败';
-		}
-	}
 }
 
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** 这次应用会不会"动到本地已经有的东西"：删文件、删空文件夹、覆盖本地改动、产生冲突副本 */
-function isDestructive(plan: ApplyPlan): boolean {
-	return plan.actions.some(action => action.kind === 'delete')
-		|| plan.foldersToRemove.length > 0
-		|| plan.report.conflicts > 0
-		|| plan.report.forcedOverwrites > 0;
 }
 
 /**
@@ -1031,7 +973,7 @@ class ConfirmApplyModal extends Modal {
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		facts.createEl('li', {
 			text: `两边都改过的：${report.conflicts} 个（按「${
-				report.conflictStrategy === 'keep-both' ? '留两份' : report.conflictStrategy === 'local-wins' ? '以本地为准' : '以包为准'
+				report.conflictStrategy === 'keep-both' ? '留两份' : report.conflictStrategy === 'local-wins' ? '以我为准' : '以包为准'
 			}」处理）`,
 		});
 		if (report.forcedOverwrites > 0) {
@@ -1078,13 +1020,14 @@ class ConfirmApplyModal extends Modal {
 			.addButton(button => button
 				.setButtonText('取消')
 				.onClick(() => this.close()))
-			.addButton(button => button
-				.setButtonText('确认应用')
-				.setWarning()
-				.onClick(() => {
+			.addButton(button => {
+				button.setButtonText('确认应用');
+				markDestructive(button);
+				button.onClick(() => {
 					this.close();
 					this.onConfirm();
-				}));
+				});
+			});
 	}
 
 	onClose(): void {
