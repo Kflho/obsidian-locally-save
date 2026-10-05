@@ -82,7 +82,9 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'conflictStrategy',
 					name: '两边都改了怎么办',
-					desc: '判定依据是"跟上次同步后的样子比，哪边动过"。两边都动过才算冲突：留两份是最稳的，改得新的那份占原名，另一份存成「xxx (冲突副本 时间戳)」',
+					desc: '判定依据是"跟上次同步后的样子比，哪边动过"。两边都动过才算冲突：留两份是最稳的，改得新的那份占原名，另一份存成「xxx (冲突副本 时间戳)」。'
+						+ '**应用同步包时可以这一次性地覆盖它** —— 打开包那边的「应用方式」里，'
+						+ '「两边都留 / 以我为准」就是这一条的临时版本，更新包还有额外的「回退到包里那一版」',
 					control: { type: 'dropdown', options: CONFLICT_OPTIONS },
 					coerce: value => coerceConflict(value),
 				},

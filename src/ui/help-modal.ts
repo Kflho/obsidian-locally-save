@@ -92,21 +92,26 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
-		contentEl.createEl('h3', { text: '三种应用方式（在对话框里当场选）' });
-		const modes = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		modes.createEl('li', {
-			text: '所有都保留（默认）：只应用包里有的，本地多出来的文件一个不动；本地也改过的留成冲突副本',
+		contentEl.createEl('h3', { text: '「应用方式」：完整副本与更新包各有一套选项' });
+		contentEl.createEl('p', {
+			text: '为什么两套不一样：**"包里没有某个文件"在两种包里意思完全不同** ——'
+				+ '完整副本是完整清单（包里没有 ＝ 对方删过它），更新包只装了变过的那些（包里没有 ＝ 什么也不代表）。'
+				+ '所以选中包之后，下拉框会换成一整套它该有的选项，而不是把不合适的灰在那里。',
+			cls: 'locally-save-hint',
 		});
-		modes.createEl('li', {
-			text: '清老的：额外把本地那些"比包旧"的多余文件删掉（比包新的不动 —— 那多半是你刚写的）',
+		const modeList = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		modeList.createEl('li', {
+			text: '**完整副本**：按设置（安全）/ **以包为准**（分歧一律听包的，对方删过的也跟着删）/ '
+				+ '**完全镜像**（包里没有的本地文件全删，仓库 = 包）',
 		});
-		modes.createEl('li', {
-			text: '强制应用：让仓库与包完全一致 —— 本地改动一律被覆盖、多余文件全删，不管新旧',
+		modeList.createEl('li', {
+			text: '**更新包**：按设置（安全）/ **回退到包里那一版**（包里点名的文件以包为准，'
+				+ '你改过的那份进回收目录；包里没提到的一个不动）/ **两边都留**（最保险）/ **以我为准**',
 		});
 		contentEl.createEl('p', {
-			text: '后两种只对完整副本开放：改动包里只装了变过的文件，对着它清理会把仓库里其余文件全删掉。'
-				+ '所以选中改动包时，那两个选项会灰掉，并自动切回「所有都保留」。',
-			cls: 'locally-save-warn',
+			text: '一句话选法：**自己改坏了、想退回对方发来的那一版** → 更新包 + 「回退到包里那一版」；'
+				+ '**对面大删大改过、想让这台机器跟包一模一样** → 完整副本 + 「以包为准 / 完全镜像」。',
+			cls: 'locally-save-hint',
 		});
 		contentEl.createEl('p', {
 			text: '另外，真要删文件或覆盖本地改动之前，还会再弹一次确认框，'
@@ -165,8 +170,8 @@ export class BundleHelpModal extends Modal {
 				+ '最坏也只是"没删掉"，绝不会连带删掉还有内容的目录',
 		});
 		dirs.createEl('li', {
-			text: '「强制应用」（让仓库与包完全一致）连"本机新建的空文件夹"也会删掉 —— 这是唯一会这么干的一档；'
-				+ '「清老的」与默认档只删"对方删过的"那几个',
+			text: '「完全镜像」（让仓库与包完全一致）连"本机新建的空文件夹"也会删掉 —— 这是唯一会这么干的一档；'
+				+ '「以包为准」与按设置只删"对方删过的"那几个',
 		});
 		dirs.createEl('li', {
 			text: '文件夹与同名文件撞车（本地是文件夹、包里是文件，或反过来）：默认档**如实报失败、不动那个文件夹**；'
@@ -196,10 +201,10 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '会不会把我的东西弄丢' });
 		const safe = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		safe.createEl('li', {
-			text: '默认（所有都保留）：本地也改过的文件留成「冲突副本」，两份都在；包里要求删、但本地改过的不删',
+			text: '按设置（默认）：本地也改过的文件留成「冲突副本」，两份都在；包里要求删、但本地改过的不删',
 		});
 		safe.createEl('li', {
-			text: '清老的 / 强制应用：被覆盖或被删掉的本地版本会先进回收目录（仓库/.trash/locally-save），仍然捞得回来',
+			text: '回退 / 以包为准 / 完全镜像：被覆盖或被删掉的本地版本会先进回收目录（仓库/.trash/locally-save），仍然捞得回来',
 		});
 		safe.createEl('li', { text: '包在传输中弄坏了：尾部有整段负载的校验和，对不上直接拒绝，不会写进仓库' });
 

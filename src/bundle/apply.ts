@@ -47,14 +47,82 @@ const TOLERANCE = DEFAULT_MTIME_TOLERANCE_MS;
 const CHUNK = 4 * 1024 * 1024;
 
 /** 本次应用有多"以包为准"（见 ApplyOptions.strictness） */
-export type ApplyStrictness = 'normal' | 'bundle-wins' | 'mirror';
+export type ApplyStrictness = 'normal' | 'listed-wins' | 'bundle-wins' | 'mirror';
 
-/** 三档在界面上的说法 */
-export const STRICTNESS_LABELS: Record<ApplyStrictness, string> = {
-	normal: '按设置（安全）：本地改过的保留，分歧留两份，我独有的文件不动',
-	'bundle-wins': '以包为准：分歧一律听包的（本地那份进回收目录），对方删过的也跟着删',
-	mirror: '完全镜像：包里没有的本地文件全删（连我本机新建的），仓库 = 包',
+/** 下拉框里的一项：怎么算、以及界面上怎么说 */
+export interface ApplyChoice {
+	key: string;
+	label: string;
+	strictness: ApplyStrictness;
+	/** 本次临时覆盖"两边都改过时听谁的"；不填就跟随设置 */
+	conflictStrategy?: ConflictStrategy;
+}
+
+/**
+ * 「应用方式」的选项 —— **按包的类型给两套**，而不是一套里灰掉几个。
+ *
+ * 为什么两套不一样：**包里没有某个文件，在两种包里意思完全不同**。
+ * - 完整副本是"完整清单" → 包里没有 ＝ 对方删过它 → 所以能承诺"以包为准 / 完全镜像"；
+ * - 更新包只装了自完整副本以来变过的文件 → 包里没有**什么也不代表** →
+ *   拿它做上面那两档会把仓库里其余文件全当成"该删"（一次清空，报过的 bug）。
+ *
+ * 所以更新包给的是**只动包里点名文件**的几档：回退（以包为准）、两边都留、以我为准，
+ * 外加默认的"按设置"。用户想"我改坏了，退回对方发来的那一版"就选「回退」——
+ * 以前更新包只留"按设置"一档，本地改过的一律保留，这件事根本做不到。
+ */
+export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
+	full: [
+		{
+			key: 'normal',
+			label: '按设置（安全）：本地改过的保留，分歧留两份，我独有的文件不动',
+			strictness: 'normal',
+		},
+		{
+			key: 'bundle-wins',
+			label: '以包为准：分歧一律听包的（本地那份进回收目录），对方删过的也跟着删',
+			strictness: 'bundle-wins',
+		},
+		{
+			key: 'mirror',
+			label: '完全镜像：包里没有的本地文件全删（连我本机新建的），仓库 = 包',
+			strictness: 'mirror',
+		},
+	],
+	changes: [
+		{
+			key: 'normal',
+			label: '按设置（安全）：本地改过的保留，两边都改过时按设置处理',
+			strictness: 'normal',
+		},
+		{
+			key: 'listed-wins',
+			label: '回退到包里那一版：包里点名的文件以包为准（本地那份进回收目录），没提到的一个不动',
+			strictness: 'listed-wins',
+		},
+		{
+			key: 'keep-both',
+			label: '两边都留（最保险）：我改过的保留原名，包里的版本存进回收目录的「冲突」文件夹',
+			strictness: 'normal',
+			conflictStrategy: 'keep-both',
+		},
+		{
+			key: 'local-wins',
+			label: '以我为准：包里点名的改动不覆盖我改过的文件（我没动过的照包对齐）',
+			strictness: 'normal',
+			conflictStrategy: 'local-wins',
+		},
+	],
 };
+
+/** 某一类包默认选哪一档（第一项） */
+export function defaultApplyChoice(mode: 'full' | 'changes'): ApplyChoice {
+	return APPLY_CHOICES[mode][0] as ApplyChoice;
+}
+
+/** 在某一类包的选项里找某一档；找不到（比如换过包的类型）就回到默认档 */
+export function findApplyChoice(mode: 'full' | 'changes', key: string): ApplyChoice {
+	return APPLY_CHOICES[mode].find(item => item.key === key) ?? defaultApplyChoice(mode);
+}
 
 export interface ApplyOptions {
 	settings: PluginSettings;
@@ -71,12 +139,16 @@ export interface ApplyOptions {
 	 * **强硬程度**（本次应用有多"以包为准"）。
 	 *
 	 * - `normal`（默认）：按设置 —— 本地改过的保留、分歧留两份、我独有的文件不动
+	 * - `listed-wins`：**回退到包里那一版** —— 包里点名的文件一律以包为准
+	 *   （本地改过的那份进回收目录的「冲突」文件夹），包里**没提到**的一个不动。
+	 *   这是"我改坏了，想退回对方发来的那一版"用的那一档；因为不动没提到的文件，
+	 *   更新包（只有变过的那部分）也能开放它。
 	 * - `bundle-wins`：分歧一律听包的（本地那份进回收目录）；对方删过的文件跟着删，
 	 *   不管本地改没改 —— 用在"对方做过颠覆性改动"之后
 	 * - `mirror`：在 `bundle-wins` 之上，**包里没有的本地文件全删**（连我本机新建的也删）
 	 *   → 参与同步的那部分内容与包完全一致
 	 *
-	 * 排除规则命中的东西（配置目录等）三档都不动。
+	 * 排除规则命中的东西（配置目录等）四档都不动。
 	 */
 	strictness?: ApplyStrictness;
 	/** 本次临时覆盖"删不删多余文件"；不填就跟随设置 */
@@ -133,7 +205,7 @@ export interface ApplyReport {
 	/** 本次用的强硬程度 */
 	strictness: ApplyStrictness;
 	/**
-	 * 请求的强硬程度被降级了（更新包 + 强制/清老的 → 默认档）。
+	 * 请求的强硬程度被降级了（更新包 + 以包为准/完全镜像 → 按设置）。
 	 * 界面上要说明白：不然用户以为自己选了"完全一致"，实际没生效。
 	 */
 	strictnessDowngraded: boolean;
@@ -226,10 +298,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	const requested = options.strictness ?? 'normal';
-	// **更新包不开放破坏性方式**（引擎层兜底，不只界面提示）：
-	// 更新包里只装了变过的文件，"清老的 / 强制应用"会把它没提到的文件全当成"该删"，
-	// 一次就把仓库清空。所以不是完整副本时一律降级成 normal，并在报告里标出来。
-	const strictness: ApplyStrictness = header.mode === 'full' ? requested : 'normal';
+	// **更新包不开放破坏性方式**（引擎层兜底，不只靠界面）：
+	// 更新包里只装了变过的文件，"以包为准 / 完全镜像"会把它没提到的文件全当成"该删"，
+	// 一次就把仓库清空。所以不是完整副本时，这两档一律降级成 normal 并在报告里标出来。
+	// （`listed-wins`（回退）不在此列：它只动包里点名的那些，更新包也能用。）
+	const destructive = requested === 'bundle-wins' || requested === 'mirror';
+	const strictness: ApplyStrictness = header.mode === 'full' || !destructive ? requested : 'normal';
 	const strictnessDowngraded = strictness !== requested;
 	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
 	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
@@ -277,6 +351,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
 	for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
 
+	// `listed-wins` 也走三方比对：它要的正是"哪些是包里点名的、哪些只是我独有的"，
 	const planned = strictness === 'normal'
 		? planSync(local, remote, baseline, {
 			// 包是只读的：借"仅下载"方向只为不产生写回对方的动作，冲突裁决仍听设置
@@ -286,7 +361,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			propagateDeletions,
 			mtimeToleranceMs: TOLERANCE,
 		})
-		// 强制档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
+		// 强制两档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
 		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
 		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [], removedFolders: [] };
 
@@ -306,7 +381,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	// ------------------------------------------------- 强制档：直接"以包为准"
 	if (strictness !== 'normal') {
-		// ① 包里有的：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
+		// ① 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
 		for (const entry of header.entries) {
 			const here = local.files.get(entry.path);
 			if (!here) {
@@ -330,15 +405,27 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			});
 		}
 
-		// ② 包里没有的本地文件：
-		//   `bundle-wins` → 只删"基准里也有"的（＝对方删过的）
+		// ② 包里**没点名**的本地文件：
+		//   `listed-wins`（回退）→ 一个都不动 —— 包里没提到 ≠ 对方删了它。
+		//     更新包只有变过的那部分，这正是"回退"那一档敢给更新包用的原因；
+		//     但包里**点名要删**的那些（`deleted`）要删 —— 那是它明说的，
+		//     本地那份先进回收目录（不备份的例外只留给"完全镜像"）。
+		//   `bundle-wins` → 只删"基准里也有"的（＝对方删过的；点名删除的文件在基准里，会被这里覆盖到）
 		//   `mirror`      → 全删（连本机新建的也删）
-		for (const file of local.files.keys()) {
-			if (entriesByPath.has(file)) continue;
-			const seenBefore = baseline[file] !== undefined;
-			if (strictness === 'bundle-wins' && !seenBefore) continue;
-			deletes++;
-			actions.push({ kind: 'delete', path: file });
+		if (strictness === 'listed-wins') {
+			for (const item of header.deleted) {
+				if (!local.files.has(item.path)) continue;
+				deletes++;
+				actions.push({ kind: 'delete', path: item.path });
+			}
+		} else {
+			for (const file of local.files.keys()) {
+				if (entriesByPath.has(file)) continue;
+				const seenBefore = baseline[file] !== undefined;
+				if (strictness === 'bundle-wins' && !seenBefore) continue;
+				deletes++;
+				actions.push({ kind: 'delete', path: file });
+			}
 		}
 	}
 
@@ -468,7 +555,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 这个包**记没记**空文件夹。
 	 *
 	 * 早期版本导的包头部没有 `emptyDirs` 这个字段 —— 它没能力表达"我有这些空文件夹"，
-	 * 所以**不能**拿它反推"本地多出来的目录都是对方没有的"：那样"强制应用"会把本机
+	 * 所以**不能**拿它反推"本地多出来的目录都是对方没有的"：那样"完全镜像"会把本机
 	 * 和对方都有的空文件夹也删掉。这种情况下目录只建不删，并在报告里说明白。
 	 */
 	const bundleRecordsDirs = Array.isArray(header.emptyDirs);

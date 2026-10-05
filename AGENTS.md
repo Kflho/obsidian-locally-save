@@ -70,15 +70,22 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   界面是 `ui/bundle-list.ts` 那一套列表 —— 导出弹窗、导入弹窗、管理弹窗**共用**，
   别让"这边能删、那边不能"；**回收站那一行三处都要有**，而且放在列表**上面**
   （放下面会被"最多 40vh 的滚动列表"顶出视野，用户翻不到就会问"删掉的包去哪了"）。
-- **应用同步包的"强硬程度"有三档**（`ApplyStrictness`：`normal` / `bundle-wins` / `mirror`）：
+- **应用同步包的"强硬程度"有四档**（`ApplyStrictness`：`normal` / `listed-wins` / `bundle-wins` / `mirror`）：
   - `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`）；
+  - **`listed-wins`（界面叫「回退到包里那一版」）**：走强制那条路，但**只动包里点名的文件** ——
+    条目以包为准（本地改过的那份进回收目录的「冲突」文件夹）、`header.deleted` 点名的照删，
+    **包里没提到的一个不动**。以前更新包只开放 `normal`，"我改坏了想退回对方那一版"根本做不到
+    （本地改过的一律保留，用户报过）；因为它不动没提到的文件，更新包也能安全地开放它；
   - **强制两档不走三方比对**，直接两侧比 —— 因为"只有本地改了、包里没改"时三方比对会判成
     "上传"（本地说了算），在包的方向上被过滤掉，那样就不叫"以包为准"了；
   - 强制两档**必然先备份**（`keepBackup` 忽略用户设置）：关掉回收 + 强制 = 不可恢复的批量删除，不给这个组合留口子；
   - `mirror` 会删掉"本机新建的文件"，所以界面上必须额外确认，且它是唯一会这么干的一档。
-  - **更新包只开放 `normal`**：引擎层直接 clamp（`strictnessDowngraded` 标出来），界面同时把
-    那两个选项 `disabled` 掉。更新包里只有变过的文件，配上"强制/清老的"会把仓库里其余文件
-    全当成"该删"——一次清空。这条不能只靠界面提示（用户可能先选方式、再换包）。
+  - **下拉框按包的类型换一整套选项**（`APPLY_CHOICES`，界面 `renderChoices`）：完整副本给
+    "按设置 / 以包为准 / 完全镜像"；更新包给"按设置 / 回退 / 两边都留 / 以我为准"。
+    **不是把不合适的选项灰掉留一个孤零零的可用项** —— 包里没有某个文件，在完整副本里
+    ＝"对方删过它"，在更新包里＝"什么也不代表"，两套选项本来就该不一样（用户要求）。
+  - 引擎层仍然兜底：把 `bundle-wins` / `mirror` 传给更新包会 clamp 成 `normal`
+    （`strictnessDowngraded` 标出来）。这条不能只靠界面（用户可能先选方式、再换包）。
 - **应用有模块级串行锁**（`bundle/apply.ts` 里的 `applying`）：同步那边有 plugin 层锁，应用这边以前没有，
   两个对话框一起点会互相踩着写同一批文件。
 - **目录（含空文件夹）要建，也要删 —— 但删必须过基准检查**：`scanTree` 除了文件还要收 `dirs`；
@@ -168,7 +175,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 599 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 615 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
