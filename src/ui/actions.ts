@@ -1,8 +1,8 @@
 import { Notice } from 'obsidian';
 import { exportBundle, planBundleExport, plannedExportModes } from '../bundle/export';
 import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
-import { handleIncoming, pickIncoming, skipSuperseded } from '../bundle/incoming';
-import type { IncomingOutcome } from '../bundle/incoming';
+import { pickIncoming, sweepIncoming } from '../bundle/incoming';
+import type { IncomingSweep } from '../bundle/incoming';
 import { describeExportRange, describeLastActivity } from '../bundle/log';
 import { listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
@@ -20,7 +20,6 @@ import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
 import { ExportPreviewModal } from './export-preview-modal';
 import { BundleManagerModal } from './manage-modal';
 import { BundleLogModal } from './log-modal';
-import { offerBaselineReset } from './reset-baseline-modal';
 
 /**
  * 命令背后的动作：统一处理"总开关、串行、报错、通知、状态栏"，
@@ -143,11 +142,6 @@ async function writePlannedBundles(
 				: `已留更新包（${result.outcome.entryCount} 个文件`
 					+ `${result.outcome.deletedCount > 0 ? `、删除 ${result.outcome.deletedCount}` : ''}）`
 					+ describeExportRange(result.outcome));
-			// 攒大了就弹窗问"要不要换基准"。**差量包不参与**：它的内容到那一代为止，
-			// 不存在"越攒越大"，问"要不要换基准"只会让人困惑
-			if (mode === 'changes' && result.outcome.anchor?.checkpoint !== true) {
-				await offerBaselineReset(plugin, result.outcome);
-			}
 			continue;
 		}
 		// 空的更新包：完整包刚留过时它必然空，别写；其余情况如实说一句"没有变化"
@@ -277,6 +271,7 @@ function applyOptionsFor(plugin: LocallySavePlugin, file: string): ApplyOptions 
  *
  * 由 `main.tick()` 每 30 秒调一次。安全边界全在 `bundle/incoming.ts` 里：
  * **只有完全不会动到本地已有东西的更新包**才会自己应用，其余一律只提示一句；
+ * 而且**按链条顺序接**（起点正好是本机基准点的那一环才收得下，缺环就搁着等）。
  * 这里只负责通知、状态栏与"这一拍干了活没有"。
  *
  * 返回 true ＝ 这一拍动过东西（调用方据此跳过同拍的留包：刚应用完不该立刻回礼）。
@@ -293,14 +288,13 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 		const candidates = pickIncoming(await listBundles(base), state);
 		if (candidates.length === 0) return false;
 
-		// 只看**最新那一个**：更新的包（更新包是累积的、完整包是完整清单）包含旧的的全部内容
-		const [newest, ...older] = candidates;
-		await skipSuperseded(plugin.stateFile(), older);
-		if (!newest) return false;
-
-		const outcome = await handleIncoming(applyOptionsFor(plugin, newest.bundle.file), newest);
-		await reportIncoming(plugin, outcome);
-		return outcome.kind === 'applied';
+		const sweep = await sweepIncoming(
+			file => applyOptionsFor(plugin, file),
+			plugin.stateFile(),
+			candidates,
+		);
+		await reportIncomingSweep(plugin, sweep);
+		return sweep.applied.length > 0;
 	} catch (error) {
 		plugin.log.error('检查收到的包失败', error);
 		return false;
@@ -309,35 +303,51 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 	}
 }
 
-/** 把一次自动应用的结果说给用户听（四种结果各说各的，不糊成一句） */
-async function reportIncoming(plugin: LocallySavePlugin, outcome: IncomingOutcome): Promise<void> {
-	switch (outcome.kind) {
-		case 'already':
-			plugin.log.debug(`收到的包 ${outcome.file}：本地已经有了，跳过`);
-			return;
-		case 'applied': {
-			const parts = [`写入 ${outcome.written}`];
-			if (outcome.deleted > 0) parts.push(`删除 ${outcome.deleted}`);
-			const tail = outcome.stateIdCompare === 'match'
-				? '两边内容已经一致'
-				: outcome.pending > 0
-					? `你这边还有 ${outcome.pending} 个改动没发出去（下次留包会一起带上）`
-					: '跟对方的编号还差一点，下次留包会补上';
-			new Notice(`已自动应用 ${outcome.file}：${parts.join('、')}；${tail}`, 12000);
-			await refreshStatusBar(plugin);
-			return;
+/**
+ * 链条没接上的那几份：**同一个包只提示一次**（内存里记着）。
+ *
+ * 为什么不落盘：它们随时可能因为"缺的那一环到了"就能接上 —— 落盘记成"处理过了"
+ * 就再也自动接不上了（得用户手动去点）。而每 30 秒重提示一遍又太吵，
+ * 所以只在内存里记一笔：重启后再提示一次，可以接受。
+ */
+const waitingNotified = new Set<string>();
+
+/** 把一次自动接包的结果说给用户听（各说各的，不糊成一句） */
+async function reportIncomingSweep(plugin: LocallySavePlugin, sweep: IncomingSweep): Promise<void> {
+	for (const item of sweep.applied) {
+		const parts = [`写入 ${item.written}`];
+		if (item.deleted > 0) parts.push(`删除 ${item.deleted}`);
+		const tail = item.stateIdCompare === 'match'
+			? '两边内容已经一致'
+			: item.pending > 0
+				? `你这边还有 ${item.pending} 个改动没发出去（下次留包会一起带上）`
+				: '跟对方的编号还差一点，下次留包会补上';
+		new Notice(`已自动应用 ${item.file}：${parts.join('、')}；${tail}`, 12000);
+	}
+	if (sweep.applied.length > 0) await refreshStatusBar(plugin);
+
+	for (const item of sweep.review) {
+		if (item.kind === 'failed') {
+			new Notice(`自动应用 ${item.file} 失败：${item.why}`, 9000);
+			continue;
 		}
-		case 'needs-review':
-			// 不自动动手，但也别沉默：告诉用户"包到了、为什么没自动应用、去哪儿处理"
-			new Notice(
-				`收到更新包 ${outcome.file}，但它会${outcome.why} —— 没有自动应用；`
-				+ '用「打开同步包并应用…」看看再决定',
-				15000,
-			);
-			return;
-		case 'failed':
-			new Notice(`自动应用 ${outcome.file} 失败：${outcome.error}`, 9000);
-			return;
+		// 不自动动手，但也别沉默：告诉用户"包到了、为什么没自动应用、去哪儿处理"
+		new Notice(
+			item.full
+				? `收到完整副本 ${item.file}：${item.why} —— 没有自动应用；用「打开同步包并应用…」看看再决定`
+				: `收到更新包 ${item.file}，但它${item.why} —— 没有自动应用；用「打开同步包并应用…」看看再决定`,
+			15000,
+		);
+	}
+
+	const fresh = sweep.waiting.filter(name => !waitingNotified.has(name));
+	for (const name of fresh) waitingNotified.add(name);
+	if (fresh.length > 0) {
+		new Notice(
+			`收到 ${fresh.length} 个更新包，但它们接在本机还没走到的那一环后面 —— `
+			+ '先把缺的那几份包也拷进来（或者让对方从本机这个基准点重导一份），到时自动接上',
+			15000,
+		);
 	}
 }
 

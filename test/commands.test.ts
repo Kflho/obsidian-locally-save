@@ -210,11 +210,11 @@ await quiet.onload();
 check("正常加载不弹提示", noticeLog.length, 0);
 
 // 8. data.json 是脏数据也照样能起来（走 settingsFrom 收敛）
-const { plugin: dirty } = createPlugin({ enabled: 'yes', logLevel: 42, bundleSizeWarnLimit: '999TB' });
+const { plugin: dirty } = createPlugin({ enabled: 'yes', logLevel: 42, bundleVerify: 'yes' });
 await dirty.onload();
 check("脏数据回落默认值", dirty.settings.enabled, true);
 check("脏日志级别回落默认值", dirty.settings.logLevel, 'error');
-check("脏的大小提醒回落默认值", dirty.settings.bundleSizeWarnLimit, '');
+check("另一个脏字段也回落默认值", dirty.settings.bundleVerify, true);
 
 // 9. 左侧栏图标点了不能炸（导出 / 应用那两个会开对话框）
 for (const item of stub.ribbonItems) {

@@ -5,7 +5,7 @@ import type { FileRecord } from '../sync/types';
 /**
  * 「完整副本基准」的指纹 —— 两台机器互相发更新包时的**共同祖先令牌**。
  *
- * 为什么非要有它：更新包的语义是"接着某一份完整副本往后累积的改动"（跟 git 的 base commit
+ * 为什么非要有它：更新包的语义是"接着某一个基准点往后延伸的改动"（跟 git 的 base commit
  * 一个道理）。可原来判断"我们是不是站在同一份基准上"**只看世代号**，而世代号有两个毛病：
  * 1. 它只说"内容走到第几版"，说不出"我们是从哪一份完整副本分出来的"——两台各自立过基准时，
  *    A 的"第 4 代"和 B 的"第 4 代"可以根本不是同一个东西；
@@ -27,9 +27,15 @@ export function listingHash(entries: Iterable<{ path: string; size: number; mtim
 	return hash.digest('hex').slice(0, 16);
 }
 
-/** 仓库清单（path → 大小/时间）也能直接算：导出完整包时用 */
-export function listingHashOfFiles(files: Iterable<[string, FileRecord]>): string {
-	return listingHash([...files].map(([path, record]) => ({ path, size: record.size, mtime: record.mtime })));
+/** 仓库清单（path → 大小/时间）也能直接算：`Record`（状态文件里那种）与 `Map` 都收 */
+export function listingHashOfFiles(
+	files: Iterable<[string, FileRecord]> | Record<string, FileRecord>,
+): string {
+	const pairs: Iterable<[string, FileRecord]> =
+		typeof (files as Iterable<[string, FileRecord]>)[Symbol.iterator] === 'function'
+			? (files as Iterable<[string, FileRecord]>)
+			: Object.entries(files as Record<string, FileRecord>);
+	return listingHash([...pairs].map(([path, record]) => ({ path, size: record.size, mtime: record.mtime })));
 }
 
 /**

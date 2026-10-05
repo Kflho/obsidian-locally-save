@@ -7,7 +7,6 @@ import type { ConflictStrategy } from '../sync/types';
 import type { StateIdInfo } from '../sync/state';
 import { describeStateId } from '../bundle/log';
 import { exportBundle, plannedExportModes } from '../bundle/export';
-import type { ExportOutcome } from '../bundle/export';
 import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
 import type { BundleAnchor, LatestInfo } from '../bundle/anchor';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
@@ -18,7 +17,6 @@ import type { DropdownComponent, TextComponent } from 'obsidian';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
 import { focusWindow, markDestructive } from './modal-layout';
-import { offerBaselineReset } from './reset-baseline-modal';
 import { describeExportRange } from '../bundle/log';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -167,7 +165,7 @@ export class ExportBundleModal extends Modal {
 		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整副本、再导更新包**）
 		new Setting(contentEl)
 			.setName('导出更新包')
-			.setDesc('自上次完整副本以来累积的改动。对方应用最新的一个即可，跳过中间几个也不会少内容')
+			.setDesc('只装自上一个基准点以来的新改动（链条上的新一环）。对方站在那一点上就能直接收下')
 			.addToggle(toggle => toggle
 				.setValue(this.wantChanges)
 				.onChange(value => {
@@ -292,7 +290,6 @@ export class ExportBundleModal extends Modal {
 		const notes: string[] = [];
 		let anySuccess = false;
 		/** 导出的更新包（攒大了要问"要不要换基准"） */
-		let resetCandidate: ExportOutcome | null = null;
 		/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
 		const written: string[] = [];
 		/** 这一轮导过完整副本了（紧随其后的更新包必然是空的） */
@@ -340,10 +337,11 @@ export class ExportBundleModal extends Modal {
 				anySuccess = true;
 				// 没清掉的老更新包要说清为什么 —— 不然用户以为"清理开关没生效"，
 				// 或者当成偶发 bug（报过：同一个操作第一遍没清、第二遍清了）
+				// 链条上的每一环都要留着（删了，站在那一环上的机器就接不上）——
+				// 所以这里不是"没清掉"，而是"本来就要留"，如实列一下让用户心里有数
 				const keptNote = outcome.keptChanges.length > 0
-					? `；changes 里还有 ${outcome.keptChanges.length} 个更新包没动：`
-						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}`
-						+ '（不需要就去「管理同步包…」里删）'
+					? `；changes 里另有 ${outcome.keptChanges.length} 个包留着（`
+						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}）`
 					: '';
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
@@ -355,9 +353,6 @@ export class ExportBundleModal extends Modal {
 						: '')
 					+ keptNote,
 				);
-				// 更新包攒大了 → 问"要不要换基准"。**差量包不参与**：它的内容到那一代为止，
-				// 不存在"越攒越大"，问这个只会让人困惑
-				if (outcome.cumulative && outcome.anchor?.checkpoint !== true) resetCandidate = outcome;
 			} catch (error) {
 				this.plugin.reportProgress(null);
 				const message = describe(error);
@@ -379,9 +374,6 @@ export class ExportBundleModal extends Modal {
 		 * 要接着再导一份（比如完整副本 + 更新包分两次参数导）也直接点「导出」。
 		 */
 		if (written.length > 0) this.list?.markSelected(written[written.length - 1] as string);
-		// 关窗之前先把"要不要换基准"问掉：那个弹窗是模态的，会盖在这个窗口上面，
-		// 答完（或跳过）就回到这儿，包还能接着操作
-		if (resetCandidate) await offerBaselineReset(this.plugin, resetCandidate);
 	}
 
 	onClose(): void {
@@ -754,7 +746,7 @@ export class ApplyBundleModal extends Modal {
 				});
 			}
 			this.reportEl.createEl('p', {
-				text: '更新包：只装自完整副本以来变过的文件 —— 下面几档**只动包里点名的文件**，'
+				text: '更新包：只装自起点那一点以来变过的文件 —— 下面几档**只动包里点名的文件**，'
 					+ '没提到的一律不动（"没提到"不等于"被删了"）。',
 				cls: 'locally-save-hint',
 			});
@@ -960,14 +952,14 @@ export class ApplyBundleModal extends Modal {
 		}
 		if (!report.parentMatches && report.bundle.mode === 'changes') {
 			this.reportEl.createEl('p', {
-				text: '这个包不是接在你上次应用的那个后面（你跳过了一些）。更新包是累积的，内容不会缺。',
+				text: '这个包不是接在你上次应用的那一点后面（中间少了那几环）。链条断了插件不猜着合 —— 先把缺的包补齐。',
 				cls: 'locally-save-hint',
 			});
 		}
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
-				text: `⚠ 你还没应用这个包所基于的完整副本（落后 ${report.generationGap} 代）。`
-					+ '更新包是相对完整副本累积的，请先让对方导一份完整副本并应用。',
+				text: `⚠ 本机还没站到这个包所基于的那个基准点上（差 ${report.generationGap} 代）。`
+					+ '链条中间断了插件会直接拒绝；请对方把中间缺的那几环一起发过来（或从本机这个点重导一份）。',
 				cls: 'locally-save-warn',
 			});
 		}

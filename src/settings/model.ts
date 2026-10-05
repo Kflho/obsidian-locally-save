@@ -59,15 +59,6 @@ export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
 	changes: '仅改动（自上次导出后变过的文件）',
 };
 
-/** 更新包攒到多大就提醒换基准（`bundle/size-warn.ts` 会解析这个字符串） */
-export const SIZE_LIMIT_OPTIONS: Record<string, string> = {
-	'': '200 MB（默认）',
-	'100MB': '100 MB',
-	'500MB': '500 MB',
-	'1GB': '1 GB',
-	'0': '不提醒',
-};
-
 /** 同步包文件的后缀由格式模块定义，这里只用于界面提示 */
 export const BUNDLE_EXTENSION = '.lsave';
 
@@ -117,18 +108,10 @@ export interface PluginSettings {
 	 * 删除是唯一不可逆的动作，宁可留着。
 	 */
 	autoApplyIncoming: boolean;
-	/** 留包时导一个更新包（自上次完整包以来累积的改动；几乎不额外花时间） */
+	/** 留包时导一个更新包（只装自上一个基准点以来的新改动；几乎不额外花时间） */
 	autoExportChanges: boolean;
 	/** 留包时导一份完整包（每次都重写整个仓库，慢，默认关） */
 	autoExportFull: boolean;
-	/**
-	 * 更新包攒到多大就提醒"该换基准了"（写法见 `bundle/size-warn.ts`）。
-	 *
-	 * 更新包是累积的、越攒越大；大到接近完整副本时，它唯一的好处（传得小）就没了。
-	 * 到点会弹窗问：要不要重导一份完整副本当新基准（更新包从零重新累积）。
-	 * 取值来自 `SIZE_LIMIT_OPTIONS`：留空 ＝ 默认 200MB，`0` ＝ 不提醒。
-	 */
-	bundleSizeWarnLimit: string;
 	/**
 	 * 更新包**从哪个状态**开始：留空 ＝ 我最新那份完整副本（默认）；否则是**基准指纹**
 	 * （16 位十六进制，见 `bundle/baseline.ts`）。
@@ -178,8 +161,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
-	bundleSizeWarnLimit: '',
-	// 留空 ＝ 从"我最新那份完整副本"到"最新（当前仓库）"，也就是原来的行为
+	// 留空 ＝ 从"我站的这个基准点"到"最新（当前仓库）"
 	changesFromState: '',
 	changesToState: '',
 
@@ -299,11 +281,6 @@ export function settingsFrom(data: unknown): PluginSettings {
 		autoApplyIncoming: coerceBoolean(raw.autoApplyIncoming, DEFAULT_SETTINGS.autoApplyIncoming),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
-		bundleSizeWarnLimit: coerceChoice(
-			raw.bundleSizeWarnLimit,
-			Object.keys(SIZE_LIMIT_OPTIONS),
-			DEFAULT_SETTINGS.bundleSizeWarnLimit,
-		),
 		changesFromState: coerceAnchorFingerprint(raw.changesFromState),
 		changesToState: coerceAnchorFingerprint(raw.changesToState),
 

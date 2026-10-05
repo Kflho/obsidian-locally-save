@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { executeBundlePlan, isDestructivePlan, planBundleApply } from './apply';
 import type { ApplyOptions, ApplyPlan } from './apply';
+import { baselineOfBundle } from './baseline';
 import { listBundles } from './manage';
 import type { ManagedBundle } from './manage';
 import { loadState, rememberIncoming, saveState } from '../sync/state';
@@ -14,8 +15,11 @@ import type { PluginState } from '../sync/state';
  * 这是包通道唯一的"手感缺口"。补法不是把副本通道请回来，而是：
  *
  * **每 30 秒看一眼同步包文件夹，只有完全不会动到本地已有东西时才自己应用**：
- * - 只认**更新包**（自完整副本累积的改动，只动它点名的文件）；
- *   完整包永远不自动应用 —— 它可能删掉你本机独有的文件；
+ * - 只认**更新包**（它是链条上的一环，只动它点名的文件）；完整包永远不自动应用 ——
+ *   它可能删掉你本机独有的文件；
+ * - **按链条顺序接**（0.11 起）：只有"起点正好是本机站的基准点"的那一环才收得下，
+ *   别的先搁着等缺的那几环到齐（以前"只看最新那一个"是累积语义的产物，
+ *   链条模型下最新的那一环前面还缺着环，强看它只会报"接不上"）；
  * - 要删文件 / 删空目录 / 覆盖本地改动 / 会产生冲突副本 → **一律不自动动手**，
  *   只提示一句，让人自己打开看；
  * - 我自己的导出、已经处理过的包，一律跳过（见 `pickIncoming`）；
@@ -147,27 +151,88 @@ async function rememberDecision(
 	}
 }
 
+/** 一次"看一眼收到的包"的结果：给界面报账用 */
+export interface IncomingSweep {
+	/** 自己按顺序接下来了的（链条上的那几环） */
+	applied: { file: string; written: number; deleted: number; stateIdCompare: string; pending: number }[];
+	/** 要人看的：会动本机东西 / 是完整副本 / 试了失败（理由照旧） */
+	review: { file: string; why: string; kind: 'needs-review' | 'failed'; full: boolean }[];
+	/** 链条没接上、先搁着的：本机站在前面某一环上，缺中间那几环 */
+	waiting: string[];
+}
+
 /**
- * 比"最新那个"旧的、还没处理过的包：记成一笔"被取代了"就走。
+ * **按链条顺序**把能接上的包依次应用（0.11 起的链条模型）。
  *
- * 为什么可以跳过：**更新包是累积的**（自完整副本以来的全部改动），完整包更是完整清单 ——
- * 任何更新的包都包含旧包的全部内容。所以每次只看最新那一个既省事又不会漏东西；
- * 反过来说，如果哪天格式变了（不再累积），这条规矩就得跟着改。
+ * 为什么不再"只看最新那一个"：那是"更新包自完整副本累积"那套语义的产物 ——
+ * 每份包都含全部改动，所以看最新那个就够了。改成链条之后，每份包只装**自上一环以来的改动**，
+ * 最新那一环是从上一环的落点往外延伸的：本机没走到上一环，收它只会得到"接不上"。
+ * 正确的做法是从本机站的那一点往后一环一环接，缺环就停在那儿等它到齐。
+ *
+ * 安全边界不变（在 `handleIncoming` 里）：只自动应用不会动本机已有东西的更新包；
+ * 碰上"要删文件 / 要覆盖本地改动"的那一环就停下并报一句 —— 后面的环自然也就搁着。
  */
-export async function skipSuperseded(stateFile: string, candidates: IncomingCandidate[]): Promise<void> {
-	if (candidates.length === 0) return;
-	try {
-		const state = await loadState(stateFile);
-		for (const item of candidates) {
-			rememberIncoming(state, {
-				id: item.bundleId,
-				at: Date.now(),
-				note: 'superseded',
-				file: path.basename(item.bundle.file),
+export async function sweepIncoming(
+	optionsFor: (file: string) => ApplyOptions,
+	stateFile: string,
+	candidates: IncomingCandidate[],
+): Promise<IncomingSweep> {
+	const sweep: IncomingSweep = { applied: [], review: [], waiting: [] };
+	const pending = [...candidates];
+
+	// 完整副本：从来不自动应用（它可能删掉本机独有的文件）—— 照旧报一句、记一笔，不在链条里
+	for (const item of [...pending]) {
+		if (item.bundle.header?.mode !== 'full') continue;
+		pending.splice(pending.indexOf(item), 1);
+		const outcome = await handleIncoming(optionsFor(item.bundle.file), item);
+		if (outcome.kind !== 'applied' && outcome.kind !== 'already') {
+			sweep.review.push({
+				file: outcome.file,
+				why: outcome.kind === 'needs-review' ? outcome.why : outcome.error,
+				kind: outcome.kind === 'needs-review' ? 'needs-review' : 'failed',
+				full: true,
 			});
 		}
-		await saveState(stateFile, state);
-	} catch {
-		// 同上：记不下不影响正确性，只是下次再看一眼
 	}
+
+	/** 本机现在站的基准点：只有"起点正好是它"的那一环收得下 */
+	let cursor = (await loadState(stateFile)).bundle?.fullHash ?? null;
+
+	// 兜底上限：正常链条就几环，卡住时别把这一拍拖住
+	for (let guard = 0; guard < 64 && pending.length > 0; guard++) {
+		const index = pending.findIndex(item => {
+			const header = item.bundle.header;
+			return header?.mode === 'changes' && baselineOfBundle(header) === cursor;
+		});
+		if (index < 0) break; // 没有接得上的了（缺环，或者剩下的都是别的基准）
+		const [candidate] = pending.splice(index, 1);
+		if (!candidate) break;
+		const outcome = await handleIncoming(optionsFor(candidate.bundle.file), candidate);
+		if (outcome.kind === 'applied') {
+			sweep.applied.push({
+				file: outcome.file,
+				written: outcome.written,
+				deleted: outcome.deleted,
+				stateIdCompare: outcome.stateIdCompare,
+				pending: outcome.pending,
+			});
+			// 接着往下接：本机现在站到它送到的那一点上了
+			cursor = (await loadState(stateFile)).bundle?.fullHash ?? cursor;
+			continue;
+		}
+		if (outcome.kind === 'already') {
+			cursor = candidate.bundle.header?.targetBaselineHash ?? cursor;
+			continue;
+		}
+		sweep.review.push({
+			file: outcome.file,
+			why: outcome.kind === 'needs-review' ? outcome.why : outcome.error,
+			kind: outcome.kind === 'needs-review' ? 'needs-review' : 'failed',
+			full: false,
+		});
+	}
+
+	// 剩下的：起点不是本机这一点（缺中间那几环）—— 不记账、不动它，等缺的环到了再看
+	for (const item of pending) sweep.waiting.push(path.basename(item.bundle.file));
+	return sweep;
 }

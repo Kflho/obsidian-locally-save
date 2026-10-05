@@ -1,9 +1,7 @@
 import {
 	CONFLICT_OPTIONS,
 	DEFAULT_SETTINGS,
-	SIZE_LIMIT_OPTIONS,
 	coerceBoolean,
-	coerceChoice,
 	coerceConflict,
 	coerceAnchorFingerprint,
 	coerceText,
@@ -31,7 +29,7 @@ import type { FieldSection } from './types';
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '同步包',
-	desc: '把仓库打包成单个 .lsave 文件来回搬：先立一份完整副本当基准，之后只导累积的更新包',
+	desc: '把仓库打包成单个 .lsave 文件来回搬：先立一份完整副本当基准点，之后只导从基准点往外延伸的更新包',
 	groups: [
 		{
 			heading: '包放在哪',
@@ -64,27 +62,16 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'autoExportChanges',
 					name: '留更新包',
-					desc: '留包时导一个更新包（自上次完整副本以来累积的改动）。第一次要先导一次完整副本',
+					desc: '留包时导一个更新包：只装自上一个基准点以来的新改动。第一次要先导一次完整副本',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
 				{
 					key: 'autoExportFull',
 					name: '留完整包',
-					desc: '留包时导一份完整副本（整个仓库重写一遍，大库会明显变慢）。它是还原点，也是更新包的基准',
+					desc: '留包时导一份完整副本（整个仓库重写一遍，大库会明显变慢）。它同时是一个基准点与还原点',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
-				},
-				{
-					key: 'bundleSizeWarnLimit',
-					name: '更新包超过多大就提醒换基准',
-					desc: '更新包是累积的、越攒越大；到线弹窗问要不要重导一份完整副本当新基准',
-					control: { type: 'dropdown', options: SIZE_LIMIT_OPTIONS },
-					coerce: value => coerceChoice(
-						value,
-						Object.keys(SIZE_LIMIT_OPTIONS),
-						DEFAULT_SETTINGS.bundleSizeWarnLimit,
-					),
 				},
 			],
 		},

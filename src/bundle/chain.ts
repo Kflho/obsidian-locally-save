@@ -15,23 +15,26 @@ import { toNative } from '../utils/paths';
 /**
  * **自动接链**：让插件自己判断"本机能不能接到包链条的末端"。
  *
- * 为什么需要它（用户提的）：本机的基准与"文件夹里有哪些包"原本是两件互不相干的事，全靠人手动对齐 ——
- * 手上有 39 的基准和一条 39→46 的包链，可本机基准还是 39，于是更新包永远按 39 累积、越滚越大，
- * 得手动去点「立新基准」。而**链本身是现成的数据**：更新包头上写着"我基于哪一份基准"
- * （`baseGeneration` + `baselineHash`），完整包头上写着"我是哪一代 + 我的指纹"，
- * 首尾相接就能串成一条链，不需要人去指。
+ * 链条模型（0.11 起）：**基准点**是链条上的节点 —— 完整包是一个点，**每份被应用的更新包**
+ * 也落出一个新点；点与点之间是严格镜像，所以链条上每个节点的内容都是确定的，不需要人去指。
+ * 链本身就是现成的数据：每个包的头部都记着"**我从哪一个基准点往外延伸**"
+ * （`baselineHash`）与"**我落到哪一个基准点**"（`targetBaselineHash`，
+ * 见 `bundle/export.ts`），首尾相接就串起来了。
  *
- * 三条判据（都能从现有头部字段推出来，容器格式没变）：
- * 1. **认链**：同血脉、同指纹的才接得上 —— 完整包用「它自己的基准指纹」当身份，
- *    更新包用「它声称基于的那份的指纹」认父亲；
- * 2. **能不能接**：本机基准必须落在链上某一份完整包上。落在链上就能接，接不上**如实说缺哪一份**，绝不猜着合；
- * 3. **接到哪儿**：从本机那份基准往后一路走到底（链末）。
+ * 为什么需要它（用户提的）：本机的点与"文件夹里有哪些包"原本是两件互不相干的事，全靠人手动对齐 ——
+ * 手上有第 39 代的点、文件夹里是一条 39→46 的链，得手动去点「立新基准」才跟得上。
+ *
+ * 三条判据：
+ * 1. **认链**：本机这一点往后，每一步都找"起点指纹 ＝ 当前落点"的那个包（同血脉）；
+ * 2. **能不能接**：本机这一点必须**在链上**（是某个包的落点，或是一份完整包）。
+ *    接不上**如实说缺哪一份**，绝不猜着合；
+ * 3. **接到哪儿**：从本机这一点往后一路走到底（链末）。
  *
  * 执行时**不重新打包任何东西**：链上的完整副本与更新包都在文件夹里，按顺序应用即可；
- * 应用完 `state.bundle.fullGeneration` / `state.generation` 自然等于链末那一代。
+ * 应用完 `state.bundle.fullHash` / `state.generation` 自然等于链末那一点。
  *
  * **本机的改动要保留**（用户明确选的）：接链会让完整副本镜像覆盖本机内容，所以接链前先把
- * "本机相对旧基准的改动"记下来，接完再放回去 —— 最终内容 = **链末 + 本机改动**，基准 = 链末。
+ * "本机相对旧基准点的改动"记下来，接完再放回去 —— 最终内容 = **链末 + 本机改动**，基准点 = 链末。
  * 放回用的字节取自**原来那份包**（`extractPath`），所以放回去的就是本机原来那一版，不会走形。
  *
  * 这个文件不 import obsidian：分析是纯逻辑，执行只调 `apply.ts`，测试能拿临时目录直接跑。
@@ -44,8 +47,10 @@ export interface ChainNode {
 	mode: 'full' | 'changes';
 	/** 完整包：它自己那一代；更新包：应用完到达的那一代 */
 	generation: number;
-	/** 接上它需要的基准指纹（完整包 ＝ 它自己；更新包 ＝ 它声称基于的那份） */
+	/** 这个包**从哪一个基准点**往外延伸（完整包 ＝ 它自己） */
 	baseline: string | null;
+	/** **落到哪一个基准点**（完整包 ＝ 它自己；旧版更新包没记 → null，这一环接不下去） */
+	target: string | null;
 }
 
 export interface ChainPlan {
@@ -95,23 +100,21 @@ export async function planChain(
 	const state = await loadState(options.stateFile);
 	const bundles = (await listBundles(baseDir)).filter(item => item.header);
 
-	// 链上的包：同血脉 + 能认出基准（完整包自带，更新包靠 baselineHash）
+	// 链上的包：同血脉 + 认得出"从哪一点来、落到哪一点"
 	const sameLineage = bundles.filter(item => item.header?.lineage === state.lineage);
-	const fulls = sameLineage
-		.filter(item => item.header?.mode === 'full')
-		.sort((a, b) => (a.header?.targetGeneration ?? 0) - (b.header?.targetGeneration ?? 0));
-	const changes = sameLineage
-		.filter(item => item.header?.mode === 'changes')
-		.sort((a, b) => (a.header?.targetGeneration ?? 0) - (b.header?.targetGeneration ?? 0));
+	const nodes = sameLineage.map(node);
 
-	/** 指纹 → 完整包（同指纹只留最新那一份；世代相同时按修改时间） */
-	const fullByHash = new Map<string, ManagedBundle>();
-	for (const item of fulls) {
-		const hash = baselineOf(item);
-		if (!hash) continue;
-		const old = fullByHash.get(hash);
-		if (!old || (item.header?.targetGeneration ?? 0) >= (old.header?.targetGeneration ?? 0)) {
-			fullByHash.set(hash, item);
+	/** 指纹 → 节点（同指纹只留最新那一份）：完整包用它自己的指纹认，更新包用它落到的那一点认 */
+	const byHash = new Map<string, ChainNode>();
+	/** 指纹 → **完整包**：链末正好落在一份完整副本上时，那一点可以当成一份新基准来用 */
+	const fullByHash = new Map<string, ChainNode>();
+	for (const item of nodes) {
+		const keys = item.mode === 'full' ? [item.baseline, item.target] : [item.target];
+		for (const key of keys) {
+			if (!key) continue;
+			if (item.mode === 'full') fullByHash.set(key, item);
+			const old = byHash.get(key);
+			if (!old || item.generation >= old.generation) byHash.set(key, item);
 		}
 	}
 
@@ -121,43 +124,49 @@ export async function planChain(
 		edits: [], extraFiles: [],
 	});
 	if (sameLineage.length === 0) return emptyPlan('这个文件夹里没有跟我同血脉的包（先把对方的包拷进来）');
-	if (mine === null) return emptyPlan('本机还没有基准（没导过、也没应用过完整副本）：先应用一份完整副本，之后才谈得上接链');
+	if (mine === null) return emptyPlan('本机还没有基准点（没导过、也没应用过完整副本）：先应用一份完整副本，之后才谈得上接链');
 
-	// 本机站在链上的哪一份完整包上
-	const startBundle = fullByHash.get(mine) ?? null;
-	if (!startBundle) {
-		return emptyPlan(`本机现在的基准（指纹 ${mine}）不在这条链上：缺那份完整副本。让对方补一份进来，或者用「以这一份为基准…」先站上去`);
+	// 本机站在链上的哪一点：一份完整包（它就是那一点），或者"落到这一点"的那个包
+	const arrive = nodes.find(item => item.mode === 'changes' && item.target === mine) ?? null;
+	const startNode = byHash.get(mine) ?? null;
+	if (!arrive && !startNode) {
+		return emptyPlan(`本机现在的基准点（指纹 ${mine}）不在这个文件夹里的任何一条链上：中间缺那几份包。`
+			+ '让对方把它们一起发过来（或者让对方按本机这个点重导一份更新包）');
 	}
-	const fromNode = node(startBundle);
+	const fromNode = arrive ?? (startNode as ChainNode);
 
-	// 从起点往后接：每一步都必须是"基准指纹 ＝ 上一个点的指纹"，接不上就停在那儿并说清
+	// 从这一点往后接：每一步都必须是"起点指纹 ＝ 当前落点"，接不上就停在那儿并说清。
+	// 同一个起点上有好几份包（两台机器各导了一份）时取**最新**的那份，另一份是并行的支线。
 	const steps: ChainNode[] = [];
-	let cursorHash: string | null = mine;
-	let generation = startBundle.header?.targetGeneration ?? state.generation;
+	const used = new Set<string>([fromNode.file]);
+	let cursor: string | null = mine;
+	let generation = fromNode.generation;
+	for (;;) {
+		const next = nodes
+			.filter(item => item.mode === 'changes'
+				&& item.baseline === cursor
+				&& item.target !== null
+				&& !used.has(item.file))
+			.sort((a, b) => b.generation - a.generation)[0];
+		// 防环：世代必须往前走
+		if (!next || next.generation <= generation) break;
+		steps.push(next);
+		used.add(next.file);
+		cursor = next.target;
+		generation = next.generation;
+	}
+
 	if (only !== undefined) {
 		// 只关心"包含选中的那个包"：它必须在链上，否则整条链跟它无关
-		const inChain = sameLineage.some(item =>
-			path.resolve(item.file) === path.resolve(only) && baselineOf(item) === mine,
-		);
+		const inChain = path.resolve(fromNode.file) === path.resolve(only)
+			|| steps.some(step => path.resolve(step.file) === path.resolve(only));
 		if (!inChain) {
-			return emptyPlan('选中的这个包不在本机所在的这条链上（它的基准不是本机站的那一份）—— 先在「管理同步包」里看它该接在谁后面');
+			return emptyPlan('选中的这个包不在本机所在的这条链上（它接的是别的基准点）—— 先在「管理同步包」里看它该接在谁后面');
 		}
 	}
-	for (;;) {
-		const next = changes.find(item =>
-			baselineOf(item) === cursorHash && !steps.some(step => step.file === item.file),
-		);
-		if (!next) break;
-		const target = next.header?.targetGeneration ?? null;
-		if (target === null || target <= generation) break; // 防环：世代必须往前走
-		steps.push(node(next));
-		cursorHash = baselineOf(next);
-		generation = target;
-	}
 
-	// 终点那份完整包：链末正好有一份（指纹 ＝ 现在这个游标）时，基准可以直接切到它
-	const endFullBundle = cursorHash === null ? null : (fullByHash.get(cursorHash) ?? null);
-	const endFull = endFullBundle ? node(endFullBundle) : null;
+	// 终点正好是一份完整包时（落点指纹就是它）：那一点可以当成一份新基准来用
+	const endFull = cursor === null ? null : (fullByHash.get(cursor) ?? null);
 	if (steps.length === 0) {
 		return {
 			from: fromNode, steps: [], endGeneration: generation, endFull,
@@ -166,7 +175,7 @@ export async function planChain(
 		};
 	}
 
-	// 本机相对**旧基准**改过哪些文件：接链是镜像覆盖，所以这些要先记下来再放回
+	// 本机相对**旧基准点**改过哪些文件：接链是镜像覆盖，所以这些要先记下来再放回
 	const edits = await collectLocalEdits(options, state);
 	return {
 		from: fromNode,
@@ -179,14 +188,19 @@ export async function planChain(
 	};
 }
 
-/** 一个包 → 链上的一个节点 */
+/** 一个包 → 链上的一个节点：从哪一点来、落到哪一点 */
 function node(bundle: ManagedBundle): ChainNode {
+	const header = bundle.header;
+	const mode = header?.mode ?? 'changes';
+	const baseline = baselineOf(bundle);
 	return {
 		file: bundle.file,
 		name: bundle.name,
-		mode: bundle.header?.mode ?? 'changes',
-		generation: bundle.header?.targetGeneration ?? 0,
-		baseline: baselineOf(bundle),
+		mode,
+		generation: header?.targetGeneration ?? 0,
+		baseline,
+		// 完整包：它自己就是那一点；更新包：头部记着落点（旧版包没记 → null）
+		target: mode === 'full' ? baseline : (header?.targetBaselineHash ?? null),
 	};
 }
 

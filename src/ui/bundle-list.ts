@@ -44,7 +44,8 @@ export interface BundleListViewOptions {
 	/**
 	 * **完整副本**那一行多出来的动作（如「以这一份为基准…」）。
 	 *
-	 * 只对完整副本出现：更新包说不了"我以你为基准"（它自己还是靠一份完整副本累积的）。
+	 * 只对完整副本出现：完整副本自带完整清单，可以直接站上去；
+	 * 更新包是链条上的一环，落到哪一点得看它接在谁后面（走「应用…」那条路）。
 	 * 给的是回调而不是直接在这里干活 —— 真正的动作走应用对话框（先出报告、再动手），
 	 * 免得管理窗口里点一下就把仓库改了。
 	 */
@@ -220,7 +221,7 @@ export class BundleListView {
 		if (this.options.actionLabel && this.options.onAction) {
 			this.addButton(actions, this.options.actionLabel, false, () => this.options.onAction?.(item));
 		}
-		// 「以这一份为基准」只给完整副本：更新包是按某份完整副本累积的，
+		// 「以这一份为基准」只给完整副本：更新包是链条上的一环，
 		// 自己都还站在别人的基准上，谈不上"以我为基准"
 		if (this.options.baselineLabel && this.options.onBaseline && item.mode === 'full' && item.header) {
 			this.addButton(actions, this.options.baselineLabel, false, () => this.options.onBaseline?.(item));

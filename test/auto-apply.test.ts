@@ -76,10 +76,10 @@ function read(root: string, rel: string): string | null {
 }
 
 /** 造一个"我这台机器"的插件：仓库根指向临时目录 */
-function createPlugin(data: unknown): LocallySavePlugin {
+function createPlugin(data: unknown, vault: string = VAULT): LocallySavePlugin {
 	const plugin = new LocallySavePlugin(new App(), MANIFEST);
 	(plugin as unknown as { stubData: unknown }).stubData = data;
-	(plugin.app.vault.adapter as unknown as { basePath: string }).basePath = VAULT;
+	(plugin.app.vault.adapter as unknown as { basePath: string }).basePath = vault;
 	return plugin;
 }
 
@@ -97,11 +97,11 @@ async function exportFromOther(mode: 'full' | 'changes'): Promise<ExportOutcome>
 }
 
 /** 我这边先应用一次对方的完整副本：立基准（真实流程里这一步是手动做的） */
-async function seedBaseline(plugin: LocallySavePlugin, file: string): Promise<void> {
+async function seedBaseline(plugin: LocallySavePlugin, file: string, vault: string = VAULT): Promise<void> {
 	await applyBundle({
 		settings: plugin.settings,
 		log,
-		vaultRoot: VAULT,
+		vaultRoot: vault,
 		stateFile: plugin.stateFile(),
 		file,
 	});
@@ -170,59 +170,73 @@ const afterRisky = await loadState(plugin.stateFile());
 check('要删文件的包：记了一笔"要人看"', afterRisky.incoming.at(-1)?.note, 'needs-review');
 check('要删文件的包：本地基准没被改坏', read(VAULT, 'notes/a.md'), 'AAA 改过了');
 
-// 5b. 对方把那个文件放回来了：之后发的包里就不该再有"删除"这一笔
-// （更新包是累积的 —— 不撤回的话，那一笔会一直跟着后面的每一个包）
+// 5b. 对方把那个文件放回来了：那一环接在**本机没走到的那一点**后面
+//     （"删"的那一环没自动应用 → 本机还停在前一点上）→ 直接搁着等缺的环到齐，绝不猜着合
 write(OTHER, 'notes/b.md', 'BBB 回来了');
 await exportFromOther('changes');
 noticeLog.length = 0;
-check('对方撤回删除之后：又能安全地自动应用了', await checkIncomingBundles(plugin), true);
-check('撤回的那份内容也落地了', read(VAULT, 'notes/b.md'), 'BBB 回来了');
+check('撤回之后那一环也接不上（前一环没走到）', await checkIncomingBundles(plugin), false);
+check('本地那个文件没被动', read(VAULT, 'notes/b.md'), 'BBB');
+checkTrue(
+	'提示里说清"接在本机还没走到的那一环后面"',
+	noticeLog.some(m => m.includes('还没走到')),
+	noticeLog.join(' / '),
+);
 
-// 6. 文件夹里同时躺着两个更新包（同一血脉的两台机器各发一个）：只按最新那个办，旧的记成"被取代"
-//    为什么两个包能同时存在：同一血脉的旧包在导出时就会被清掉（removeSupersededChanges），
-//    但**同代**的包（两台都基于同一份完整副本）谁也清不掉谁 —— 这时"只看最新那一个"就派上用场了。
-const THIRD = path.join(ROOT, 'third-vault');
-const STATE_THIRD = path.join(ROOT, 'state-third.json');
-fs.mkdirSync(THIRD, { recursive: true });
-
-// 先让对方发一个更新包（这台机器 A 改的）
-write(OTHER, 'notes/a.md', 'AAA 改过第二次');
-const older = await exportFromOther('changes');
-
-// 第三台机器 C：照 A 那份完整副本铺一遍（这一步会在 C 那边认祖 = 同血脉），改一笔再发一个包。
-// 改的是**另一个文件**（`notes/c.md`）：两台机器各发一个包时，接收方手里 `notes/a.md` 那一版
-// 来自 A 的包，而 C 的包是按"我们俩都还停在完整副本那一版"算的 base（更新包自带的 base 优先于
-// 本机记录）—— 两边改同一个文件的话，C 的包会被判成冲突，那就变成"要人看"而不是"按最新那个应用"，
-// 验不到这一组真正要钉的东西。改不同文件，两条语义互不打扰。
+// 6. **链条中间断了一环、后来补上**：接得上的先接、接不上的搁着；缺的那环到了就一路接到底
+//    （这是链条模型下自动应用真正要干的事 —— 以前"只看最新那一个"是累积语义的产物）
+const SND = path.join(ROOT, 'sender-chain');
+const STATE_SND = path.join(ROOT, 'state-sender.json');
+const RECV2 = path.join(ROOT, 'recv-chain');
+// 单独的包目录：这一组的两环不能被别的机器的包搅进来
+const OUT_CHAIN = path.join(ROOT, 'bundles-chain');
+for (const dir of [SND, RECV2, OUT_CHAIN]) fs.mkdirSync(dir, { recursive: true });
+// 发送方：照第一份完整副本铺一遍（认祖 = 同血脉、站在那一点上），连导两环
 await applyBundle({
 	settings: { ...DEFAULT_SETTINGS },
 	log,
-	vaultRoot: THIRD,
-	stateFile: STATE_THIRD,
+	vaultRoot: SND,
+	stateFile: STATE_SND,
 	file: firstFull.file as string,
 });
-write(THIRD, 'notes/c.md', '第三台机器加的');
-const newer = await exportBundle({
-	settings: { ...DEFAULT_SETTINGS },
-	log,
-	vaultRoot: THIRD,
-	vaultName: '第三台机器',
-	stateFile: STATE_THIRD,
-	mode: 'changes',
-	outDir: OUT,
+// 内容长度要不一样：同长度 + 同一秒内会被 2 秒容差当成"没改过"，第二个包就成空的了
+write(SND, 'notes/a.md', '第一环');
+const linkOne = await exportBundle({
+	settings: { ...DEFAULT_SETTINGS }, log, vaultRoot: SND, vaultName: '链条机器',
+	stateFile: STATE_SND, mode: 'changes', outDir: OUT_CHAIN,
 });
-checkTrue('两个更新包真的同时躺在文件夹里', older.file !== null && newer.file !== null, `${older.file} / ${newer.file}`);
+write(SND, 'notes/a.md', '第二环 — 更长一点的改动');
+const linkTwo = await exportBundle({
+	settings: { ...DEFAULT_SETTINGS }, log, vaultRoot: SND, vaultName: '链条机器',
+	stateFile: STATE_SND, mode: 'changes', outDir: OUT_CHAIN,
+});
+checkTrue('两环都导出来了', linkOne.file !== null && linkTwo.file !== null, `${linkOne.file} / ${linkTwo.file}`);
 
+// 接收方：也站在第一份完整副本那一点上（所以只有 linkOne 接得上）
+const plugin2 = createPlugin({ logLevel: 'silent', bundleDir: OUT_CHAIN, autoApplyIncoming: true }, RECV2);
+await plugin2.onload();
+await seedBaseline(plugin2, firstFull.file as string, RECV2);
+// 先把**后一环**放进去：它接在前一环的落点上，本机还没走到那儿 → 搁着
+const hideOne = `${linkOne.file}.tmp-hold`;
+fs.renameSync(linkOne.file as string, hideOne);
 noticeLog.length = 0;
-check('两个包一起来：按最新那个应用', await checkIncomingBundles(plugin), true);
-check('两个包一起来：落地的是最新那一版', read(VAULT, 'notes/c.md'), '第三台机器加的');
-// 更早那个包（A 改的 a.md）被记成"被取代"，一个字都没落地 —— 这才是"只看最新那一个"
-check('更早那个包的内容没进仓库', read(VAULT, 'notes/a.md'), 'AAA 改过了');
-const afterPair = await loadState(plugin.stateFile());
-const notes = afterPair.incoming.map(item => `${item.id === older.header?.bundleId ? '旧' : item.id === newer.header?.bundleId ? '新' : '?'}:${item.note}`);
-checkTrue('旧的被记成"被取代了"', notes.includes('旧:superseded'), notes.join(' / '));
-checkTrue('新的被记成"已应用"', notes.includes('新:applied'), notes.join(' / '));
-check('旧的不会再被处理一遍', (await checkIncomingBundles(plugin)), false);
+check('只有后一环时：接不上，什么都不动', await checkIncomingBundles(plugin2), false);
+check('内容没变', read(RECV2, 'notes/a.md'), 'AAA');
+checkTrue('提示里说清"接在本机还没走到的那一环后面"', noticeLog.some(m => m.includes('还没走到')), noticeLog.join(' / '));
+const beforeFill = await loadState(plugin2.stateFile());
+checkTrue(
+	'接不上的那一份**不记账**（缺的环到了还要自动接）',
+	beforeFill.incoming.every(item => item.id !== linkTwo.header?.bundleId),
+	JSON.stringify(beforeFill.incoming),
+);
+
+// 缺的那一环到了：一路接到底（两环一口气接完）
+fs.renameSync(hideOne, linkOne.file as string);
+noticeLog.length = 0;
+check('缺的环到了：自动接上（两环一起）', await checkIncomingBundles(plugin2), true);
+check('接完就是链条末端那一版', read(RECV2, 'notes/a.md'), '第二环 — 更长一点的改动');
+check('两环各记一笔"已应用"', (await loadState(plugin2.stateFile())).incoming.filter(item => item.note === 'applied').length, 2);
+check('再扫一遍：不会重复劳动', await checkIncomingBundles(plugin2), false);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

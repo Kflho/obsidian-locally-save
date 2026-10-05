@@ -14,6 +14,7 @@ const entryPoints = [
 	"test/exclude.test.ts",
 	"test/diff.test.ts",
 	"test/bundle.test.ts",
+	"test/chain.test.ts",
 	"test/auto-export.test.ts",
 	"test/auto-apply.test.ts",
 	"test/drop.test.ts",

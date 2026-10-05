@@ -28,7 +28,6 @@ import {
 	trashBundles,
 } from '../src/bundle/manage';
 import type { ManagedBundle } from '../src/bundle/manage';
-import { advanceWarnThreshold, parseSizeLimit, shouldOfferReset, warnThreshold } from '../src/bundle/size-warn';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
 import { scanTree } from '../src/sync/disk';
@@ -256,34 +255,65 @@ check('B 的内容更新', read(B, 'notes/a.md'), 'AAA-CHANGED');
 check('B 的删除也跟上了', exists(B, 'notes/b.md'), false);
 check('删除进了回收目录', fs.existsSync(path.join(B, '.trash', 'locally-save')), true);
 
-// 5. 累积更新包：B 没应用第 3 个包，直接应用第 4 个 —— 不该少内容、也不该满屏冲突
+// 5. 基准点链条：**导出＝从链条末端往外延伸**；
+//    中间断了一环（B 没应用第 3 个包）就直接拒绝，并说清"从哪个基准点开始"
 // （修改时间要拉开：大小相同、又在 2 秒容差内的话，会被当成"没改过"）
 const T3 = Date.now();
 write(A, 'notes/a.md', 'AAA-V3', T3);
 const third = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('第三个包导出成功（B 故意不应用）', third.file !== null, third.reason ?? '');
+const thirdInfo = await readBundleInfo(third.file as string);
+const thirdTarget = thirdInfo.header.targetBaselineHash as string;
+checkTrue('每个包都记着自己落到哪一个基准点（链条靠它首尾相接）', typeof thirdTarget === 'string', JSON.stringify(thirdTarget));
 write(A, 'notes/a.md', 'AAA-V4', T3 + 60_000);
 write(A, 'notes/new.md', 'NEW', T3 + 60_000);
 const fourth = await exportBundle(exportOptions(A, STATE_A, 'changes'));
 checkTrue('第四个包导出成功', fourth.file !== null, fourth.reason ?? '');
 checkTrue('同秒内连导两个包不会互相覆盖', third.file !== fourth.file, `都写到了 ${third.file}`);
-check('更新包以完整包为基准累积', fourth.cumulative, true);
 
 const fourthInfo = await readBundleInfo(fourth.file as string);
+check('第四个包从第三个包的**落点**往外延伸', fourthInfo.header.baselineHash, thirdTarget);
+check('起点也换成了那一环的落点（不再是那份完整副本）', fourthInfo.header.baseGeneration, thirdInfo.header.targetGeneration);
 check(
-	'累积包把跳过的那一轮也装进来了（a.md 与 new.md）',
+	'这一份只装自那个落点以来的改动（a.md 与 new.md）',
 	fourthInfo.header.entries.map(entry => entry.path).sort(),
 	['notes/a.md', 'notes/new.md'],
 );
 
-plan = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
-check('跳过中间包也能直接应用（基准是完整包，世代 ≥ 基准即可）', plan.report.mode, 'fast');
+// B 站在第 2 个包的落点上 → 第四个包的起点不是它站的点 → **拒绝，不猜着合**
+const bPointBefore = (await loadState(STATE_B)).bundle?.fullHash as string;
+let gap = '';
+try {
+	await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
+} catch (error) {
+	gap = error instanceof Error ? error.message : String(error);
+}
+checkTrue('链条中间断了 → 拒绝合并', gap.includes('接不上'), gap || '（没拒绝）');
+checkTrue(
+	'并说清"从哪个基准点开始导出"（把本机这一点报出来）',
+	gap.includes(bPointBefore) && gap.includes('从哪个状态'),
+	gap,
+);
+
+// 把缺的那一环补上（链条就在文件夹里）：按 third → fourth 的顺序应用
+const thirdOptions = applyOptions(B, STATE_B, third.file as string);
+const thirdPlan = await planBundleApply(thirdOptions);
+check('缺的那一环：起点正好是本机的点 → 基准一致', thirdPlan.report.baselineMatch, 'match');
+await executeBundlePlan(thirdPlan, thirdOptions);
+const fourthOptions = applyOptions(B, STATE_B, fourth.file as string);
+plan = await planBundleApply(fourthOptions);
+check('按顺序接上 → 快通道', plan.report.mode, 'fast');
 check('本地停在"我发过的中间版本" → 不算冲突', plan.report.conflicts, 0);
 check('新文件算新增', plan.report.adds, 1);
-result = await executeBundlePlan(plan, applyOptions(B, STATE_B, fourth.file as string));
-check('跳过包也不会少内容：a.md 是最新的', read(B, 'notes/a.md'), 'AAA-V4');
-check('新文件写进来了', read(B, 'notes/new.md'), 'NEW');
+result = await executeBundlePlan(plan, fourthOptions);
+check('接上链条：a.md 是最新的', read(B, 'notes/a.md'), 'AAA-V4');
+check('接上链条：新文件写进来了', read(B, 'notes/new.md'), 'NEW');
 checkTrue('没有产生冲突副本（认得出中间版本）', !hasConflictCopy(B, 'notes'), '不该有冲突副本');
+check(
+	'应用完两边站在同一个基准点上',
+	(await loadState(STATE_B)).bundle?.fullHash,
+	(await loadState(STATE_A)).bundle?.fullHash,
+);
 
 // 5a. 同一个包再打开一次：本地已经全一致
 const again = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
@@ -297,27 +327,21 @@ fs.copyFileSync(FILE_FULL, WITH_KEEP);
 // 5a2. 手里停在我发过的**中间版本**上 → 不算冲突：
 //      包里记着"这个文件经历过的中间版本"，认得出"这是你发过的，不是我自己改的"
 //
-// （这一条以前是拿"状态文件被删"来演的。现在**没有共同祖先就直接拒绝应用**
-//   —— 见 `checkAncestor`，所以这里换成等价的一幕：本机跟对方同一份基准，
-//   但这个文件的本地版本是我上一轮导出去的中间版本 —— 基准那一栏对不上、
-//   `history` 对得上，于是走"直接覆盖、不留冲突副本"。）
+// （本机得先站到 `third` 的**起点**上：链条模型下"起点不是本机这一点"直接拒绝，
+//   所以这里按顺序应用 完整副本 → 第二个包，正好停在第 2 个包的落点上。）
 const I = path.join(ROOT, 'machineI');
 const STATE_I = path.join(ROOT, 'state-i.json');
 fs.mkdirSync(I, { recursive: true });
-// 拿一份稳定副本应用：后面每导一个新包都会清掉被取代的旧包，而这一步要用"那一份包"
-// （WITH_KEEP 跟这些更新包同源：同一份基准才收更新包，见 `checkAncestor`）
-await executeBundlePlan(
-	await planBundleApply(applyOptions(I, STATE_I, WITH_KEEP)),
-	applyOptions(I, STATE_I, WITH_KEEP),
-);
-write(I, 'notes/a.md', 'I 自己的东西', T3 - 500_000); // 应用之后再改的 → 基准里是 AAA
-const fourthInfoForHistory = await readBundleInfo(fourth.file as string);
-const aEntry = fourthInfoForHistory.header.entries.find(entry => entry.path === 'notes/a.md');
-const past = aEntry?.history?.[0];
-checkTrue('包里带着中间版本记录', past !== undefined, JSON.stringify(aEntry?.history));
+// 拿稳定副本应用：后面每导一个新包都会清掉被取代的旧包，而这一步要用"那一份包"
+for (const file of [WITH_KEEP, KEPT_CHANGES]) {
+	await executeBundlePlan(await planBundleApply(applyOptions(I, STATE_I, file)), applyOptions(I, STATE_I, file));
+}
+const thirdEntry = (await readBundleInfo(third.file as string)).header.entries.find(entry => entry.path === 'notes/a.md');
+const past = thirdEntry?.history?.[0];
+checkTrue('包里带着中间版本记录', past !== undefined, JSON.stringify(thirdEntry?.history));
 if (past) {
 	write(I, 'notes/a.md', 'AAA', past.mtime); // 手里正是那个中间版本（记录对得上）
-	const lostPlan = await planBundleApply(applyOptions(I, STATE_I, fourth.file as string));
+	const lostPlan = await planBundleApply(applyOptions(I, STATE_I, third.file as string));
 	check('手里是我发过的中间版本 → 不算冲突', lostPlan.report.conflicts, 0);
 	checkTrue('而且认得出来', lostPlan.report.historyMatches >= 1, `实际 ${lostPlan.report.historyMatches}`);
 }
@@ -1022,35 +1046,11 @@ await executeBundlePlan(yFull2, applyOptions(Y, STATE_Y, qFull2.file as string))
 check('删掉了', exists(Y, 'notes/keep.md'), false);
 check('我自己那份也挪进了回收目录（没真丢）', findBackups(Y, 'notes/keep.md'), ['KEEP']);
 
-// 26. 「更新包攒大了提醒换基准」那套判断（纯逻辑，先钉死）
-check('留空 → 默认 200MB', parseSizeLimit(''), 200 * 1024 * 1024);
-check('写 500KB', parseSizeLimit('500KB'), 500 * 1024);
-check('写 1.5GB', parseSizeLimit('1.5 GB'), Math.floor(1.5 * 1024 * 1024 * 1024));
-check('不带单位按 MB 算', parseSizeLimit('300'), 300 * 1024 * 1024);
-check('大小写都认', parseSizeLimit('200mb'), 200 * 1024 * 1024);
-check('填 0 → 关掉提醒（Infinity）', parseSizeLimit('0'), Number.POSITIVE_INFINITY);
-check('乱填 → 回到默认（宁可提醒）', parseSizeLimit('随便写点什么'), 200 * 1024 * 1024);
-const limit200 = 200 * 1024 * 1024;
-check('没到线上 → 不弹', shouldOfferReset(limit200, 100 * 1024 * 1024), false);
-check('到线了 → 弹', shouldOfferReset(limit200, 200 * 1024 * 1024), true);
-check('关掉提醒（Infinity）→ 永不弹', shouldOfferReset(Number.POSITIVE_INFINITY, 10 ** 12), false);
-check(
-	'跳过一次之后：提醒线抬到 400MB，350MB 不再弹',
-	[
-		shouldOfferReset(limit200, 350 * 1024 * 1024, advanceWarnThreshold(limit200, null)),
-		advanceWarnThreshold(limit200, null),
-	],
-	[false, 400 * 1024 * 1024],
-);
-check(
-	'再跳一次：600MB（按原上限整数倍累进，不是按百分比）',
-	advanceWarnThreshold(limit200, advanceWarnThreshold(limit200, null)),
-	600 * 1024 * 1024,
-);
-check('到 400MB 了 → 再弹一次', shouldOfferReset(limit200, 400 * 1024 * 1024, advanceWarnThreshold(limit200, null)), true);
-check('换过基准（提醒线清零）→ 回到 1 倍上限', warnThreshold(limit200, null), limit200);
+// 26.（0.11 删掉了「更新包攒大了提醒换基准」那一套：链条模型下每份更新包只装自上一环
+// 以来的新改动，不存在"越攒越大"；要立还原点随时可以在「管理同步包…」里手动立）
 
-// 27. 完整包会取代**所有**更早的更新包（换基准之后就它们没用了）
+// 27. **链条模型**：每导一次更新包就是链条上的**一环** —— 各环并存，
+// 删了它，还站在那一环起点的机器就接不上来了。只有**完整副本**能取代它们（换基准那条路）。
 // 用一台新机器 + 一个新目录，免得干扰前面那些依赖具体包文件的用例
 const OUT2 = path.join(ROOT, 'transfer2');
 const AA = path.join(ROOT, 'machineAA');
@@ -1064,11 +1064,23 @@ const aaC1 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), out
 write(AA, 'c.md', 'C1');
 const aaC2 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
 const changesDir = path.join(OUT2, 'changes');
-check('导第二个更新包：旧的被它取代、只剩新的那个', fs.readdirSync(changesDir), [path.basename(aaC2.file as string)]);
-check('清掉的名单也带出来', aaC2.superseded, [path.basename(aaC1.file as string)]);
+const aaC1Info = await readBundleInfo(aaC1.file as string);
+const aaC2Info = await readBundleInfo(aaC2.file as string);
+check('首尾相接：下一环的起点 ＝ 上一环的落点', aaC2Info.header.baselineHash, aaC1Info.header.targetBaselineHash);
+check(
+	'链条上的每一环都留着（删了后面的机器就接不上）',
+	fs.readdirSync(changesDir).sort(),
+	[path.basename(aaC1.file as string), path.basename(aaC2.file as string)].sort(),
+);
+check('不同环之间谁也取代不了谁', aaC2.superseded, []);
+checkTrue(
+	'但要说清"留着的是链条上的另一环"',
+	aaC2.keptChanges.some(item => item.why.includes('链条上的另一环')),
+	JSON.stringify(aaC2.keptChanges),
+);
 check('完整包留着（还原点）', fs.existsSync(aaFull.file as string), true);
 
-// 两个一起导：完整包不该把**同一次**刚导出的更新包也清掉
+// 两个一起导：完整包**会**取代链条上的旧环 —— 它是完整清单，站在老环上的机器直接应用它就行
 write(AA, 'd.md', 'D1');
 const aaC3 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
 const aaF2 = await exportBundle({
@@ -1077,33 +1089,35 @@ const aaF2 = await exportBundle({
 	keepPaths: [aaC3.file as string],
 });
 check('同一次导出的更新包不会被完整包清掉', fs.existsSync(aaC3.file as string), true);
-check('但更早的更新包被完整包取代了', aaC3.superseded, [path.basename(aaC2.file as string)]);
-check('这次完整包没删东西（该删的上一轮已删）', aaF2.superseded, []);
+check(
+	'更早的那两环被完整包取代了',
+	[...aaF2.superseded].sort(),
+	[path.basename(aaC1.file as string), path.basename(aaC2.file as string)].sort(),
+);
+check('这次完整包没删别的（该删的上一轮已删）', aaF2.superseded.includes(path.basename(aaC3.file as string)), false);
 
-// 换基准之后再导更新包：**不同基准的各留一份** —— 新版那份是给"站在新基准上"的机器用的，
-// 站在老基准上的机器收它只能逐文件合并（"指定起点"这个功能就是为这件事加的）。
-// 同基准的旧包照样被取代（下面那条）。
+// 换基准之后再导更新包：新的环从**新基准点**往外延伸，前面留下的环照样不动
 write(AA, 'e.md', 'E1');
 const aaC4 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
 check(
-	'换了基准：新旧两份更新包并存（各有各的接收方）',
-	fs.readdirSync(changesDir).sort(),
-	[path.basename(aaC3.file as string), path.basename(aaC4.file as string)].sort(),
+	'新的环从新基准点往外延伸',
+	(await readBundleInfo(aaC4.file as string)).header.baselineHash,
+	baselineOfBundle(aaF2.header as NonNullable<typeof aaF2.header>),
 );
-check(
-	'没删掉的那份要说清为什么',
-	aaC4.keptChanges.map(item => item.why),
-	['基于第 1 代，跟这个包的基准不是同一份（各有各的接收方）'],
+checkTrue(
+	'没删掉的那份要说清为什么（链条上的另一环）',
+	aaC4.keptChanges.length > 0 && aaC4.keptChanges.every(item => item.why.includes('链条上的另一环')),
+	JSON.stringify(aaC4.keptChanges),
 );
 
-// 清理是**一律**做的（以前是个开关，现在删了）：同基准的上一个照样被取代
+// 再导一环：上一环还是留着（链条不删环）
 write(AA, 'f.md', 'F1');
 const aaC5 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
-check('导新的更新包 → 同基准的上一个被取代清掉', aaC5.superseded, [path.basename(aaC4.file as string)]);
+check('再导一环：没有谁被取代', aaC5.superseded, []);
 check(
-	'于是 changes 里每个基准各留一份（老那份给还站在老基准上的机器）',
+	'于是 changes 里留着完整的三环',
 	fs.readdirSync(changesDir).sort(),
-	[path.basename(aaC3.file as string), path.basename(aaC5.file as string)].sort(),
+	[aaC3.file as string, aaC4.file as string, aaC5.file as string].map(item => path.basename(item)).sort(),
 );
 
 // 28b. 文件名要**一眼看得懂**：哪种包 + 第几代到第几代 + 目标状态（用户提的："包起名太费解"）
@@ -1451,10 +1465,18 @@ const bothAtOnce = async (): Promise<ExportOutcome> => {
 	await exportBundle({ ...exportOptions(RB, STATE_RB, 'changes'), outDir: OUTR, keepPaths: written });
 	return full;
 };
-await bothAtOnce();
-check('第一遍：老的更新包被完整副本取代', fs.existsSync(rChanges.file as string), false);
-await bothAtOnce();
-check('第二遍也是（行为要一致）', fs.existsSync(rChanges.file as string), false);
+// 内容回到第 1 代之后，第 2 代那一环**比本机现在的内容更新** —— 那是那份内容的唯一副本，
+// 按"不许删比我更新的包"留着，并说清为什么；两遍行为必须一致（不能时好时坏）
+const firstClean = await bothAtOnce();
+check('那份更新包留着（它比本机现在的内容新）', fs.existsSync(rChanges.file as string), true);
+checkTrue(
+	'并说清为什么留着',
+	firstClean.keptChanges.some(item => item.why.includes('不比这次的新')),
+	JSON.stringify(firstClean.keptChanges),
+);
+const secondClean = await bothAtOnce();
+check('第二遍行为一致（不会时好时坏）', fs.existsSync(rChanges.file as string), true);
+check('两遍的结论也一样', secondClean.superseded, firstClean.superseded);
 
 // 37. 清不掉的更新包要**说清为什么**（"没清掉"和"没什么可清"是两回事）
 const KD = path.join(ROOT, 'machineKD');
@@ -1534,11 +1556,18 @@ write(RMA, 'y.md', 'Y1', T0);
 const raFull = await exportBundle({ ...exportOptions(RMA, STATE_RMA), outDir: OUTRA });
 const rmbFullOptions = applyOptions(RMB, STATE_RMB, raFull.file as string);
 await executeBundlePlan(await planBundleApply(rmbFullOptions), rmbFullOptions);
+check(
+	'应用完整副本 → 基准点就是那份包自己的指纹',
+	(await loadState(STATE_RMB)).bundle?.fullHash,
+	baselineOfBundle((await readBundleInfo(raFull.file as string)).header),
+);
 
 // 两边各改各的：A 改 x，B 改 y 并新建 z（这就是"各半"）
 write(RMA, 'x.md', 'X2', T0 + 10_000);
 write(RMB, 'y.md', 'Y2', T0 + 10_000);
-write(RMB, 'z.md', 'Z1', T0 + 10_000);
+// z.md 的时间要跟 A 的 x.md 拉开：两个都是 2 字节，时间再一样的话，"认移动"那四条判据
+// （新路径 + 旧路径在基准里 + 对侧没动过 + 大小与修改时间完全一致）会把它们配成一对改名
+write(RMB, 'z.md', 'Z1', T0 + 20_000);
 const raChanges = await exportBundle({ ...exportOptions(RMA, STATE_RMA, 'changes'), outDir: OUTRA });
 
 // B 应用之前，报告就该告诉它"我这半还有两处对方没有的改动"
@@ -1553,17 +1582,20 @@ check('B 拿到了 A 的 x', read(RMB, 'x.md'), 'X2');
 check('B 自己的 y / z 没被动', [read(RMB, 'y.md'), read(RMB, 'z.md')], ['Y2', 'Z1']);
 
 // B 导"回礼包"（界面上就是勾着「应用后顺便导一个更新包」时自动做的那一步）
+const aPointBefore = (await loadState(STATE_RMA)).bundle?.fullHash;
 const rmbReturn = await exportBundle({ ...exportOptions(RMB, STATE_RMB, 'changes'), outDir: OUTRA });
 checkTrue('回礼包导出来了', rmbReturn.file !== null, rmbReturn.reason ?? '');
 
 // A 应用回礼包：x 与自己那份一样（跳过），拿到 B 的 y 与 z
 const rmaBackOptions = applyOptions(RMA, STATE_RMA, rmbReturn.file as string);
-await executeBundlePlan(await planBundleApply(rmaBackOptions), rmaBackOptions);
+const rmaBackPlan = await planBundleApply(rmaBackOptions);
+check('A 应用它：基准一致（回礼包正是从 A 站的那一点延伸的）', rmaBackPlan.report.baselineMatch, 'match');
+await executeBundlePlan(rmaBackPlan, rmaBackOptions);
 check('A 拿到 B 的 y 与 z', [read(RMA, 'y.md'), read(RMA, 'z.md')], ['Y2', 'Z1']);
 check('A 的 x 没被自己那份覆盖（内容一样，跳过）', read(RMA, 'x.md'), 'X2');
 check('两边收敛', [read(RMA, 'x.md'), read(RMA, 'y.md'), read(RMA, 'z.md')], ['X2', 'Y2', 'Z1']);
 check(
-	'两边站在同一份基准上（指纹一致）',
+	'两边站在同一个基准点上（指纹一致）',
 	(await loadState(STATE_RMA)).bundle?.fullHash,
 	(await loadState(STATE_RMB)).bundle?.fullHash,
 );
@@ -1580,19 +1612,13 @@ checkTrue(
 );
 check('少一个文件也是另一份基准', hashA !== listingHash([{ path: 'a.md', size: 1, mtime: 1000 }]), true);
 
-// 应用完整包之后，我这边记下的基准令牌 ＝ 包自己那份清单的指纹
-const bState = await loadState(STATE_RMB);
-const raFullHeader = (await readBundleInfo(raFull.file as string)).header;
-check('令牌就是那份完整包自己的指纹', bState.bundle?.fullHash, baselineOfBundle(raFullHeader));
-
-// B 导的回礼包说的是同一份基准；A 应用它 → 判成"基准一致"
+// B 导的回礼包：**头部报的是导出前那一刻的点**（A 正站在那儿），
+// 而 B 自己已经走到回礼包送到的那一点（`targetBaselineHash`）
 const returnHeader = (await readBundleInfo(rmbReturn.file as string)).header;
-check('更新包带着"我基于哪份基准"', returnHeader.baselineHash, bState.bundle?.fullHash);
-check(
-	'A 应用它：基准判定为一致（接着同一份完整副本）',
-	(await planBundleApply(applyOptions(RMA, STATE_RMA, rmbReturn.file as string))).report.baselineMatch,
-	'match',
-);
+const bAfterReturn = await loadState(STATE_RMB);
+check('回礼包从"我导出的那一点"往外延伸（A 正站在那儿）', returnHeader.baselineHash, aPointBefore);
+check('导完就站到回礼包送到的那一点（头部记着它）', bAfterReturn.bundle?.fullHash, returnHeader.targetBaselineHash);
+check('这一点是我导的 → 等对方合并了才算确认', bAfterReturn.bundle?.pointConfirmed, false);
 
 // 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上
 // → 更新包**直接拒绝**（没有共同祖先就不合：基准不是同一份时，"基准里有、包里没有"
@@ -1611,8 +1637,8 @@ try {
 }
 checkTrue('基准对不上的更新包被拒绝（不猜着合）', mismatchError.includes('接不上'), mismatchError || '（没拒绝）');
 checkTrue(
-	'拒绝时说清两条出路（按我的指纹重导 / 导一份完整副本）',
-	mismatchError.includes('完整副本') && mismatchError.includes('基准指纹'),
+	'拒绝时说清两条出路（从本机这个基准点重导 / 中间缺的包补上 / 完整副本兜底）',
+	mismatchError.includes('完整副本') && mismatchError.includes('从哪个状态') && mismatchError.includes('中间缺'),
 	mismatchError,
 );
 const rmbAlignOptions = applyOptions(RMB, STATE_RMB, raFull2.file as string);
@@ -1711,7 +1737,12 @@ check(
 	[1, true],
 );
 const position = describeBundlePosition(logState);
-checkTrue('顶部能说清站在哪份基准上', position[0]?.includes('第 1 代') === true, position[0] ?? '');
+checkTrue(
+	'顶部能说清站在哪个基准点上（应用完就站到那份包送到的那一点）',
+	position[0]?.includes('第 2 代') === true,
+	position[0] ?? '',
+);
+checkTrue('也说清那一点确认了没有（应用来的 → 两边都到过）', position[0]?.includes('已确认') === true, position[0] ?? '');
 checkTrue(
 	'也说清了之后收发过多少',
 	position.some(line => line.includes('导出过 1 个') && line.includes('应用过 1 个')),
@@ -1754,11 +1785,12 @@ check('应用完只记一笔"欠回传"的账', peState.pendingReturn?.changes, 
 check('账里写着收到的是哪个包', peState.pendingReturn?.file, path.basename(pdChanges.file as string));
 check('没有立刻生成回礼包（不会套娃）', fs.readdirSync(path.join(OUTP, 'changes')).length, 1);
 
-// 导一次更新包：账结清，而且这一个包里两半都在（E 自己的 + 刚收到的回声）
+// 导一次更新包：账结清。链条模型下这一份只装**我这半**（刚收到的那半已经在基准点里了，
+// 不必再当回声发一遍）；对方应用完就站到同一点上
 const peReturn = await exportBundle({ ...exportOptions(PE, STATE_PE, 'changes'), outDir: OUTP });
 const peReturnInfo = await readBundleInfo(peReturn.file as string);
 check('回传包里带着"我这半"', peReturnInfo.header.entries.some(e => e.path === 'mine.md'), true);
-check('也带着对方那半（累积语义，对方应用时会自动跳过）', peReturnInfo.header.entries.some(e => e.path === 'shared.md'), true);
+check('不再带上刚收到的回声（那半已经进了基准点）', peReturnInfo.header.entries.some(e => e.path === 'shared.md'), false);
 check('导出之后欠账结清', (await loadState(STATE_PE)).pendingReturn, null);
 
 // 45. 状态编号：整个仓库的**内容**指纹 —— "两边到底一不一样"靠它，世代号回答不了（它只说第几版）
@@ -2043,10 +2075,11 @@ check('内容追上了', [read(AB_Y, 'a.md'), read(AB_Y, 'b.md'), read(AB_Y, 'c.
 check('两边状态编号一致（用户要的那句话）', abResY.stateIdCompare, 'match');
 const abStateY = await loadState(AB_STATE_Y);
 check('Y 的世代跟上了（1 → 3）', abStateY.generation, 3);
-check('但它的基准仍是第 1 代那份（它没收到 b）', abStateY.bundle?.fullGeneration, 1);
+check('应用完就站到这份包送到的那一点（第 3 代）', abStateY.bundle?.fullGeneration, 3);
 
 // ④ 差量包：从 a **到 b 那一刻**（b ＝ 第 2 代那份完整副本）
 // X 在 b 之后又改了 a.md —— 差量包里必须装 **b 那一刻**的版本，不是现在的
+const abPointBeforeCheckpoint = (await loadState(AB_STATE_X)).bundle?.fullHash;
 write(AB_X, 'a.md', 'A3 比 b 那一刻更新', AB_T0 + 120_000);
 const abCheckpoint = await exportBundle({
 	...exportOptions(AB_X, AB_STATE_X, 'changes'),
@@ -2079,7 +2112,7 @@ check('装的是 b 那一刻的内容，不是"现在的仓库"', abBytes, 'A2 �
 check('差量包的报告写明"内容到那一代为止"', describeExportRange(abCheckpoint), `（第 1 代 → 第 2 代 · 基准 ${AB_FINGERPRINT_A}）`);
 const abStateX = await loadState(AB_STATE_X);
 check('导差量包不推进本机世代（我还是第 3 代）', abStateX.generation, 3);
-check('也不动本机的基准（仍是第 2 代那份）', abStateX.bundle?.fullGeneration, 2);
+check('也不动本机的基准点', abStateX.bundle?.fullHash, abPointBeforeCheckpoint);
 check('差量包记的状态编号是终点那一刻的', abStateX.bundleLog.at(-1)?.stateId, abCpInfo.header.stateId?.id);
 check('差量包会被标出来（界面上不能当成"我现在的状态"）', abStateX.bundleLog.at(-1)?.checkpoint, true);
 
@@ -2198,13 +2231,16 @@ const hkFull = await exportBundle({ ...exportOptions(HK_A, STATE_HK_A), outDir: 
 // A 改两轮：第一次改动会成为更新包里的"中间版本"，第二次是最新版。
 // 时间各拉开 1 分钟，免得落在 2 秒容差里被当成"没改过"
 write(HK_A, 'h.md', 'H2 中间版', T_HK + 60_000);
-await exportBundle({ ...exportOptions(HK_A, STATE_HK_A, 'changes'), outDir: OUT_HK });
+const hkMid = await exportBundle({ ...exportOptions(HK_A, STATE_HK_A, 'changes'), outDir: OUT_HK });
 write(HK_A, 'h.md', 'H3 最新版', T_HK + 120_000);
 const hkChanges = await exportBundle({ ...exportOptions(HK_A, STATE_HK_A, 'changes'), outDir: OUT_HK });
 
-// B 站到同一份基准上，再把手里的文件换成"我发过的那个中间版本"
+// B 站到同一份基准上，按顺序把中间那一份也应用掉（链条模型：起点得正好是本机这一点），
+// 再把手里的文件换成"我发过的那个中间版本"
 const hkFullOptions = applyOptions(HK_B, STATE_HK_B, hkFull.file as string);
 await executeBundlePlan(await planBundleApply(hkFullOptions), hkFullOptions);
+const hkMidOptions = applyOptions(HK_B, STATE_HK_B, hkMid.file as string);
+await executeBundlePlan(await planBundleApply(hkMidOptions), hkMidOptions);
 const hkEntry = (await readBundleInfo(hkChanges.file as string)).header.entries.find(item => item.path === 'h.md');
 const hkPast = hkEntry?.history?.[0];
 checkTrue('更新包里带着中间版本记录', hkPast !== undefined, JSON.stringify(hkEntry?.history));
@@ -2247,7 +2283,8 @@ for (const round of [2, 3]) {
 }
 const gnState = await loadState(STATE_GN);
 check('改了两轮 → 第 3 代', gnState.generation, 3);
-check('基准还是第 1 代那份', gnState.bundle?.fullGeneration, 1);
+check('基准点跟着导出自动往前走（站到第 3 代那一点）', gnState.bundle?.fullGeneration, 3);
+check('这一点是自己导出来的 → 还没被对方确认', gnState.bundle?.pointConfirmed, false);
 
 // **立新基准**（内容没动）：世代号不推进，基准换成这一份
 const gnFull2 = await exportBundle({ ...exportOptions(GN, STATE_GN), outDir: OUT_GN });
