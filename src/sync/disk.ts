@@ -93,8 +93,19 @@ export async function removeEmptyDir(absPath: string): Promise<boolean> {
  * 传进来的是刚被删掉 / 挪走的路径：顺着它们的父目录往上走，能删就删
  * （`rmdir` 对非空目录会失败，所以只会删真空的，绝不会碰有内容的目录），
  * 到根为止。返回**真的删掉了哪些目录**（相对路径）。
+ *
+ * `keep` 是**不许删的目录**：应用同步包时要传"这份包说它存在的目录"
+ * （`dirsInBundle` = 包里的空文件夹 ＋ 条目的上级目录）。踩过：对面把一个文件夹里的文件
+ * 全删了、那个文件夹它留着（空文件夹也是要同步的内容），接收方这边删完文件顺手把空壳收掉，
+ * 于是**状态编号当场对不上**（编号把目录也算进去）—— 用户看到的是一句
+ * "跟对方导出时的 xxxx 还差一点"，而文件一个都不差。
  */
-export async function pruneEmptyDirsDetailed(root: string, removedPaths: string[]): Promise<string[]> {
+export async function pruneEmptyDirsDetailed(
+	root: string,
+	removedPaths: string[],
+	keep: Iterable<string> = [],
+): Promise<string[]> {
+	const keepSet = new Set(keep);
 	const candidates = new Set<string>();
 	for (const rel of removedPaths) {
 		let dir = dirnameRel(rel);
@@ -108,14 +119,15 @@ export async function pruneEmptyDirsDetailed(root: string, removedPaths: string[
 	const ordered = [...candidates].sort((a, b) => b.split('/').length - a.split('/').length);
 	const removed: string[] = [];
 	for (const dir of ordered) {
+		if (keepSet.has(dir)) continue;
 		if (await removeEmptyDir(toNative(root, dir))) removed.push(dir);
 	}
 	return removed;
 }
 
 /** 同上，只要个数（调用方不关心是哪些） */
-export async function pruneEmptyDirs(root: string, removedPaths: string[]): Promise<number> {
-	return (await pruneEmptyDirsDetailed(root, removedPaths)).length;
+export async function pruneEmptyDirs(root: string, removedPaths: string[], keep: Iterable<string> = []): Promise<number> {
+	return (await pruneEmptyDirsDetailed(root, removedPaths, keep)).length;
 }
 
 /** 取一个文件的大小与修改时间；不存在 / 读不到返回 null */

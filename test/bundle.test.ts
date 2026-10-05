@@ -14,7 +14,7 @@ import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
 import { anchorOptions, listFullAnchors } from '../src/bundle/anchor';
 import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeExportRange, describeLogEntry, describeStateId } from '../src/bundle/log';
 import type { BundleLogEntry } from '../src/sync/state';
-import { exportBundle, planBundleExport, plannedExportModes, rebaseBundle } from '../src/bundle/export';
+import { exportBundle, parkLocalChangesFor, planBundleExport, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, readEntry, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
@@ -2046,6 +2046,11 @@ check('默认起点＝我最新那份完整副本（第 2 代）', abNaive.ancho
 check('预览里也带着那份的基准指纹', abNaive.anchorFingerprint, AB_FINGERPRINT_B);
 
 // ② 指定起点 ＝ a（**按基准指纹认，不按世代号**）：对方收到的就是接着自己那份基准的更新
+//
+// 先改一处：**内容真往前走了一版**，这个包才配叫"第 1 → 3 代"。
+// 不改的话它跟"b 那一刻"一模一样 —— 那按 0.11 的规矩它就是第 2 代那个内容（同一份内容只能有一个号），
+// 而且与 ④ 里那个 a→b 的差量包是**同一环**，会被"不重复生成"挡下来（用户报的正是这类"号乱涨"）。
+write(AB_X, 'c.md', 'C2 又改了一次', AB_T0 + 63_000);
 const abC1 = await exportBundle({
 	...exportOptions(AB_X, AB_STATE_X, 'changes'),
 	outDir: AB_OUT,
@@ -2076,7 +2081,7 @@ check('基准对得上', abPlanY2.report.baselineMatch, 'match');
 check('一代都不落后', abPlanY2.report.generationGap, 0);
 check('零冲突', abPlanY2.report.conflicts, 0);
 const abResY = await executeBundlePlan(abPlanY2, applyOptions(AB_Y, AB_STATE_Y, abC1.file as string));
-check('内容追上了', [read(AB_Y, 'a.md'), read(AB_Y, 'b.md'), read(AB_Y, 'c.md')], ['A2 改长一点', 'B2', 'C1']);
+check('内容追上了', [read(AB_Y, 'a.md'), read(AB_Y, 'b.md'), read(AB_Y, 'c.md')], ['A2 改长一点', 'B2', 'C2 又改了一次']);
 check('两边状态编号一致（用户要的那句话）', abResY.stateIdCompare, 'match');
 const abStateY = await loadState(AB_STATE_Y);
 check('Y 的世代跟上了（1 → 3）', abStateY.generation, 3);
@@ -2400,12 +2405,11 @@ const vgBackState = await loadState(STATE_VG_C);
 check('应用更老的完整副本 → 世代同步回那一代', vgBackState.generation, 1);
 check('基准代也跟着回到第 1 代', vgBackState.bundle?.fullGeneration, 1);
 check('内容确实回到了那一版', read(VG_C, 'v.md'), 'V1');
-
-// 44. 应用别人的包时"我这一半"怎么处置：动手前存成一个包 → 应用 → **接到新点上**
+// 44. 应用别人的包时"我这边的东西"怎么处置：动手前存成一个包 → 应用 → 自己/对方都能用它叠加
 //
 // 用户拍板的语义（原话）："把新的部分变成一个更新包，自己导入就等于在最新基准点基础上
 // 加上原来更新，给别人导入同理。"
-// 所以这一环的起点必须是**应用后落到的那个新点**（不是应用前那一点）——
+// 所以那一环的起点必须是**应用后落到的那个新点**（不是应用前那一点）——
 // 否则对方站在新点上，应用它会判"接不上"。
 const RBX = path.join(ROOT, 'rebase');
 const RBX_M = path.join(RBX, 'mine');
@@ -2446,59 +2450,60 @@ write(RBX_P, 'notes/c.md', 'P-NEW-C');
 const rbxChanges = await exportBundle(rbxExport(RBX_P, STATE_RBX_P));
 const rbxChangesInfo = await readBundleInfo(rbxChanges.file as string);
 
-// ③ 按界面上的顺序动手：**先只读地算一遍** → 把我的改动存成包 → 应用（用算好的那份计划）
+// ③ 按界面上的顺序动手：**先只读地算一遍** → 把我这边的东西存成包 → 应用（用算好的那份计划）
 const rbxPlan = await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxChanges.file as string));
 check('应用前就看得出"我这边还有 2 个改动、1 个删除"', [rbxPlan.report.pendingChanges, rbxPlan.report.pendingDeletes], [2, 1]);
-const rbxParked = await exportBundle(rbxExport(RBX_M, STATE_RBX_M));
-checkTrue('动手前把我的改动存成了一个包', rbxParked.file !== null, rbxParked.reason ?? '没存下来');
+const rbxParked = await parkLocalChangesFor(
+	{ ...rbxExport(RBX_M, STATE_RBX_M), mode: 'changes' },
+	{ header: rbxPlan.info.header, pointBefore: rbxPlan.pointBefore },
+);
+checkTrue('动手前把我这边的东西存成了一个包', rbxParked.file !== null, rbxParked.reason ?? '没存出来');
+const rbxParkedInfo = await readBundleInfo(rbxParked.file as string);
+check(
+	'那一环的起点＝我马上要落到的那一点（对方头部报的那个）',
+	[rbxParkedInfo.header.baselineHash, rbxParkedInfo.header.baseGeneration],
+	[rbxChangesInfo.header.targetBaselineHash, rbxChangesInfo.header.targetGeneration],
+);
+check(
+	'条目＝我改过 / 新建的那两个（对方改的那个不算我的 —— 它在对方包里）',
+	rbxParkedInfo.header.entries.map(entry => entry.path),
+	['mine.md', 'notes/a.md'],
+);
+check('删除清单＝我删掉的那个', rbxParkedInfo.header.deleted.map(item => item.path), ['notes/b.md']);
+const rbxEntryA = rbxParkedInfo.header.entries.find(entry => entry.path === 'notes/a.md');
+const rbxEntryMine = rbxParkedInfo.header.entries.find(entry => entry.path === 'mine.md');
+check(
+	'包里的字节是我那一版',
+	[
+		(await readEntry(rbxParked.file as string, rbxParkedInfo, rbxEntryA!)).toString('utf8'),
+		(await readEntry(rbxParked.file as string, rbxParkedInfo, rbxEntryMine!)).toString('utf8'),
+	],
+	['MINE-A', 'MINE-NEW'],
+);
+check(
+	'存包**不推进我这边**（我还站在原来那一点上，等着应用）',
+	(await loadState(STATE_RBX_M)).bundle?.fullHash,
+	rbxChangesInfo.header.baselineHash,
+);
+
 const rbxApplied = await executeBundlePlan(rbxPlan, rbxApply(RBX_M, STATE_RBX_M, rbxChanges.file as string));
 const rbxAfter = await loadState(STATE_RBX_M);
 check('应用完：包里点名的那份用包里的版本', read(RBX_M, 'notes/c.md'), 'P-NEW-C');
-check('应用完：我自己新建的文件被挪走（严格同步不留"送到状态里没有的"）', read(RBX_M, 'mine.md'), null);
-// 诚实边界：包里没提到、而我又改过的文件，包里**没有它的字节** —— 谁也变不出对方那一版，
-// 所以它们留在原地、状态编号当场差一点（那两处正是 ④ 里接到新点上、要发给对方的东西）
+check('应用完：我自己新建的文件被挪走（严格同步不留"那一点上没有的"）', read(RBX_M, 'mine.md'), null);
+// 包里没提到、而我又改过的文件：包里没有它的字节，谁也变不出对方那一版 —— 它们留在原地，
+// 但**已经在上面的那一环里了**（这就是"本地最新更新保存为一个更新包"那句话）
 check('应用完：包里没提到、我又改过的那个留在原地', read(RBX_M, 'notes/a.md'), 'MINE-A');
-check('应用完：我删掉的那个也没被凭空补回来（包里没有它的字节）', read(RBX_M, 'notes/b.md'), null);
-check('这一趟状态编号对不上：差的正是"包里没提到的这两处"', rbxApplied.stateIdCompare, 'mismatch');
+check('应用完：我删掉的那个也没被凭空补回来', read(RBX_M, 'notes/b.md'), null);
 check(
 	'应用完：我站到包送到的新点上（存过包也不能把点算歪）',
 	rbxAfter.bundle?.fullHash,
 	rbxChangesInfo.header.targetBaselineHash,
 );
 
-// ④ 关键一步：把我的改动**接到新点上**（起点＝我刚站上的那一点）
-const rbxRebased = await rebaseBundle({ ...rbxExport(RBX_M, STATE_RBX_M), source: rbxParked.file as string });
-checkTrue('接出来的包写成功了', rbxRebased.file !== null, rbxRebased.reason ?? '没写出来');
-const rbxRebasedInfo = await readBundleInfo(rbxRebased.file as string);
-check('这一环的起点＝我刚应用到的那个新点', rbxRebasedInfo.header.baselineHash, rbxAfter.bundle?.fullHash);
-check('起点世代＝我现在的世代', rbxRebasedInfo.header.baseGeneration, rbxAfter.generation);
-check('落点世代＝再往前一版（内容＝新点 ＋ 我的改动）', rbxRebasedInfo.header.targetGeneration, (rbxAfter.generation ?? 0) + 1);
-check(
-	'条目＝我改过 / 新建的那两个',
-	rbxRebasedInfo.header.entries.map(entry => entry.path),
-	['mine.md', 'notes/a.md'],
-);
-check('删除清单＝我删掉的那个', rbxRebasedInfo.header.deleted.map(item => item.path), ['notes/b.md']);
-const rbxEntryA = rbxRebasedInfo.header.entries.find(entry => entry.path === 'notes/a.md');
-const rbxEntryMine = rbxRebasedInfo.header.entries.find(entry => entry.path === 'mine.md');
-check(
-	'包里的字节确实是**我那一版**（仓库里现在放的是对方那版）',
-	[
-		(await readEntry(rbxRebased.file as string, rbxRebasedInfo, rbxEntryA!)).toString('utf8'),
-		(await readEntry(rbxRebased.file as string, rbxRebasedInfo, rbxEntryMine!)).toString('utf8'),
-	],
-	['MINE-A', 'MINE-NEW'],
-);
-check(
-	'接这一下**不推进我这边**：世代与基准点都没动',
-	[rbxRebasedInfo.header.baseGeneration, (await loadState(STATE_RBX_M)).bundle?.fullHash],
-	[rbxAfter.generation, rbxAfter.bundle?.fullHash],
-);
-
-// ⑤ "自己导入就等于在最新基准点基础上加上原来更新"
+// ④ "自己导入就等于在最新基准点基础上加上原来更新"
 const rbxSelfResult = await executeBundlePlan(
-	await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxRebased.file as string)),
-	rbxApply(RBX_M, STATE_RBX_M, rbxRebased.file as string),
+	await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxParked.file as string)),
+	rbxApply(RBX_M, STATE_RBX_M, rbxParked.file as string),
 );
 check(
 	'我自己应用它：我的改动加回来了，对方那边的改动也在',
@@ -2508,23 +2513,23 @@ check(
 check('我自己删掉的那个仍然是删掉的', read(RBX_M, 'notes/b.md'), null);
 check('应用完状态编号跟包里记的一致（两边文件内容一致）', rbxSelfResult.stateIdCompare, 'match');
 check(
-	'我站到新的这一点上了',
+	'我站到那一环的落点上了',
 	(await loadState(STATE_RBX_M)).bundle?.fullHash,
-	rbxRebasedInfo.header.targetBaselineHash,
+	rbxParkedInfo.header.targetBaselineHash,
 );
 
-// ⑥ "给别人导入同理"：对方刚导完那个包，正站在新点上
+// ⑤ "给别人导入同理"：对方刚导完那个包，正站在新点上
 check(
 	'对方此刻确实站在新点上（他导完那个包就走到了）',
 	(await loadState(STATE_RBX_P)).bundle?.fullHash,
 	rbxAfter.bundle?.fullHash,
 );
 const rbxPeerResult = await executeBundlePlan(
-	await planBundleApply(rbxApply(RBX_P, STATE_RBX_P, rbxRebased.file as string)),
-	rbxApply(RBX_P, STATE_RBX_P, rbxRebased.file as string),
+	await planBundleApply(rbxApply(RBX_P, STATE_RBX_P, rbxParked.file as string)),
+	rbxApply(RBX_P, STATE_RBX_P, rbxParked.file as string),
 );
 check(
-	'对方应用它：拿到的是"他的新点 ＋ 我的改动"',
+	'对方应用它：拿到的是"他的新点 ＋ 我的东西"',
 	[read(RBX_P, 'mine.md'), read(RBX_P, 'notes/a.md'), read(RBX_P, 'notes/c.md')],
 	['MINE-NEW', 'MINE-A', 'P-NEW-C'],
 );
@@ -2535,6 +2540,102 @@ check(
 	(await loadState(STATE_RBX_P)).bundle?.fullHash,
 	(await loadState(STATE_RBX_M)).bundle?.fullHash,
 );
+
+// 45. 世代号 ＝ 内容的版本号：**内容没动，再导一次也不许 +1**
+//
+// 用户报的现场：他那边把「更新包从哪个状态开始」钉在第 39 代（对面还站在 39），
+// 于是每次自动留包都重导一遍同一份内容 —— 39→48 / 39→49 / 39→50 三份包**状态编号一模一样**、
+// 世代号却一路涨，对面应用完永远对不上（"内容没变代数就不应该变，但实际每次导出包就多一代"）。
+const GEN = path.join(ROOT, 'gen');
+const GEN_VAULT = path.join(GEN, 'vault');
+const GEN_OUT = path.join(GEN, 'transfer');
+const STATE_GEN = path.join(GEN, 'state.json');
+for (const dir of [GEN_VAULT, GEN_OUT]) fs.mkdirSync(dir, { recursive: true });
+const genExport = (mode: 'full' | 'changes', baseFingerprint?: string): ExportOptions =>
+	({
+		settings: settings(), log, vaultRoot: GEN_VAULT, vaultName: '我的笔记',
+		stateFile: STATE_GEN, mode, outDir: GEN_OUT,
+		...(baseFingerprint ? { baseFingerprint } : {}),
+	});
+
+write(GEN_VAULT, 'a.md', 'A1');
+const genFull = await exportBundle(genExport('full'));
+const genAnchor = genFull.header?.baselineHash as string; // 完整副本自己就是那个点
+
+// 改**不一样的长度 + 拉开时间**：同一秒内改同样长度会被 2 秒容差当成"没动过"（老坑）
+write(GEN_VAULT, 'a.md', 'A2 长一点', Date.now() + 20_000);
+const genFirst = await exportBundle(genExport('changes'));
+check('第一次更新包：内容往前走了一版', genFirst.header?.targetGeneration, 2);
+
+// 钉住老起点再导一次（内容一点没变）—— 这就是用户那边的设置
+const genAgain = await exportBundle(genExport('changes', genAnchor));
+check('内容没动：再导一次**不许**多占一代', genAgain.header?.targetGeneration, genFirst.header?.targetGeneration);
+check('状态里的号也没涨', (await loadState(STATE_GEN)).generation, genFirst.header?.targetGeneration);
+
+// 账本自愈：状态里的号被旧版本撑大了（他那边是 52，真号是 51），导出时要照手里的包改回来
+const genBroken = await loadState(STATE_GEN);
+genBroken.generation = 7;
+if (genBroken.bundle) genBroken.bundle.fullGeneration = 7;
+await saveState(STATE_GEN, genBroken);
+const genHealed = await exportBundle(genExport('changes', genAnchor));
+check('状态里的号被撑大过 → 照手里的包改回真号', genHealed.header?.targetGeneration, genFirst.header?.targetGeneration);
+check('状态里也改回来了', (await loadState(STATE_GEN)).generation, genFirst.header?.targetGeneration);
+
+// 真动了内容才 +1
+write(GEN_VAULT, 'a.md', 'A3 再长一点点', Date.now() + 40_000);
+const genMoved = await exportBundle(genExport('changes', genAnchor));
+check('内容真动了 → 正常 +1', genMoved.header?.targetGeneration, (genFirst.header?.targetGeneration ?? 0) + 1);
+
+// 46. 空目录也是内容：严格镜像下，那一点上有的目录一个不少、没有的一个不留
+//
+// 用户的话："空目录也要同步，没有收拾空目录这种说法，空目录也是内容的一部分。"
+// 两个真实现场：
+//   ① 对方把一个文件夹里的文件删了、文件夹留着（它就是这么同步的）→ 我这边删完文件
+//      不能顺手把空壳收掉（收了状态编号当场对不上，用户看到"还差一点"而文件一个不差）；
+//   ② 我自己新建的空文件夹，那一点上没有 → 严格镜像要把它清掉。
+const DIRS = path.join(ROOT, 'dirs');
+const DIRS_A = path.join(DIRS, 'a');
+const DIRS_B = path.join(DIRS, 'b');
+const DIRS_OUT = path.join(DIRS, 'transfer');
+const STATE_DIRS_A = path.join(DIRS, 'state-a.json');
+const STATE_DIRS_B = path.join(DIRS, 'state-b.json');
+for (const dir of [DIRS_A, DIRS_B, DIRS_OUT]) fs.mkdirSync(dir, { recursive: true });
+const dirsExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: DIRS_OUT });
+const dirsApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+
+write(DIRS_A, 'notes/a.md', 'A');
+write(DIRS_A, 'notes/b.md', 'B');
+fs.mkdirSync(abs(DIRS_A, 'notes/keep'), { recursive: true }); // 空目录，也是内容
+const dirsFull = await exportBundle(dirsExport(DIRS_A, STATE_DIRS_A, 'full'));
+const dirsFullInfo = await readBundleInfo(dirsFull.file as string);
+check('完整副本记着那个空目录', dirsFullInfo.header.emptyDirs, ['notes/keep']);
+
+await executeBundlePlan(
+	await planBundleApply(dirsApply(DIRS_B, STATE_DIRS_B, dirsFull.file as string)),
+	dirsApply(DIRS_B, STATE_DIRS_B, dirsFull.file as string),
+);
+check('接收方建出了那个空目录', exists(DIRS_B, 'notes/keep'), true);
+
+// 对方把 notes/b.md 删了（notes/ 里还剩 a.md）；再删掉 a.md 呢？—— 那 notes/ 就是空的了，
+// 而它在对方那边**依然是内容**（空文件夹），所以两边都必须留着它
+fs.rmSync(abs(DIRS_A, 'notes/b.md'));
+fs.rmSync(abs(DIRS_A, 'notes/a.md'));
+const dirsChanges = await exportBundle(dirsExport(DIRS_A, STATE_DIRS_A));
+const dirsChangesInfo = await readBundleInfo(dirsChanges.file as string);
+check('更新包把"对方现在有哪些空文件夹"带上了', (dirsChangesInfo.header.emptyDirs ?? []).includes('notes'), true);
+
+// 我这边：自己新建一个空文件夹（那一点上没有它），另外 notes/a.md 还在
+fs.mkdirSync(abs(DIRS_B, 'mine-only'), { recursive: true });
+const dirsPlan = await planBundleApply(dirsApply(DIRS_B, STATE_DIRS_B, dirsChanges.file as string));
+check('那一点上没有的空目录会被清掉（严格镜像）', dirsPlan.foldersToRemove, ['mine-only']);
+const dirsResult = await executeBundlePlan(dirsPlan, dirsApply(DIRS_B, STATE_DIRS_B, dirsChanges.file as string));
+check('删掉的两个文件走了回收目录', [read(DIRS_B, 'notes/a.md'), read(DIRS_B, 'notes/b.md')], [null, null]);
+check('**那一点上有的空目录一个不少**（notes/keep 与 notes/ 都在）', [exists(DIRS_B, 'notes/keep'), exists(DIRS_B, 'notes')], [true, true]);
+check('那一点上没有的空目录被清掉了', exists(DIRS_B, 'mine-only'), false);
+check('收拾空目录那一步没有多删（notes 是被保住的，不是删了又建）', dirsResult.foldersRemoved, 1);
+check('状态编号跟包里记的一致（目录也算进编号里）', dirsResult.stateIdCompare, 'match');
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
