@@ -244,7 +244,7 @@ function exportOptions(
 		outDir: base,
 		configDir: plugin.configDir(),
 		// 「从哪个状态到哪个状态」：设置里那两个下拉（留空 ＝ 最新）。导出时按它算。
-		// 值是**基准指纹**（不是世代号）：世代号两台机器会碰号，认指纹才认得出"哪一份东西"
+		// 值是**基准指纹**（不是世代号）：世代号只说"内容走到第几版"，认不出"这是哪一份完整副本"
 		baseFingerprint: anchorFingerprintOf(plugin.settings.changesFromState),
 		toFingerprint: anchorFingerprintOf(plugin.settings.changesToState),
 		...(inventory ? { inventory } : {}),

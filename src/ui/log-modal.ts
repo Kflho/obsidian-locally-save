@@ -28,7 +28,7 @@ export class BundleLogModal extends Modal {
 		contentEl.createEl('h2', { text: '同步包更新记录' });
 		contentEl.createEl('p', {
 			text: '每次导出 / 应用记一笔，最近的在上。**两台机器最后一条的「状态」相同 ＝ 内容一致**'
-				+ '（「第 N 代」只是各自的节奏号，会碰号，别拿它比内容）。',
+				+ '（「第 N 代」说的是内容走到第几版；要认「是不是同一份基准」得看指纹）。',
 			cls: 'locally-save-hint',
 		});
 

@@ -50,7 +50,7 @@ export interface ExportOptions {
 	 * **这次更新包从哪个状态开始**：`null` / 不填 ＝ 我状态里那份最新的（原来的行为）；
 	 * 给一个**基准指纹**（16 位十六进制）＝ 接着**那一份**完整副本往后算。
 	 *
-	 * 为什么给指纹而不是世代号：世代号是每台机器各数各的节奏号，两边的"第 32 代"
+	 * 为什么给指纹而不是世代号：世代号说的是"内容走到第几版"，两边的"第 32 代"
 	 * 完全可能是两份不同的完整副本（用户实测踩过：按代选锚，对面报「基准对不上」）。
 	 * 指纹（`bundle/baseline.ts`）才是"这是哪一份东西"的判据 —— 也就是对方
 	 * 「更新记录」顶上那行「基准：第 N 代 · 指纹 xxxx」里那个值。
@@ -141,7 +141,7 @@ export interface ExportAnchor {
 	/**
 	 * 起点那份完整副本的**基准指纹** —— 选起点要认的就是它：
 	 * 对方「更新记录」顶上写着「基准：第 N 代 · 指纹 xxxx」，照那个选。
-	 * （世代号两台机器会碰号，只看代可能选到另一份东西 —— 用户实测踩过。）
+	 * （世代号说不出"我们是从哪一份完整副本分出来的"，只看代可能选到另一份东西 —— 用户实测踩过。）
 	 */
 	hash: string | null;
 	file: string | null;
@@ -199,8 +199,31 @@ export function plannedExportModes(want: { changes: boolean; full: boolean }): B
 }
 
 /**
- * **本机自基准以来改了什么** —— 只统计，不写盘。
+ * **仓库自上次导出以来动过没有**（判据与 `ui/actions.ts` 里"自动留包要不要写包"那条一致：
+ * 大小 + 修改时间，2 秒容差；空文件夹也算）。
  *
+ * 只给完整副本"要不要占新世代"用：没动过就说明这份内容上一代已经装过了，
+ * 固化成基准是"换个基准"，不是"往前走一代"。
+ * `state.bundle` 还没有时（第一次）算作动过 —— 那时确实是从零往前一步。
+ */
+function hasLocalChanges(state: PluginState, inventory: Inventory): boolean {
+	const before = state.bundle?.files;
+	if (!before) return true;
+	if (inventory.files.size !== Object.keys(before).length) return true;
+	for (const [file, record] of inventory.files) {
+		const at = before[file];
+		if (!at || !sameRecord(record, at, DEFAULT_MTIME_TOLERANCE_MS)) return true;
+	}
+	const dirs = new Set(state.bundle?.dirs ?? []);
+	if (inventory.dirs.size !== dirs.size) return true;
+	for (const dir of inventory.dirs) {
+		if (!dirs.has(dir)) return true;
+	}
+	return false;
+}
+
+/**
+ * **本机自基准以来改了什么** —— 只统计，不写盘。 *
  * 给"要不要换基准""立一份新完整包"这类决定用的：用户得先看到"我这边有多少东西
  * 是基准里没有的"，才知道换掉基准会不会把没传出去的改动留在一份老包上。
  * 判据与导出挑成员同一条（大小 + 修改时间，2 秒容差），所以数字跟"下一次导更新包
@@ -510,7 +533,29 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const { state, inventory, previous, anchor, target, baseFrom, history, picked, deleted, existing } = work;
 	/** 终点是一份完整副本（差量包）：内容取自那份包，结束时到达它的世代 */
 	const checkpoint = target !== null;
-	const targetGeneration = checkpoint ? (target?.generation ?? state.generation + 1) : state.generation + 1;
+	/**
+	 * **仓库自上次导出以来动过没有**（判据与"自动留包要不要写包"那条完全一样）。
+	 *
+	 * 它决定了完整副本要不要占一个**新世代号**：内容与上次打包时一模一样 →
+	 * 不推进（世代号记的是"这份内容走到哪儿了"，不是"我点了几次导出"）。
+	 *
+	 * 为什么非这样不可（用户报的"多一代"）：本机第 39 代，收到并应用了别人
+	 * 「39 → 46」的更新包之后，本机内容**就是第 46 代**、`state.generation` 也到了 46。
+	 * 这时立新基准若照旧 `+1`，这份完整副本会自称"第 47 代" —— 可它装的内容一代都没往前走。
+	 * 于是本机导出的更新包变成「46 → 47」（对面看着像凭空多一代），
+	 * 而对面应用后也停在 47 上，两边的"第几代"跟内容再也对不上。
+	 */
+	const moved = hasLocalChanges(state, inventory);
+	/**
+	 * 这一份包结束时到达的世代：
+	 * - 差量包（终点是某份完整副本）＝**那份完整副本记着的那一代**（内容到它为止）；
+	 * - 完整副本＋内容没动过 ＝ **还是当前这一代**（立新基准最典型：把已经掌握的内容固化成基准，
+	 *   一代都不该多占）；
+	 * - 其余（完整副本＋有改动、更新包）＝ **当前代 + 1**（内容确实往前走了一代）。
+	 */
+	const targetGeneration = checkpoint
+		? (target?.generation ?? state.generation + 1)
+		: (mode === 'full' && !moved ? state.generation : state.generation + 1);
 	/** 报告里那段"从第几代 · 状态 · 到第几代"（完整包没有基准） */
 	const anchorReport: ExportAnchor | null = mode === 'changes' && anchor
 		? {
@@ -662,7 +707,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 * **状态编号**：这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
 	 *
 	 * 写进包头部 → 接收方应用完算一个自己的跟它比：相同就是"两边文件内容一致"。
-	 * 世代号做不到这件事（两台各自 +1 会碰号、内容对不上也看不出来），用户提的
+	 * 世代号做不到这件事（它只说内容走到第几版），用户提的
 	 * "需要一个编号让用户能确定当前文件状态"就是这个。
 	 *
 	 * **差量包（到某一份完整副本）例外**：它送到的是 b 那一刻，不是我现在的仓库 ——
@@ -699,7 +744,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 * - **第几代到第几代**：完整包写它立的基准世代；更新包写「起点代到终点代」——
 	 *   终点就是接收方应用完到达的世代（差量包的终点是它送到的那一刻）；
 	 * - **目标状态**：包头部记的那个状态编号（见 `sync/state-id.ts`）＝ **接收方应用完
-	 *   应该落在哪个状态**。世代号会碰号，状态编号才认得出是不是同一份东西；
+	 *   应该落在哪个状态**。世代号说不出"这是哪一份完整副本"，状态编号才认得出是不是同一份东西；
 	 *   对不上时打开列表一看便知（列表里每行也写着同一个编号）。
 	 *
 	 * **时间戳去掉了**（用户提的："状态后面那一长串数字没用"）：文件名里本来就只有"什么时候导的"
@@ -806,7 +851,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩。
 	// 一律清理（以前是个设置项）：更新包是累积的，旧包留着纯占地、还让人以为漏应用了；
 	// 没删掉的那些会在报告里如实说明理由（别的血脉 / 世代不比新包小）
-	const prune = await removeSupersededChanges(options, header, file);
+	const prune = await removeSupersededChanges(options, header, file, state.generation);
 	const superseded = prune.removed;
 
 	options.log.debug(
@@ -871,6 +916,8 @@ async function removeSupersededChanges(
 	options: ExportOptions,
 	header: BundleHeader,
 	keep: string,
+	/** 新包落地之后本机所在的世代（判"这个旧包是不是比我更新"用它，见下面那段） */
+	generation: number,
 ): Promise<SupersededReport> {
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
@@ -902,7 +949,17 @@ async function removeSupersededChanges(
 			});
 			continue;
 		}
-		if (other.targetGeneration >= header.targetGeneration) {
+		/**
+		 * 世代这一道闸：**不许删"比我更新的"包**（那个包可能是更新内容的唯一副本，宁可留着）。
+		 *
+		 * 跟谁比？**新包落地之后本机所在的世代**（`generation`），不是它头部那个 `targetGeneration`：
+		 * 完整副本在"内容没动过"时不推进世代（立新基准就是这种），
+		 * 那时头部记的还是当前这一代，拿它比会把**同一个世代**的旧更新包判成"不比这次小"而永远清不掉 ——
+		 * 用户就会看到"我立了新基准，旧更新包还躺着"（报过）。
+		 * 按"落地后的世代"比，立新基准照样能把同代的旧更新包清干净，
+		 * 同时"世代更大"（状态文件被换过 / 装过更晚的包）的包仍然一个不碰。
+		 */
+		if (other.targetGeneration > generation) {
 			kept.push({ name: item.name, why: '记的世代不比这次的新（导出过更晚的包）' });
 			continue;
 		}

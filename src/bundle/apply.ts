@@ -213,9 +213,10 @@ export interface ApplyReport {
 	/**
 	 * 基准比对的结果（见 `bundle/baseline.ts`）：
 	 * - `match`：跟这个包同一份完整副本 → 接着它往后应用是**确定的**；
-	 * - `mismatch`：两边的完整副本基准不是同一份 → 只能逐文件合并，要彻底对齐得互导一次完整副本；
+	 * - `mismatch`：两边的完整副本基准不是同一份（**更新包这时已经被拒收了**，
+	 *   见 `checkAncestor`；这个值还会出现在报告与日志里对账用）；
 	 * - `unknown`：说不清（包是旧版本导的，或这台机器还没立过基准）。
-	 * 以前只看世代号（两边各自 +1、会碰号），所以"是不是同一份基准"根本没法确定。
+	 * 光看世代号判不了这件事：它只说"内容走到第几版"，说不出"我们是从哪一份完整副本分出来的"。
 	 */
 	baselineMatch: BaselineMatch;
 	/** 我这边的基准指纹（没有就是 null） */
@@ -1085,14 +1086,22 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	const state = await loadState(options.stateFile);
 	state.lineage = plan.info.header.lineage;
 	/**
-	 * 世代**只增不减**：应用一个更老的包时，绝不能把它拨回去。
+	 * **世代 ＝ 内容在这个血脉里的版本号**（不是"我操作过几次"，也不是"我见过哪一段"）。
 	 *
-	 * 它记的是"这份副本见过这条血脉的哪一段"，不是"我此刻的内容像哪一代"。
-	 * 拨回去的后果很实：`removeSupersededChanges` 判"新包取代了旧包"靠的是
-	 * 「世代**严格更小**」—— 世代一倒退，同一个"导出完整包 + 更新包"的动作就会
-	 * **第一遍清不掉老的更新包、第二遍才清掉**（用户报成"偶发 bug"，测试钉住了）。
+	 * 所以：**应用任何包之后，直接采纳包说的那一代**。应用完我的内容就等于那份包，
+	 * 状态相同 → 世代必须相同 —— 两边一台一台对下去，同一个内容永远是同一个号，
+	 * 这样"两边都报第 46 代"才说明它们确实一样。
+	 *
+	 * 以前这里是 `Math.max`（"只增不减"），按的是"这份副本见过这条血脉的哪一段"：
+	 * 于是同一份内容在两台机器上会报出不同的世代号（一台 46、另一台 50），
+	 * 用户看到的就是"状态明明相同、代数却对不上"—— 那个定义已经废掉了，别再请回来。
+	 *
+	 * 往回走是**允许**的，而且是对的：应用一份更老的完整副本之后，我的内容就是那一刻的内容，
+	 * 世代号理当跟着回到那一代，否则它就不再是"内容的版本号"了。
+	 * `removeSupersededChanges` 那边也不受影响：更新包只有在"基准世代 ≤ 本机世代"时才收得下，
+	 * 所以世代**更高**的更新包一定是更晚的内容，那条"比我新的不删"照样守得住。
 	 */
-	state.generation = Math.max(state.generation, plan.info.header.targetGeneration);
+	state.generation = plan.info.header.targetGeneration;
 	state.lastBundleId = plan.info.header.bundleId;
 
 	/**
@@ -1103,7 +1112,8 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * 冷缓存时才真要读一遍仓库 —— 所以循环里按时间让帧。
 	 *
 	 * 算完与**包里那个编号**一比：相同 ＝ 两边文件内容一致。这就是用户要的那句话 ——
-	 * 世代号、基准指纹都回答不了它（前者会碰号，后者只说明"祖先一样"）。
+	 * 世代号只说"这是第几版内容"、基准指纹只说"从哪份完整副本分出来的"，
+	 * 两者都不回答"此刻两边的文件到底一样吗"，只有把内容算一遍才算数。
 	 */
 	const inventory = await scanTree(options.vaultRoot, {
 		exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
