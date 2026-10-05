@@ -97,7 +97,7 @@ export const SYNC_SECTION: FieldSection = {
 					key: 'changesFromState',
 					name: '从哪个状态开始',
 					desc: '更新包接着哪一份完整副本往后算。默认「最新那份完整副本」；'
-						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（世代号两台机器会碰号）',
+						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（世代号说不出是哪一份完整副本）',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},

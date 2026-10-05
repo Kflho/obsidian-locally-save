@@ -74,7 +74,7 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
 /**
  * 同步包界面上那一行「本机现在站在哪儿」——**世代与状态编号必须一起写**。
  *
- * 为什么不能只写世代号：它只是节奏号（每导出一个包 +1，两台机器各自 +1 会碰号），
+ * 为什么不能只写世代号：它只说"内容走到第几版"，
  * 回答不了"两边文件一样吗"；状态编号才回答得了。用户专门提过要两个一起看。
  */
 export function describeLocalState(state: PluginState): string {
@@ -90,7 +90,7 @@ export function describeLocalState(state: PluginState): string {
  * 一次导出结果里那句"从哪一份到哪一份"（通知与弹窗里用）。
  *
  * 差量包要点明**内容到那一刻为止**（它不代表你现在的仓库）；起点一律带上**基准指纹**——
- * 对方「更新记录」顶上写的就是它，对不上就是"基准对不上"（世代号会碰号，光看代认不出来）。
+ * 对方「更新记录」顶上写的就是它，对不上就是"基准对不上"（世代号说不出是哪一份完整副本，光看代认不出来）。
  */
 export function describeExportRange(outcome: ExportOutcome): string {
 	const anchor = outcome.anchor;
@@ -120,7 +120,7 @@ export function describeBundlePosition(state: PluginState): string[] {
 	/**
 	 * 「我现在长什么样」—— 用**状态编号**说，不用世代号。
 	 *
-	 * 世代号只是节奏（每导出一个包 +1，两台各自 +1 会碰号），拿它判断"两边内容一样吗"
+	 * 世代号只说"内容走到第几版"（同一份内容必然同一个号），拿它判断"两边内容一样吗"
 	 * 必然出错。编号是内容指纹：**跟对方日志里那个一样 ＝ 两边文件一致**。
 	 * 它记的是"上次导出 / 应用那一刻"，之后又改过文件就要等下一次导出 / 应用才刷新 ——
 	 * 所以把算它的时间也写出来。

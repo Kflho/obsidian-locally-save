@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
@@ -1415,9 +1416,12 @@ check(
 	[1, 0, 0],
 );
 
-// 36. 世代回退之后再"两个一起导"，老的更新包**每次**都该被清掉
-// （用户报的场景：第一遍没清、第二遍清了 —— 因为应用一个更老的包会把世代设回那个包的世代，
-//   而清理守卫是"世代严格更小"，那一个包第一遍刚好卡在边界上）
+// 36. 世代与内容同步之后，"两个一起导"照样**每次**都能清掉老的更新包
+//
+// 这一组原来验的是"应用更老的包不会把世代拨回去"。现在定义换了（**世代 ＝ 内容在这个血脉里的
+// 版本号**：应用完我的内容就等于那份包，状态相同则世代必须相同），应用更老的完整副本
+// **就该**把世代同步回那一代 —— 这条正是新定义要的效果。
+// 真正要守的是下面那件事：世代跟内容对上之后，清理"被取代的更新包"不能时好时坏。
 const RB = path.join(ROOT, 'machineRB');
 const STATE_RB = path.join(ROOT, 'state-rb.json');
 const OUTR = path.join(ROOT, 'transferR');
@@ -1429,13 +1433,14 @@ write(RB, 'b.md', 'R2', T0 + 10_000);
 const rChanges = await exportBundle({ ...exportOptions(RB, STATE_RB, 'changes'), outDir: OUTR });
 checkTrue('先有一个更新包', rChanges.file !== null, rChanges.reason ?? '');
 
-// 用户做过的事：把那个完整包又应用了一遍（更老的包 —— 世代绝不能被它拨回去）
+// 用户做过的事：把那个完整副本又应用了一遍（更老的包）——
+// 内容回到那一代，世代号也跟着同步回那一代（两边状态相同则世代必须相同）
 const rBackOptions = applyOptions(RB, STATE_RB, rFull.file as string, { strictness: 'listed-wins' });
 await executeBundlePlan(await planBundleApply(rBackOptions), rBackOptions);
 check(
-	'应用更老的包不会把世代拨回去（拨回去会让"清老包"时好时坏）',
+	'应用更老的完整副本：世代同步回那一代（世代 ＝ 内容的版本号）',
 	(await loadState(STATE_RB)).generation,
-	rChanges.header?.targetGeneration,
+	rFull.header?.targetGeneration,
 );
 
 /** 弹窗里"两个都勾"那一路：先完整副本、后更新包，先导出来的填进 keepPaths */
@@ -1563,7 +1568,7 @@ check(
 	(await loadState(STATE_RMB)).bundle?.fullHash,
 );
 
-// 39. 基准指纹：判断"是不是接着同一份完整副本"（世代号不够用 —— 两边各自 +1 会碰号）
+// 39. 基准指纹：判断"是不是接着同一份完整副本"（世代号说不出是哪一份完整副本）
 const hashA = listingHash([{ path: 'a.md', size: 1, mtime: 1000 }, { path: 'b.md', size: 2, mtime: 2000 }]);
 const hashB = listingHash([{ path: 'b.md', size: 2, mtime: 2000 }, { path: 'a.md', size: 1, mtime: 1000 }]);
 check('同样的清单（顺序不同）→ 同一个指纹', hashA, hashB);
@@ -1756,7 +1761,7 @@ check('回传包里带着"我这半"', peReturnInfo.header.entries.some(e => e.p
 check('也带着对方那半（累积语义，对方应用时会自动跳过）', peReturnInfo.header.entries.some(e => e.path === 'shared.md'), true);
 check('导出之后欠账结清', (await loadState(STATE_PE)).pendingReturn, null);
 
-// 45. 状态编号：整个仓库的**内容**指纹 —— "两边到底一不一样"靠它，世代号回答不了（会碰号）
+// 45. 状态编号：整个仓库的**内容**指纹 —— "两边到底一不一样"靠它，世代号回答不了（它只说第几版）
 const QA = path.join(ROOT, 'machineQA');
 const QB = path.join(ROOT, 'machineQB');
 const STATE_QA = path.join(ROOT, 'state-qa.json');
@@ -2215,6 +2220,144 @@ if (hkPast) {
 	check('认得出"这是我发过的中间版本"（靠包自带的 base）', hkPlan.report.historyMatches, 1);
 	check('直接覆盖成包里那一版', hkPlan.report.overwrites, 1);
 }
+
+// 48. **立新基准不许"多占一代"**（用户报的现场）
+//
+// 场景：本机站在第 1 代基准上，收到并应用了别人「1 → 3」的更新包 ——
+// 内容就是第 3 代，`state.generation` 也到了 3。这时立新基准（把已经掌握的内容固化成基准），
+// 它**不该**自称"第 4 代"：内容一代都没往前走。照旧 `+1` 的话，本机导出的更新包会变成
+// 「3 → 4」，对面看着像凭空多一代，应用完也停在 4 上，两边的"第几代"跟内容再也对不上。
+//
+// 判据是"仓库自上次导出以来动过没有"：没动过 → 沿用当前世代（基准换一份，代数不动）；
+// 真有了新改动 → 才 +1（内容确实往前走了一代）。
+const GN = path.join(ROOT, 'machine-gn');
+const STATE_GN = path.join(ROOT, 'state-gn.json');
+const OUT_GN = path.join(ROOT, 'transfer-gn');
+const T_GN = Date.now() - 600_000;
+fs.mkdirSync(GN, { recursive: true });
+fs.mkdirSync(OUT_GN, { recursive: true });
+
+// 第 1 代基准 → 连着改两轮，变成第 3 代（内容 C3）
+write(GN, 'c.md', 'C1', T_GN);
+const gnFull1 = await exportBundle({ ...exportOptions(GN, STATE_GN), outDir: OUT_GN });
+check('起手第 1 代', gnFull1.header?.targetGeneration, 1);
+for (const round of [2, 3]) {
+	write(GN, 'c.md', `C${round}`, T_GN + round * 60_000);
+	await exportBundle({ ...exportOptions(GN, STATE_GN, 'changes'), outDir: OUT_GN });
+}
+const gnState = await loadState(STATE_GN);
+check('改了两轮 → 第 3 代', gnState.generation, 3);
+check('基准还是第 1 代那份', gnState.bundle?.fullGeneration, 1);
+
+// **立新基准**（内容没动）：世代号不推进，基准换成这一份
+const gnFull2 = await exportBundle({ ...exportOptions(GN, STATE_GN), outDir: OUT_GN });
+check('立新基准不许占新世代（内容没动）', gnFull2.header?.targetGeneration, 3);
+const gnAfter = await loadState(STATE_GN);
+check('本机世代也不推进', gnAfter.generation, 3);
+check('基准换到第 3 代', gnAfter.bundle?.fullGeneration, 3);
+check('基准清单换成整库', Object.keys(gnAfter.bundle?.fullFiles ?? {}), ['c.md']);
+// 同代的旧更新包照样被这份完整副本取代（完整清单含它的全部内容）
+checkTrue('同代的旧更新包被清掉', gnFull2.superseded.length >= 1, JSON.stringify(gnFull2.superseded));
+
+// 真有了新改动 → 才 +1
+write(GN, 'c.md', 'C4', T_GN + 4 * 60_000);
+const gnFull3 = await exportBundle({ ...exportOptions(GN, STATE_GN), outDir: OUT_GN });
+check('有真改动时完整副本才往前走一代', gnFull3.header?.targetGeneration, 4);
+
+// 对面照着这份新基准往下走：两边代数与内容都对得上
+const GN_PEER = path.join(ROOT, 'machine-gn-peer');
+const STATE_GN_PEER = path.join(ROOT, 'state-gn-peer.json');
+fs.mkdirSync(GN_PEER, { recursive: true });
+const gnPeerApply = applyOptions(GN_PEER, STATE_GN_PEER, gnFull2.file as string);
+await executeBundlePlan(await planBundleApply(gnPeerApply), gnPeerApply);
+const gnPeerState = await loadState(STATE_GN_PEER);
+check('对面应用完也停在第 3 代（跟内容一致）', gnPeerState.generation, 3);
+check('两边的基准指纹一致', gnPeerState.bundle?.fullHash, gnAfter.bundle?.fullHash ?? null);
+
+// 49. **世代 ＝ 内容在这个血脉里的版本号**（0.10.1 重新定义的那条）
+//
+// 判据要一眼能懂：**同一份内容，在任何机器、走任何路径，报出来的世代号都必须相同**；
+// 世代号更新就是内容更新，世代号相同就是同一版内容。
+// 所以两条推论都要成立：
+//   ① 应用任何包之后**采纳包说的那一代**（应用完我的内容就等于那份包）；
+//   ② 应用一份**更老的**完整副本时，世代**跟着回到那一代** —— 内容退回去了，
+//      世代号就该退回去（旧定义把它当 bug 用 Math.max 硬压住，结果两台内容相同的机器
+//      报出不同的代数，"第几代"当场失去意义）。
+const VG_A = path.join(ROOT, 'machine-vg-a');
+const VG_B = path.join(ROOT, 'machine-vg-b');
+const VG_C = path.join(ROOT, 'machine-vg-c');
+const STATE_VG_A = path.join(ROOT, 'state-vg-a.json');
+const STATE_VG_B = path.join(ROOT, 'state-vg-b.json');
+const STATE_VG_C = path.join(ROOT, 'state-vg-c.json');
+const OUT_VG = path.join(ROOT, 'transfer-vg');
+const T_VG = Date.now() - 900_000;
+for (const dir of [VG_A, VG_B, VG_C, OUT_VG]) fs.mkdirSync(dir, { recursive: true });
+
+// A 机：第 1 代基准 → 改两轮 → 第 3 代，再立一份完整副本（这份就是"第 3 代的内容"）
+write(VG_A, 'v.md', 'V1', T_VG);
+const vgFull1 = await exportBundle({ ...exportOptions(VG_A, STATE_VG_A), outDir: OUT_VG });
+for (const round of [2, 3]) {
+	write(VG_A, 'v.md', `V${round}`, T_VG + round * 60_000);
+	await exportBundle({ ...exportOptions(VG_A, STATE_VG_A, 'changes'), outDir: OUT_VG });
+}
+const vgFull3 = await exportBundle({ ...exportOptions(VG_A, STATE_VG_A), outDir: OUT_VG });
+check('第 3 代那份完整副本自称第 3 代', vgFull3.header?.targetGeneration, 3);
+
+// B 机：**另一条路**走到同一份内容 —— 先站第 1 代基准，再应用「1 → 3」的更新包
+const vgB1 = applyOptions(VG_B, STATE_VG_B, vgFull1.file as string);
+await executeBundlePlan(await planBundleApply(vgB1), vgB1);
+const vgChain = path.join(OUT_VG, 'vg-chain-1-to-3.lsave');
+const vgFull3Info = await readBundleInfo(vgFull3.file as string);
+const vgEntry = vgFull3Info.header.entries.find(item => item.path === 'v.md');
+await writeBundle(vgChain, {
+	format: BUNDLE_FORMAT,
+	version: BUNDLE_VERSION,
+	bundleId: randomUUID(),
+	parentBundleId: null,
+	created: Date.now(),
+	mode: 'changes',
+	vault: '我的笔记',
+	lineage: vgFull1.header?.lineage as string,
+	source: { copyId: 'vg-a', generation: 3 },
+	baseGeneration: 1,
+	targetGeneration: 3,
+	baselineHash: vgFull1.header?.baselineHash as string,
+	deleted: [],
+	emptyDirs: [],
+}, [{
+	path: 'v.md',
+	abs: '',
+	from: { file: vgFull3.file as string, offset: vgFull3Info.payloadOffset + (vgEntry?.offset ?? 0) },
+	size: vgEntry?.size ?? 0,
+	mtime: vgEntry?.mtime ?? 0,
+}]);
+const vgBChain = applyOptions(VG_B, STATE_VG_B, vgChain);
+await executeBundlePlan(await planBundleApply(vgBChain), vgBChain);
+check('B 走"应用更新包"那条路也到第 3 代', (await loadState(STATE_VG_B)).generation, 3);
+
+// C 机：直接应用那份第 3 代完整副本
+const vgC = applyOptions(VG_C, STATE_VG_C, vgFull3.file as string);
+await executeBundlePlan(await planBundleApply(vgC), vgC);
+check('C 走"应用完整副本"那条路也到第 3 代', (await loadState(STATE_VG_C)).generation, 3);
+
+// 三台机器内容一模一样 → 世代号必须一模一样（这就是"世代能表示新旧"的前提）
+check(
+	'同一份内容：三台机器报同一个世代号',
+	[
+		(await loadState(STATE_VG_A)).generation,
+		(await loadState(STATE_VG_B)).generation,
+		(await loadState(STATE_VG_C)).generation,
+	],
+	[3, 3, 3],
+);
+
+// ② 应用一份**更老的**完整副本：内容回到那一代，世代号跟着回去
+const vgBack = applyOptions(VG_C, STATE_VG_C, vgFull1.file as string);
+await executeBundlePlan(await planBundleApply(vgBack), vgBack);
+const vgBackState = await loadState(STATE_VG_C);
+check('应用更老的完整副本 → 世代同步回那一代', vgBackState.generation, 1);
+check('基准代也跟着回到第 1 代', vgBackState.bundle?.fullGeneration, 1);
+check('内容确实回到了那一版', read(VG_C, 'v.md'), 'V1');
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
