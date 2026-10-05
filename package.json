@@ -1,6 +1,6 @@
 {
 	"name": "locally-save",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Obsidian plugin: syncs the vault to a local folder copy and exports changes as a single transferable bundle file.",
 	"main": "main.js",
 	"author": "KahoTAT",
