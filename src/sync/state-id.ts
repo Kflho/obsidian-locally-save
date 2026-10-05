@@ -30,6 +30,14 @@ export async function computeStateId(options: {
 	state: PluginState;
 	files: Iterable<[string, FileRecord]>;
 	dirs: Iterable<string>;
+	/**
+	 * 路径 → 内容指纹，**覆盖"去仓库里读"**。
+	 *
+	 * 给"内容不在仓库里"的清单算编号用：最典型的是 `bundle/export.ts` 的 `rebaseBundle` ——
+	 * 它算的是"我站的这一点 ＋ 另一份包里的改动"落出来的那一点，那些文件的字节在**那份包里**，
+	 * 仓库里现在是别的版本；照仓库读会算出一个错的编号，接收方应用完一比就报"还差一点"。
+	 */
+	hashes?: ReadonlyMap<string, string>;
 }): Promise<StateIdInfo> {
 	const dirs = [...options.dirs];
 	const lines: string[] = [];
@@ -41,7 +49,8 @@ export async function computeStateId(options: {
 		// 冷缓存时这一步要读一遍仓库（几个 GB 的话是好几秒）—— 按时间让帧，界面别僵住。
 		// 它**不报进度**：导出进度只认"打进包里几个文件"，别把内部步骤编进那个数字。
 		lastYieldAt = await yieldIfDue(lastYieldAt);
-		const hash = await fingerprint(options.vaultRoot, options.state, path, record, true);
+		const known = options.hashes?.get(path);
+		const hash = known ?? await fingerprint(options.vaultRoot, options.state, path, record, true);
 		if (hash) {
 			// ⚠ 指纹缓存里存的是**截断**过的 16 位（`rememberHash` 的 HASH_KEEP），而现算出来的是完整
 			// 64 位 —— 不统一长度的话，"缓存命中"和"刚算的"会喂进两种不同的行，同一个仓库算两次

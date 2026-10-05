@@ -33,7 +33,10 @@ app, and applies it on the other machine.
   (your version goes to the trash), deletions listed in the bundle are performed, and local files
   the bundle's target state does not contain are moved to the trash too — after applying, the vault
   equals the bundle's state and both sides report the same content state id. Your own pending
-  changes are packed into a changes bundle first (if that cannot be written, nothing is touched).
+  changes are packed into a changes bundle first (if that cannot be written, nothing is touched),
+  and **re-anchored onto the new baseline point** right after the apply — so you can apply that
+  bundle yourself to get your work back on top of the new point, or hand it to the other machine,
+  which stands on the same point and can apply it directly.
 - Each bundle carries a checksum of its payload, a lineage/generation number, a baseline
   fingerprint ("are we continuing from the same full copy?") and a content **state id**
   ("are the two sides actually identical?"). A bundle that got corrupted in transit is rejected
@@ -178,7 +181,8 @@ Obsidian 的 vault API 出不了库，只能用 Node 的文件系统。
   所以这条是硬的，不是警告
 - **应用方式没得选**：包里点名的文件一律用包里的版本（你改的那份挪进回收目录）、
   点名的删除照删、**本地多出来的也挪进回收目录** —— 应用完这个仓库就是包送到的状态，
-  两边的状态编号当场可比。动手前还会先把你这边的改动存成一个更新包（存不下就不动手）
+  两边的状态编号当场可比。动手前还会先把你这边的改动存成一个包，应用完**接到刚落到的新点上**
+  （存不下就不动手）—— 那一环你自己应用就等于在新基准点上加回你的改动，发给对方也一样
 - **想留一个还原点**：`导出同步包…` 勾上「完整副本」—— 整个仓库写成一份包放进 `full/`，
   你也会站到它上面（仓库文件一个都不动）。平时不用管基准点（它自己前进）；
   落后很多的机器直接应用这份完整副本就能一步跳上来，不必一环一环补
@@ -422,8 +426,20 @@ Obsidian 的 vault API 出不了库，只能用 Node 的文件系统。
 - **更新包也敢镜像，是因为起点被卡死了**：它的起点必须与本机站的基准点**完全相等**
   （`checkAncestor`，见下一节），所以"包送到的状态"是确定的 ＝ 本机站的这一点 ＋ 条目 − 点名删除。
   "本地有、包里没有"在更新包里**什么也不代表**（它只装变过的文件），删除只认包里点名的清单
-- **动手前先把你这一半存成一个更新包**（你有对方没有的改动时才存；存不下就**不动手**），
-  被覆盖 / 挪走的本地版本再一律进回收目录（`仓库/.trash/locally-save/`，捞得回来）
+- **动手前先把你这一半存成一个包，应用完再把它接到新点上**（你有对方没有的改动时才存；
+  存不下就**不动手**），被覆盖 / 挪走的本地版本再一律进回收目录（捞得回来）。
+  应用成功后插件会**自动**把那份包重新接一次，接成「**刚应用到的那个新点 → 新点 ＋ 你的改动**」：
+  - **你自己应用它** ＝ 在新基准点上加回你的改动（基准点跟着走到那一点）；
+  - **发给对方**（他导出那个包之后正站在同一个新点上）应用 ＝ 你的改动叠加到他的新点上。
+
+  ```
+    park 包：  旧点 O ──► O ＋ 我的改动      （接在应用前那一点上，对方用不了它）
+    接好之后： 新点 N ──► N ＋ 我的改动      ← 这一环谁都能用
+  ```
+  原来那份 park 包会被挪进回收站（内容已经在新的一环里）；有文件写失败时**不接**，
+  那份包留着当备份，通知里会说明。
+- **诚实边界**：包里**没提到**、而你又改过的文件，包里没有它的字节 —— 应用那一刻它们留在原地，
+  状态编号会显示"还差一点"（差的就是它们）。它们已经在上面那一环里了，对方应用它之后两边一致
 
 > **0.11 起应用只有这一种语义。**「应用方式」那个下拉框没了：更新包以前那几档
 > （按设置 / 以包为准 / 两边都留 / 以我为准）、对话框里「这次不执行包里的删除」那个勾、

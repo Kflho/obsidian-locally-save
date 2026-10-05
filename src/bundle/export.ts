@@ -72,6 +72,20 @@ export interface ExportOptions {
 	toFingerprint?: string | null;
 	/** 同步包文件夹；实际会写进它的 `full` / `changes` 子目录 */
 	outDir: string;
+	/**
+	 * **把一份包里"我的改动"接到我当前站的这一点上**（只有 `rebaseBundle` 会填，见那个函数）。
+	 *
+	 * 有它时这次导的**不是"我现在的仓库"**，而是"我站的这一点 ＋ 那份包的改动"落出来的那一点：
+	 * - 条目与内容都取自那份包（`sources` 逐文件指出"去哪份包的哪一段取"）；
+	 * - 起点是**我站的这一点**（头部的 `baselineHash`），落点是合成出来的那一点；
+	 * - **本机什么都不推进**（跟差量包一样：内容不是我现在的仓库）。
+	 *
+	 * 界面上唯一用到它的地方：应用别人的包之前先把本机改动存成一个更新包（`parkLocalChanges`），
+	 * 应用完再把它接到**应用后落到的那个新点**上 —— 那一环**我自己应用**＝在新点上加回我的改动，
+	 * **发给对方**（他站在新点上）应用＝同理。用户的原话："把新的部分变成一个更新包，
+	 * 自己导入就等于在最新基准点基础上加上原来更新，给别人导入同理。"
+	 */
+	replayTarget?: BundleAnchor;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
 	/**
@@ -333,6 +347,8 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
  * 找不到同样报错，不能悄悄改成"到最新"：那会把一份**内容完全不同**的包发给对方。
  */
 async function resolveTarget(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
+	// `rebaseBundle` 合成的那个落点：内容来自另一份包，起点是我现在站的这一点
+	if (options.replayTarget) return options.replayTarget;
 	const requested = options.toFingerprint ?? null;
 	if (requested === null) return null;
 	const anchors = await listFullAnchors(options.outDir, state.lineage);
@@ -370,10 +386,14 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	const anchor = mode === 'changes' ? await resolveAnchor(options, state) : null;
 	/** 这次更新包到哪个状态为止（null ＝ 最新，也就是当前仓库） */
 	const target = mode === 'changes' ? await resolveTarget(options, state) : null;
+	/** "把另一份包的改动接到我这一点上"（`rebaseBundle`）：内容不在仓库里，base 只能取起点清单 */
+	const replay = options.replayTarget !== undefined && options.replayTarget !== null;
 	/** 自上次完整包以来各文件经历过的中间版本 */
 	const history = state.bundle?.history ?? {};
-	// 明确指定过起点（＝对着"还站在那份完整副本上"的对方导的）：base 取那份清单里的版本
-	const baseFrom: 'anchor' | 'previous' = options.baseFingerprint !== null && options.baseFingerprint !== undefined
+	// 明确指定过起点（＝对着"还站在那份完整副本上"的对方导的）：base 取那份清单里的版本。
+	// replay 同理：接收方站在**我这一点**上，他手里是这一点记着的那一版
+	const baseFrom: 'anchor' | 'previous' = replay
+		|| (options.baseFingerprint !== null && options.baseFingerprint !== undefined)
 		? 'anchor'
 		: 'previous';
 	const anchorFiles = anchor?.files ?? null;
@@ -431,8 +451,10 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	picked.sort();
 
 	// 「从 a 到 b」的包，内容由**两份完整包**决定，重导只会写出一个一模一样的文件 ——
-	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）
-	const existing = target ? await findExistingCheckpoint(options, state, anchor, target) : null;
+	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）。
+	// `rebaseBundle` 那条路不查：它是流程自己发起的一次性动作，内容也**不是**由两份完整包决定的
+	// （落点里含"我的改动"，只有那份来源包知道），查到别的包反而会认错。
+	const existing = target && !replay ? await findExistingCheckpoint(options, state, anchor, target) : null;
 
 	return { state, inventory, previous, anchor, target, baseFrom, history, picked, deleted, existing };
 }
@@ -944,6 +966,117 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		superseded,
 		keptChanges: prune.kept,
 	};
+}
+
+/** `rebaseBundle` 的参数：比普通导出多一样 —— **要"换起点"的那份包** */
+export interface RebaseOptions extends ExportOptions {
+	/** 那份要换起点的包（通常是应用别人的包之前，`parkLocalChanges` 把本机改动存下来的那份） */
+	source: string;
+}
+
+/**
+ * **把一份包里的改动，接到我当前站的基准点上，导成一环新包**（用户拍板的语义：
+ * "把新的部分变成一个更新包，自己导入就等于在最新基准点基础上加上原来更新，给别人导入同理"）。
+ *
+ * 用在哪：严格同步会**用包里的版本覆盖我改过的文件、把我多出来的文件挪走**，动手前先把
+ * 我这一半存成一个更新包（`parkLocalChanges`）—— 但那份包接的是**应用前**那一点，
+ * 而对方导完包之后已经往前走到新点了，所以他直接应用它会判"接不上"。
+ * 所以应用成功之后，把它**重新接一次**：
+ *
+ * ```
+ *   park 包：  旧点 O ──► O ＋ 我的改动          （应用前存下的那份，只有我自己用得上）
+ *   rebase 后：新点 N ──► N ＋ 我的改动          ← 这一环谁都能用
+ * ```
+ *
+ * - **起点**＝我现在站的这一点（应用成功之后就是那个新点）；
+ * - **条目与内容**都取自那份包（字节不去仓库读：仓库里现在是包送到的状态）；
+ * - **落点**＝起点清单 ＋ 那份包的条目 − 那份包点名的删除，指纹与状态编号当场算出来，
+ *   接收方应用完一比就是"跟对方完全一致"；
+ * - **我这边什么都不推进**（与差量包一样：内容不是我现在的仓库）——
+ *   想把这些改动加回自己这边，**应用这份包**就是（基准点也跟着到那一点）。
+ *
+ * 失败一律抛错：调用方要么把来源包留着当备份，要么明确告诉用户"改动还在那份包里"。
+ */
+export async function rebaseBundle(options: RebaseOptions): Promise<ExportOutcome> {
+	const state = await loadState(options.stateFile);
+	// 起点＝**我现在站的这一点**。不读设置里那两个下拉：这一步是流程自己发起的，
+	// 用户在那儿选的是"手动导出要导哪一段"，跟这里没关系（照它算会把包接到错误的点上）。
+	const anchor = await resolveAnchor({ ...options, baseFingerprint: null }, state);
+	if (!anchor) {
+		throw new Error(
+			'这台机器还没有基准点：这一环是"从某一点往外延伸"的，没有起点就算不出来。'
+			+ '先应用一份完整副本（或自己导一次完整副本），有了基准点再试',
+		);
+	}
+	const info = await readBundleInfo(options.source);
+	if (info.header.mode !== 'changes') {
+		throw new Error('只有更新包能这样"换起点"：完整副本自带完整清单，谁都能随时应用它，不必换');
+	}
+
+	// 落点＝起点那份清单 ＋ 这份包的条目 − 这份包点名的删除
+	const files: Record<string, FileRecord> = { ...anchor.files };
+	const sources = new Map<string, { file: string; offset: number; size: number; mtime: number; hash?: string }>();
+	/** 内容不在仓库里，编号要用**这份包记着的**指纹算（见 `computeStateId` 的 `hashes`） */
+	const hashes = new Map<string, string>();
+	for (const entry of info.header.entries) {
+		files[entry.path] = { size: entry.size, mtime: entry.mtime };
+		sources.set(entry.path, {
+			file: options.source,
+			offset: info.payloadOffset + entry.offset,
+			size: entry.size,
+			mtime: entry.mtime,
+			...(entry.hash ? { hash: entry.hash } : {}),
+		});
+		if (entry.hash) hashes.set(entry.path, entry.hash);
+	}
+	for (const item of info.header.deleted) delete files[item.path];
+
+	/**
+	 * 落点上的目录：**起点这一边的目录**（我站的这一点上有什么，仓库里就有 —— 我这边
+	 * 刚跟包严格同步过）＋ 条目带出来的上级目录 ＋ 那份包记着的空文件夹。
+	 *
+	 * 空文件夹取"落点里有、但底下没有文件"的那些 —— 与接收方应用完自己算出来的
+	 * 目录集一致（空文件夹不写进包就永远传不过去）。
+	 */
+	const exclude = excludePatterns(options.settings.excludePatterns, options.configDir);
+	const inventory = options.inventory
+		?? await scanTree(options.vaultRoot, { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
+	const coveredLand = dirsContainingPaths(Object.keys(files));
+	const landDirs = new Set<string>(inventory.dirs);
+	for (const dir of coveredLand) landDirs.add(dir);
+	for (const dir of info.header.emptyDirs ?? []) landDirs.add(dir);
+	const emptyDirs = [...landDirs].filter(dir => !coveredLand.has(dir)).sort();
+
+	// 落点的状态编号：接收方应用完算一个自己的跟它比 —— 相同就是"两边文件内容一致"
+	const stateId = await computeStateId({
+		vaultRoot: options.vaultRoot,
+		state,
+		files: Object.entries(files),
+		dirs: landDirs,
+		hashes,
+	});
+
+	const target: BundleAnchor = {
+		// 内容＝"新点 ＋ 我的改动"，确实是往前走了一版
+		generation: (anchor.generation ?? state.generation) + 1,
+		hash: listingHashOfFiles(files),
+		files,
+		emptyDirs,
+		name: `应用前存下的那份改动（${path.basename(options.source)}）`,
+		file: '',
+		stateId,
+		mtime: 0,
+		sources,
+	};
+
+	return exportBundle({
+		...options,
+		mode: 'changes',
+		baseFingerprint: null,
+		toFingerprint: null,
+		replayTarget: target,
+		inventory,
+	});
 }
 
 /**
