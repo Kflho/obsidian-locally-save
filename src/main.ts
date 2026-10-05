@@ -91,9 +91,6 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 		if (this.settings.syncOnStartup) {
 			this.app.workspace.onLayoutReady(() => { void syncNow(this, {}, '启动同步'); });
 		}
-		if (this.settings.startupNotice) {
-			new Notice(`${this.settings.greeting}（${this.manifest.name} v${this.manifest.version}）`);
-		}
 		this.log.debug(`已加载 v${this.manifest.version}`);
 	}
 
@@ -192,10 +189,12 @@ export default class LocallySavePlugin extends Plugin implements SyncHost {
 			return;
 		}
 
+		// 保存后同步：0 ＝ 不同步（一个下拉管这件事，不再有单独的开关）
+		const saveDelay = this.settings.syncAfterSaveDelay;
 		if (
 			this.pendingSaveSync
-			&& this.settings.syncAfterSave
-			&& Date.now() - this.saveDirtyAt >= this.settings.syncAfterSaveDelay * 1000
+			&& saveDelay > 0
+			&& Date.now() - this.saveDirtyAt >= saveDelay * 1000
 		) {
 			this.pendingSaveSync = false;
 			void syncNow(this, {}, '保存后同步');

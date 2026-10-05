@@ -15,8 +15,10 @@ if (typeof globalThis.window === 'undefined') {
 	globalThis.window = {
 		setInterval: () => 0,
 		clearInterval: () => {},
-		// 窗口最大化的兜底路径：Electron 的渲染进程支持 moveTo/resizeTo，
-		// 测试里记下来供断言（真实环境里这两个是真的会动窗口的）
+		// 打开同步包对话框时插件会 `window.focus()`（把 Obsidian 叫到前台）。测试里记下次数，
+		// 并**刻意留着 moveTo / resizeTo 的记录位**：插件不该再动窗口大小与位置，
+		// 有测试盯着"这两个一次都没被调用"（见 commands.test.ts）
+		focus: () => { globalThis.window.focused = (globalThis.window.focused ?? 0) + 1; },
 		screen: { availWidth: 1920, availHeight: 1080 },
 		moveTo: (x, y) => { globalThis.window.movedTo = [x, y]; },
 		resizeTo: (width, height) => { globalThis.window.resizedTo = [width, height]; },

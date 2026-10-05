@@ -62,7 +62,7 @@ function createPlugin(data: unknown = null): { plugin: LocallySavePlugin; stub: 
 // -------------------------------------------------------------------- 用例
 // 1. onload 之后注册了哪些东西
 noticeLog.length = 0;
-const { plugin, stub } = createPlugin({ logLevel: 'silent', greeting: '你好' });
+const { plugin, stub } = createPlugin({ logLevel: 'silent' });
 await plugin.onload();
 
 check("命令 ID 是稳定接口", stub.commands.map(c => c.id), [
@@ -90,8 +90,8 @@ checkTrue(
 check("状态栏占一格", stub.statusBarItems.length, 1);
 check("状态栏初始文案", stub.statusBarItems[0]?.text, '尚未同步');
 check("设置面板已挂上", stub.settingTabs.length, 1);
-check("加载时按设置弹提示", noticeLog.length, 1);
-checkTrue("提示文案来自设置", noticeLog[0]?.includes('你好') === true, `实际：${noticeLog[0]}`);
+// 启动**不弹通知**：以前那一条"插件已加载（v0.6.0）"没有任何信息量，设置项连它一起删了
+check("加载时不弹通知", noticeLog.length, 0);
 
 // 2. 路径解析：状态文件放在插件目录里，跟 data.json 做邻居
 check("仓库根路径来自适配器", plugin.vaultRoot(), '/vault');
@@ -128,42 +128,18 @@ for (const item of stub.protocolHandlers) {
 	}
 }
 
-// 2d. 打开包时把 **Obsidian 窗口本身**顶到最大 + 叫到前台
-// （不是把对话框撑满窗口 —— 用户要的是窗口最大化）
+// 2d. 打开包时把 Obsidian 窗口**叫到前台**（窗口缩在别的窗口后面时，用户会以为"点了没反应"）。
+// 刻意**不再动窗口大小 / 位置**：那个"打开包时最大化窗口"的开关已经删掉 ——
+// 进度有状态栏，插件不该替用户决定窗口多大。这两条断言就是盯着"别再动它"。
 const stubWindow = window as unknown as {
-	require?: unknown;
+	focused?: number;
 	resizedTo?: [number, number];
 	movedTo?: [number, number];
 };
-check('默认会把窗口拉满（走 @electron/remote 不可用时的兜底路径）', stubWindow.resizedTo, [1920, 1080]);
-check('顺便挪到左上角', stubWindow.movedTo, [0, 0]);
-
-// 有 @electron/remote 时优先用它（更规矩：走 BrowserWindow.maximize）
-const fakeWindowState = { maximized: false, calls: 0 };
-stubWindow.require = (name: string) => {
-	check('只问 @electron/remote', name, '@electron/remote');
-	return {
-		getCurrentWindow: () => ({
-			isMaximized: () => fakeWindowState.maximized,
-			isFullScreen: () => false,
-			isMinimized: () => false,
-			maximize: () => { fakeWindowState.calls++; fakeWindowState.maximized = true; },
-		}),
-	};
-};
+check('没去动窗口大小与位置', [stubWindow.resizedTo, stubWindow.movedTo], [undefined, undefined]);
+const focusBefore = stubWindow.focused ?? 0;
 new ApplyBundleModal(new App(), plugin).open();
-check('走 BrowserWindow.maximize()', fakeWindowState.calls, 1);
-new ApplyBundleModal(new App(), plugin).open();
-check('已经最大化了就不再点一次（免得窗口来回跳）', fakeWindowState.calls, 1);
-
-// 关掉开关：不碰窗口，但仍然只把 Obsidian 叫到前台
-fakeWindowState.calls = 0;
-plugin.settings.bundleWindowMaximize = false;
-stubWindow.resizedTo = undefined;
-new ApplyBundleModal(new App(), plugin).open();
-check('关掉之后不动窗口', [fakeWindowState.calls, stubWindow.resizedTo], [0, undefined]);
-plugin.settings.bundleWindowMaximize = true;
-delete stubWindow.require;
+checkTrue('打开包时把窗口叫到前台', (stubWindow.focused ?? 0) > focusBefore, `focus 调用次数没变：${focusBefore}`);
 
 // 2e. 进度更新要节流：每个文件写一次 DOM，一万个文件就够把界面拖顿
 const barEl = stub.statusBarItems[0] as { text: string };
@@ -218,11 +194,11 @@ noticeLog.length = 0;
 check("停用时 isActive 为假", plugin.isActive(), false);
 checkTrue("并且说明原因", noticeLog.some(m => m.includes('已停用')), `实际：${noticeLog.join(' / ')}`);
 
-// 7. 关掉启动提示就不弹通知
+// 7. 启用 / 停用的入口：停用时命令不让跑，并说明原因
 noticeLog.length = 0;
-const { plugin: quiet } = createPlugin({ logLevel: 'silent', startupNotice: false });
+const { plugin: quiet } = createPlugin({ logLevel: 'silent' });
 await quiet.onload();
-check("关掉启动提示后不弹通知", noticeLog.length, 0);
+check("正常加载不弹提示", noticeLog.length, 0);
 
 // 8. data.json 是脏数据也照样能起来（走 settingsFrom 收敛）
 const { plugin: dirty } = createPlugin({ enabled: 'yes', logLevel: 42, syncDirection: 'sideways' });
@@ -249,7 +225,7 @@ const ribbonTargets = [
 	['showStatusBar', 'status', 0],
 ] as const;
 for (const [key, target, index] of ribbonTargets) {
-	const { plugin: p, stub: s } = createPlugin({ logLevel: 'silent', startupNotice: false, [key]: false });
+	const { plugin: p, stub: s } = createPlugin({ logLevel: 'silent', [key]: false });
 	await p.onload();
 	const el = target === 'ribbon' ? s.ribbonItems[index]?.el : s.statusBarItems[index];
 	checkTrue(`关掉 ${key} 后对应入口被隐藏`, el?.classes.has('locally-save-hidden') === true, '没有加上隐藏类');

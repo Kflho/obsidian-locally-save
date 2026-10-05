@@ -1,5 +1,5 @@
 import { formatTime } from '../utils/format';
-import type { BundleLogEntry, PluginState } from '../sync/state';
+import type { BundleLogEntry, PluginState, StateIdInfo } from '../sync/state';
 
 /**
  * 同步包更新记录：**像 git log 那样，把"收发过哪些包"摊开**。
@@ -21,7 +21,7 @@ export function appendBundleLog(state: PluginState, entry: BundleLogEntry): void
 	state.bundleLog = log.slice(-BUNDLE_LOG_LIMIT);
 }
 
-/** 界面上一行要写的东西：方向、类型、包里几个文件、世代、包名 */
+/** 界面上一行要写的东西：方向、类型、包里几个文件、世代、状态编号、包名 */
 export function describeLogEntry(entry: BundleLogEntry): string {
 	const parts: string[] = [];
 	parts.push(entry.direction === 'export' ? '→ 导出' : '← 应用');
@@ -32,9 +32,22 @@ export function describeLogEntry(entry: BundleLogEntry): string {
 			? `第 ${entry.target} 代 · 立基准`
 			: `第 ${entry.base ?? '?'} → ${entry.target} 代`,
 	);
+	// 状态编号：两台机器日志里最后一条一比，就知道两边到底同不同步（世代号做不到这件事）
+	if (entry.stateId) parts.push(`状态 ${entry.stateId}`);
 	if (entry.vault) parts.push(`来自「${entry.vault}」`);
 	if (entry.file) parts.push(entry.file);
 	return parts.join(' · ');
+}
+
+/**
+ * 状态编号怎么念：`3f9a2c1d（10378 个文件 · 4321 个文件夹）`。
+ * 没能核验内容的文件必须写出来 —— 那种情况下编号不是完全的内容指纹。
+ */
+export function describeStateId(info: StateIdInfo | null | undefined): string {
+	if (!info) return '没有（对方那个包是旧版本导的）';
+	const scope = [`${info.files} 个文件`, ...(info.dirs > 0 ? [`${info.dirs} 个文件夹`] : [])].join(' · ');
+	return `${info.id}（${scope}`
+		+ `${info.unverified > 0 ? ` · 其中 ${info.unverified} 个没能校验内容` : ''}）`;
 }
 
 /**
@@ -52,6 +65,19 @@ export function describeBundlePosition(state: PluginState): string[] {
 	const name = bundle.fullFile ?? '（不知道是哪份包，旧版本留下的记录）';
 	lines.push(
 		`基准：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}`,
+	);
+	/**
+	 * 「我现在长什么样」—— 用**状态编号**说，不用世代号。
+	 *
+	 * 世代号只是节奏（每导出一个包 +1，两台各自 +1 会碰号），拿它判断"两边内容一样吗"
+	 * 必然出错。编号是内容指纹：**跟对方日志里那个一样 ＝ 两边文件一致**。
+	 * 它记的是"上次导出 / 应用那一刻"，之后又改过文件就要等下一次导出 / 应用才刷新 ——
+	 * 所以把算它的时间也写出来。
+	 */
+	lines.push(
+		state.stateId
+			? `我现在：状态 ${describeStateId(state.stateId)} · ${formatTime(state.stateId.at)} 算的`
+			: '我这边的状态编号还没有（旧状态文件）：下次导出 / 应用同步包时会算一个。',
 	);
 	const log = Array.isArray(state.bundleLog) ? state.bundleLog : [];
 	const applied = log.filter(item => item.direction === 'apply' && item.mode === 'changes').length;

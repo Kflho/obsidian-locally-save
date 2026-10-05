@@ -10,7 +10,7 @@ import path from 'node:path';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
-import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeLogEntry } from '../src/bundle/log';
+import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeLogEntry, describeStateId } from '../src/bundle/log';
 import type { BundleLogEntry } from '../src/sync/state';
 import { exportBundle, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
@@ -31,6 +31,7 @@ import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
 import { scanTree } from '../src/sync/disk';
 import { loadState, saveState } from '../src/sync/state';
+import { compareStateId, computeStateId } from '../src/sync/state-id';
 import { createLogger } from '../src/utils/log';
 
 // -------------------------------------------------------------------- 断言
@@ -924,15 +925,11 @@ write(AA, 'e.md', 'E1');
 const aaC4 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
 check('新基准下的更新包只剩它一个', fs.readdirSync(changesDir), [path.basename(aaC4.file as string)]);
 
-// 关掉开关就一个都不清
+// 清理是**一律**做的（以前是个开关，现在删了）：再导一个更新包，上一个照样被取代
 write(AA, 'f.md', 'F1');
-const aaC5 = await exportBundle({
-	...exportOptions(AA, STATE_AA, 'changes'),
-	outDir: OUT2,
-	settings: settings({ pruneSupersededBundles: false }),
-});
-check('关掉开关 → 不清理', aaC5.superseded, []);
-check('于是 changes 里有两个', fs.readdirSync(changesDir).length, 2);
+const aaC5 = await exportBundle({ ...exportOptions(AA, STATE_AA, 'changes'), outDir: OUT2 });
+check('导新的更新包 → 上一个被取代清掉', aaC5.superseded, [path.basename(aaC4.file as string)]);
+check('于是 changes 里始终只有一个更新包', fs.readdirSync(changesDir), [path.basename(aaC5.file as string)]);
 
 // 28. 一次导两种的顺序：**先完整副本、后更新包**
 // 老顺序（先更新、后完整）会演出一幕很怪的戏：先把老更新包当"被取代的"清掉、
@@ -1493,8 +1490,8 @@ const position = describeBundlePosition(logState);
 checkTrue('顶部能说清站在哪份基准上', position[0]?.includes('第 1 代') === true, position[0] ?? '');
 checkTrue(
 	'也说清了之后收发过多少',
-	position[1]?.includes('导出过 1 个') === true && position[1]?.includes('应用过 1 个') === true,
-	position[1] ?? '',
+	position.some(line => line.includes('导出过 1 个') && line.includes('应用过 1 个')),
+	position.join(' | '),
 );
 
 // 记录是有上限的：不能把状态文件撑大
@@ -1539,6 +1536,150 @@ const peReturnInfo = await readBundleInfo(peReturn.file as string);
 check('回传包里带着"我这半"', peReturnInfo.header.entries.some(e => e.path === 'mine.md'), true);
 check('也带着对方那半（累积语义，对方应用时会自动跳过）', peReturnInfo.header.entries.some(e => e.path === 'shared.md'), true);
 check('导出之后欠账结清', (await loadState(STATE_PE)).pendingReturn, null);
+
+// 45. 状态编号：整个仓库的**内容**指纹 —— "两边到底一不一样"靠它，世代号回答不了（会碰号）
+const QA = path.join(ROOT, 'machineQA');
+const QB = path.join(ROOT, 'machineQB');
+const STATE_QA = path.join(ROOT, 'state-qa.json');
+const STATE_QB = path.join(ROOT, 'state-qb.json');
+const OUTQ = path.join(ROOT, 'transferQ');
+fs.mkdirSync(QA, { recursive: true });
+fs.mkdirSync(QB, { recursive: true });
+fs.mkdirSync(OUTQ, { recursive: true });
+write(QA, 'a.md', 'Q1', T0);
+write(QA, 'notes/b.md', 'Q2', T0);
+fs.mkdirSync(abs(QA, '空文件夹'), { recursive: true });
+
+const scanQ = async (root: string) => scanTree(root, { exclude: [], skipTopLevelDirs: [] });
+const stateQA = await loadState(STATE_QA);
+const qaScan = await scanQ(QA);
+const idOf = async (
+	root: string,
+	state: typeof stateQA,
+	files: Map<string, { size: number; mtime: number }>,
+	dirs: Set<string>,
+) => computeStateId({ vaultRoot: root, state, files, dirs });
+
+const qaId = await idOf(QA, stateQA, qaScan.files, qaScan.dirs);
+check('参与编号的文件 / 目录数如实统计（空文件夹也算一个）', [qaId.files, qaId.dirs], [2, 2]);
+check('没有文件缺内容指纹', qaId.unverified, 0);
+check('同样的仓库算两次 → 同一个编号（第二次全是缓存命中，长度必须统一）', (await idOf(QA, stateQA, qaScan.files, qaScan.dirs)).id, qaId.id);
+check(
+	'清单顺序不影响编号',
+	(await idOf(QA, stateQA, new Map([...qaScan.files].reverse()), new Set([...qaScan.dirs].reverse()))).id,
+	qaId.id,
+);
+
+// 只动修改时间、内容没变：编号**不该**变（跨机器搬过之后时间会不一样，那正是"一致"）
+fs.utimesSync(abs(QA, 'a.md'), new Date(T0 + 30_000), new Date(T0 + 30_000));
+const touchedScan = await scanQ(QA);
+check('只改了时间、内容没变 → 编号不变', (await idOf(QA, stateQA, touchedScan.files, touchedScan.dirs)).id, qaId.id);
+
+// 内容变了、或者多一个空文件夹：编号必须变
+write(QA, 'a.md', 'Q1-changed', T0 + 40_000);
+const changedScan = await scanQ(QA);
+const changedQaId = await idOf(QA, stateQA, changedScan.files, changedScan.dirs);
+checkTrue('内容变了 → 编号跟着变', changedQaId.id !== qaId.id, '内容变了编号却没变');
+fs.mkdirSync(abs(QA, '另一个空文件夹'), { recursive: true });
+const dirScan = await scanQ(QA);
+const dirQaId = await idOf(QA, stateQA, dirScan.files, dirScan.dirs);
+checkTrue(
+	'只多一个空文件夹 → 编号也变（只比文件的话两个仓库会长得一样）',
+	dirQaId.id !== changedQaId.id,
+	'多了个空文件夹编号却没变',
+);
+
+// 拿不到编号的两种情况：比不了就是比不了，不硬下结论
+check('有一边没有编号 → 说不清', compareStateId(null, dirQaId), 'unknown');
+
+// 读不到的文件（被外部删了 / 读失败）：如实计数，不假装一致，也不炸
+const ghost = new Map(dirScan.files);
+ghost.set('ghost.md', { size: 3, mtime: T0 });
+const ghostId = await idOf(QA, stateQA, ghost, dirScan.dirs);
+check('读不到内容的文件如实计数', ghostId.unverified, 1);
+check('编号照样算得出来（那一行按大小 + 时间顶上）', ghostId.files, 3);
+
+// 导出：编号写进包头部、落进状态文件、也进更新记录
+const qaFull = await exportBundle({ ...exportOptions(QA, STATE_QA), outDir: OUTQ });
+const qaFullHeader = (await readBundleInfo(qaFull.file as string)).header;
+check('完整包头部带着状态编号', typeof qaFullHeader.stateId?.id === 'string', true);
+check('头部里的编号就是导出那一刻的仓库内容编号', qaFullHeader.stateId?.id, dirQaId.id);
+check('状态文件里也记着"我现在长什么样"', (await loadState(STATE_QA)).stateId?.id, qaFullHeader.stateId?.id);
+check('更新记录那条也带着编号', (await loadState(STATE_QA)).bundleLog.at(-1)?.stateId, qaFullHeader.stateId?.id);
+const qaPosition = describeBundlePosition(await loadState(STATE_QA));
+checkTrue('记录顶部写着"我现在"的编号', qaPosition.some(line => line.includes(`状态 ${qaFullHeader.stateId?.id}`)), qaPosition.join(' | '));
+checkTrue(
+	'编号那行也写明了规模',
+	qaPosition.some(line => line.includes('3 个文件')),
+	qaPosition.join(' | '),
+);
+
+// 应用：B 应用完整副本之后，两边的编号必须**一模一样** —— 这就是"两边内容一致"
+const qbApplyFull = applyOptions(QB, STATE_QB, qaFull.file as string);
+const qbFullResult = await executeBundlePlan(await planBundleApply(qbApplyFull), qbApplyFull);
+check('应用完整副本之后：跟对方完全一致', qbFullResult.stateIdCompare, 'match');
+check('编号就是对方包里那个', qbFullResult.stateId.id, qaFullHeader.stateId?.id);
+check('我这边的状态文件也记上了', (await loadState(STATE_QB)).stateId?.id, qaFullHeader.stateId?.id);
+check('更新记录也记上了', (await loadState(STATE_QB)).bundleLog.at(-1)?.stateId, qaFullHeader.stateId?.id);
+
+// B 自己改一笔（对方不知道）→ 收下 A 的下一个更新包：编号**对不上**，差的就是那笔欠账
+write(QB, 'mine.md', 'QB-own', T0 + 50_000);
+write(QA, 'a.md', 'Q1-again', T0 + 60_000);
+const qaChanges = await exportBundle({ ...exportOptions(QA, STATE_QA, 'changes'), outDir: OUTQ });
+const qbApplyChanges = applyOptions(QB, STATE_QB, qaChanges.file as string);
+const qbChangesPlan = await planBundleApply(qbApplyChanges);
+check('应用前报告里就写着对方那个编号', typeof qbChangesPlan.report.peerStateId?.id, 'string');
+const qbChangesResult = await executeBundlePlan(qbChangesPlan, qbApplyChanges);
+check('B 自己还有改动 → 编号对不上', qbChangesResult.stateIdCompare, 'mismatch');
+check('对不上的差别就是那笔"欠回传"', (await loadState(STATE_QB)).pendingReturn?.changes, 1);
+check(
+	'更新记录里两条编号不同（一眼看出还没同步完）',
+	(await loadState(STATE_QB)).bundleLog.at(-1)?.stateId === qbChangesResult.stateId.id,
+	true,
+);
+
+// B 把那半导出来发回去、A 应用 → **两边的编号终于对上了**（收敛的判据）
+const qbReturn = await exportBundle({ ...exportOptions(QB, STATE_QB, 'changes'), outDir: OUTQ });
+const qaApplyReturn = applyOptions(QA, STATE_QA, qbReturn.file as string);
+const qaReturnPlan = await planBundleApply(qaApplyReturn);
+const qaReturnResult = await executeBundlePlan(qaReturnPlan, qaApplyReturn);
+check('A 应用回传包之后：两边完全一致', qaReturnResult.stateIdCompare, 'match');
+check('这个编号就是 B 导出时那个', qaReturnResult.stateId.id, (await readBundleInfo(qbReturn.file as string)).header.stateId?.id);
+checkTrue(
+	'两台的日志最后一条编号相同 ⇒ 内容一致',
+	(await loadState(STATE_QA)).bundleLog.at(-1)?.stateId === (await loadState(STATE_QB)).bundleLog.at(-1)?.stateId,
+	'A 与 B 的日志编号对不上',
+);
+check('记录行里能直接看到编号', describeLogEntry((await loadState(STATE_QA)).bundleLog.at(-1) as BundleLogEntry).includes('状态 '), true);
+
+// 旧版本的包（头部没记编号）→ 如实说"比不了"，不硬下结论
+const QD = path.join(ROOT, 'machineQD');
+const STATE_QD = path.join(ROOT, 'state-qd.json');
+fs.mkdirSync(QD, { recursive: true });
+const oldSource = abs(QA, 'a.md');
+const oldStat = fs.statSync(oldSource);
+const oldBundle = path.join(OUTQ, '旧的-full-20260101-000000-cccccc.lsave');
+await writeBundle(oldBundle, {
+	format: BUNDLE_FORMAT,
+	version: BUNDLE_VERSION,
+	bundleId: '00000000-0000-4000-8000-0000000000cc',
+	parentBundleId: null,
+	created: Date.now(),
+	mode: 'full',
+	vault: '我的笔记',
+	lineage: 'old-lineage',
+	source: { copyId: 'old-copy', generation: 0 },
+	baseGeneration: null,
+	targetGeneration: 1,
+	deleted: [],
+	emptyDirs: [],
+}, [{ path: 'a.md', abs: oldSource, size: oldStat.size, mtime: oldStat.mtimeMs }]);
+const qdApply = applyOptions(QD, STATE_QD, oldBundle);
+const qdResult = await executeBundlePlan(await planBundleApply(qdApply), qdApply);
+check('旧包没记编号 → 判成"比不了"', qdResult.stateIdCompare, 'unknown');
+checkTrue('但自己这边的编号照样算出来、记下来', (qdResult.stateId.id ?? '').length === 16, qdResult.stateId.id);
+checkTrue('描述函数会说清规模', describeStateId(qdResult.stateId).includes('内容') === false
+	&& describeStateId(qdResult.stateId).includes('1 个文件'), describeStateId(qdResult.stateId));
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

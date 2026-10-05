@@ -30,9 +30,8 @@ export async function syncNow(plugin: LocallySavePlugin, options: SyncRunOptions
 		new Notice(`${label}完成：${describeRecord(record)}`, 6000);
 
 		const bundleNote = await autoExportBundles(plugin, outcome);
-		if (plugin.settings.showLastSyncInStatusBar) {
-			plugin.statusBar.setSummary(`${statusBarText(record)}${bundleNote}`);
-		}
+		// 状态栏总开关在 StatusBar 那边管（关掉时它自己什么都不画），这里只管把结果告诉它
+		plugin.statusBar.setSummary(`${statusBarText(record)}${bundleNote}`);
 		plugin.log.debug(`${label}：${describeRecord(record)}`);
 	} catch (error) {
 		new Notice(`${label}失败：${describe(error)}`, 9000);

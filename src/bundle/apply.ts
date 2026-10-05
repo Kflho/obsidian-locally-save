@@ -9,6 +9,9 @@ import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord }
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
+import type { StateIdInfo, StateIdRecord } from '../sync/state';
+import { compareStateId, computeStateId } from '../sync/state-id';
+import type { StateIdCompare } from '../sync/state-id';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
 import { byDepthDesc, dirnameRel, toNative } from '../utils/paths';
@@ -230,6 +233,11 @@ export interface ApplyReport {
 	/** 这个包说的基准指纹（旧包没有就是 null） */
 	bundleBaseline: string | null;
 	/**
+	 * **导出方导完那一刻的状态编号**（包里记的，见 `sync/state-id.ts`）。
+	 * 应用完接收方算一个自己的跟它比 —— 相同就是"两边文件内容一致"。旧包没有 → null。
+	 */
+	peerStateId: StateIdInfo | null;
+	/**
 	 * 请求的强硬程度被降级了（更新包 + 以包为准/完全镜像 → 按设置）。
 	 * 界面上要说明白：不然用户以为自己选了"完全一致"，实际没生效。
 	 */
@@ -317,6 +325,17 @@ export interface ApplyResult {
 	failed: { path: string; error: string }[];
 	conflictCopies: string[];
 	durationMs: number;
+	/**
+	 * **应用完这一刻我这边**的状态编号（见 `sync/state-id.ts`）——落盘进状态文件，
+	 * 更新记录里也记一条。它跟 `plan.report.peerStateId` 一比就见分晓。
+	 */
+	stateId: StateIdRecord;
+	/**
+	 * 跟包里那个编号比出来的结论：`match` ＝ **两边文件内容一致**；
+	 * `mismatch` ＝ 还有差别（多半是我这边有对方没有的改动，就是那笔"欠回传"）；
+	 * `unknown` ＝ 对方那个包没记编号（旧版本导的）。
+	 */
+	stateIdCompare: StateIdCompare;
 }
 
 /** 本地这份是不是"对方发过的中间版本"（跳过了一两个包，手里停在这一版） */
@@ -694,6 +713,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		baselineMatch: compareBaseline(state.bundle?.fullHash ?? null, header),
 		myBaseline: state.bundle?.fullHash ?? null,
 		bundleBaseline: baselineOfBundle(header),
+		peerStateId: header.stateId ?? null,
 		forced: strictness !== 'normal',
 		adds,
 		overwrites,
@@ -779,6 +799,9 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		failed: [],
 		conflictCopies: [],
 		durationMs: 0,
+		// 真正算完再填（在文件、目录都动完之后）—— 这里先占位，类型上要求有
+		stateId: { id: '', files: 0, dirs: 0, unverified: 0, at: started },
+		stateIdCompare: 'unknown',
 	};
 
 	const total = plan.actions.length;
@@ -912,6 +935,30 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	state.generation = Math.max(state.generation, plan.info.header.targetGeneration);
 	state.lastBundleId = plan.info.header.bundleId;
 
+	/**
+	 * **状态编号**：应用完这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
+	 *
+	 * 必须**重新扫一遍仓库**再算：计划阶段那份清单是动手之前的，写、删、建目录之后就不作数了。
+	 * 这一步不报进度（进度只认"包里几个文件"）；指纹大多命中缓存（我们刚按包里的版本写过），
+	 * 冷缓存时才真要读一遍仓库 —— 所以循环里按时间让帧。
+	 *
+	 * 算完与**包里那个编号**一比：相同 ＝ 两边文件内容一致。这就是用户要的那句话 ——
+	 * 世代号、基准指纹都回答不了它（前者会碰号，后者只说明"祖先一样"）。
+	 */
+	const inventory = await scanTree(options.vaultRoot, {
+		exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
+		skipTopLevelDirs: [VAULT_TRASH_DIR],
+	});
+	const stateIdInfo = await computeStateId({
+		vaultRoot: options.vaultRoot,
+		state,
+		files: inventory.files,
+		dirs: inventory.dirs,
+	});
+	result.stateId = { ...stateIdInfo, at: Date.now() };
+	result.stateIdCompare = compareStateId(stateIdInfo, plan.info.header.stateId ?? null);
+	state.stateId = result.stateId;
+
 	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
 	// 所以中间版本记录重置；应用更新包则保留
 	const isFull = plan.info.header.mode === 'full';
@@ -986,6 +1033,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		target: plan.info.header.targetGeneration,
 		entries: plan.info.header.entries.length,
 		deleted: plan.info.header.deleted.length,
+		stateId: stateIdInfo.id,
 	});
 
 	/**

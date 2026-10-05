@@ -150,7 +150,8 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **没删掉的必须如实报出来**（`SupersededReport.kept` → `ExportOutcome.keptChanges` →
   弹窗里那句话）：是别的血脉、还是世代不比新包小。悄悄留着会被当成"清理开关没生效"，
   或者更糟 —— 当成偶发 bug（用户报过："同一个操作第一遍没清、第二遍清掉了"）。
-  开关是设置里的 `pruneSupersededBundles`。
+  **清理是无条件的**（0.7.0 把 `pruneSupersededBundles` 开关删了：旧包留着只有坏处，
+  而"没清掉"的原因本来就会如实报出来）。
 - **世代（`state.generation`）只增不减**：应用一个**更老的**包时绝不能把它拨回去
   （`bundle/apply.ts` 里是 `Math.max`）。它记的是"这份副本见过这条血脉的哪一段"，
   不是"我此刻的内容像哪一代"。拨回去的后果就是上面那条：`removeSupersededChanges` 判
@@ -176,6 +177,20 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   应用报告里的 `report.pendingChanges / pendingDeletes`（`planBundleApply` 里算）＝
   "我这边对方还没有的改动"，先摊开给用户看；没有基准（没应用过完整副本）时是 `null`，
   界面上不显示那行 —— 那时他也导不出更新包，说了也没用。
+- **状态编号（`sync/state-id.ts`）＝"两边到底一不一样"的唯一判据**：
+  `sha256(排序后的「f\0路径\0内容指纹」+「d\0目录」)[:16]`。世代号回答不了这件事
+  （它只是节奏号，两台各自 +1 会碰号），基准指纹只说明"祖先是同一份"——
+  用户专门提过："需要一个编号让用户能确定当前文件状态，如哈希值，打开日志看到就能确定
+  两边文件到底是否一致"。所以：导出时把**导出完那一刻**的编号写进包头部（`BundleHeader.stateId`），
+  接收方应用完重扫一遍仓库、算一个自己的跟它比（`compareStateId`）→
+  `match` ＝ **两边文件内容一致**；`mismatch` ＝ 还差那笔"欠回传"；旧包没记 → `unknown`。
+  编号同时落进 `state.stateId` 与每条更新记录（顶部那行"我现在：状态 …"）。
+  几条不能忘的：**编号里不掺 mtime**（跨机器搬过时间会不同、内容却一样）、
+  **目录也算进去**（不然"只差一个空文件夹"两边编号会一样）、
+  读不到指纹的文件如实计数（`unverified`，那一行按大小+时间顶上）；
+  **行里的指纹要截断成 `HASH_KEEP`（16 位）**再喂进哈希 —— 缓存里存的是 16 位、现算的是 64 位，
+  不统一就会"同一个仓库算两次得到两个编号"（踩过：应用完整副本之后两边对不上）。
+  这一步**不报进度**（进度只认"打进包里几个文件"），但它会读盘（冷缓存），所以按时间让帧。
 - **应用完整副本时，新基准只能从「这个包自己的清单」里建**（`apply.ts` 的 `freshAnchor`，
   只收"真的写成了一致"的条目）：**绝不能拿"我原来的基准"当底**（以前是 `{...baseline}`）——
   我独有的、包里根本没有的文件会漏进基准，之后我一导更新包，它们就被当成"我删掉了它们"
@@ -195,8 +210,11 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   为什么要有：状态文件只记"现在什么样"，用户看不出"从哪份完整副本开始、中间收发过什么"
   （用户提的："类似 git 的更新记录功能，比较直观"）。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
-  上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
-  填 0 ＝ 关掉）。到线弹窗，三个选项：**重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
+  上限是设置 `bundleSizeWarnLimit`，取值只能来自 `SIZE_LIMIT_OPTIONS`
+  （`''`＝默认 200MB / 100MB / 500MB / 1GB / `'0'`＝不提醒）—— 以前是自由文本，
+  要认 `200MB`/`500KB`/`1GB`/不带单位/留空/0 六种写法，纯属给自己找事；解析仍在
+  `size-warn.ts`（纯函数，测试钉死），界面只管选。到线弹窗，三个选项：**重新导出完整副本** /
+  **打开更新包文件夹** / **跳过这次导出**。
   顺序上建议"先把更新包传过去应用、再换基准"（增量传得快），所以弹窗必须写清**换基准会清掉旧更新包**。
   「跳过」把**提醒线**记进 `state.bundle.warnedThreshold`，并按原上限整数倍往上抬
   （200 → 400 → 600…，不是按百分比）；换过基准则清零 —— 这样不会每轮同步都弹。
@@ -221,13 +239,20 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
   `download-from-copy`、`export-bundle`、`apply-bundle`、`manage-bundles`、`bundle-log`、
   `toggle-enabled`。
 - **设置字段名不许改名**（用户 `data.json` 里存着它），改名前要写迁移。
+  **删设置项是可以的**（0.7.0 一口气删了 6 项：`startupNotice` / `greeting` /
+  `showLastSyncInStatusBar` / `bundleWindowMaximize` / `rememberFingerprints` /
+  `pruneSupersededBundles`），但要守两条：**语义不能悄悄变**（老 `syncAfterSave: false`
+  必须迁移成 `syncAfterSaveDelay: 0`，否则用户升级后突然开始自动写盘），
+  以及**别把该留的能力删掉**（`skipDeletions` 那种"一次一勾"的对话框选项不占设置位，
+  删它等于把用户从"对方基准不对"的坑里唯一的抓手拿走）。
+  删掉的字段留在旧 `data.json` 里不读即可，`settingsFrom` 不会把它们带进内存。
 - `test/commands.test.ts` 会把命令 ID 列表钉死；`test/settings.test.ts` 守住
   字段表完整性。
 
 ## 改代码的流程
 
 ```bash
-npm test        # 674 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 706 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

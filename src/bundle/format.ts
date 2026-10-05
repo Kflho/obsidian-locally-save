@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { ensureDir } from '../sync/disk';
+import type { StateIdInfo } from '../sync/state';
 import { YIELD_EVERY, yieldToUi } from '../utils/async';
 
 /**
@@ -51,7 +52,7 @@ export interface BundleEntry {
 	offset: number;
 	size: number;
 	mtime: number;
-	/** 内容指纹（十六进制 sha256）；导出时开了「记住内容指纹」才有 */
+	/** 内容指纹（十六进制 sha256）；算得出来才有（单个超过 64MB、读失败时没有） */
 	hash?: string;
 	baseSize?: number;
 	baseMtime?: number;
@@ -106,6 +107,14 @@ export interface BundleHeader {
 	 * 旧版本的包没有这个字段 → 判成"说不清"，只能逐文件合并（不静默降级，界面会说明）。
 	 */
 	baselineHash?: string;
+	/**
+	 * **导出方导完这一刻的状态编号**（见 `sync/state-id.ts`）：整个仓库的内容指纹。
+	 *
+	 * 接收方应用完之后算一个自己的跟它比：**相同 ＝ 两边文件内容一致**（用户要的就是这句话）。
+	 * 基准指纹只能说明"我们是同一份祖先"，说不清"此刻一样不一样"；世代号连祖先都说不准。
+	 * 旧版本的包没有这个字段 → 判成"说不清"（界面说明对方那个包没记编号）。
+	 */
+	stateId?: StateIdInfo;
 	entries: BundleEntry[];
 	deleted: BundleDeletedEntry[];
 	/**
