@@ -4,6 +4,7 @@ import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
 import { baselineOfBundle, compareBaseline } from './baseline';
 import type { BaselineMatch } from './baseline';
+import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
@@ -68,8 +69,9 @@ export interface ApplyChoice {
  * - 更新包只装了自完整副本以来变过的文件 → 包里没有**什么也不代表** →
  *   拿它做上面那两档会把仓库里其余文件全当成"该删"（一次清空，报过的 bug）。
  *
- * 所以更新包给的是**只动包里点名文件**的几档：回退（以包为准）、两边都留、以我为准，
- * 外加默认的"按设置"。用户想"我改坏了，退回对方发来的那一版"就选「回退」——
+ * 所以更新包给的是**只动包里点名文件**的几档：以包为准、两边都留、以我为准，
+ * 外加默认的"按设置"。用户想把"两边都改过"的那些一律听包的（不管包里那份是新的还是旧的），
+ * 或者就是自己改坏了想退回对方发来的那一版 —— 都选它。
  * 以前更新包只留"按设置"一档，本地改过的一律保留，这件事根本做不到。
  */
 export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
@@ -98,7 +100,7 @@ export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 		},
 		{
 			key: 'listed-wins',
-			label: '回退到包里那一版：包里点名的文件以包为准（本地那份进回收目录），没提到的一个不动',
+			label: '以包为准：包里点名的文件一律用包里的版本（本地那份先挪进回收目录），没提到的一个不动',
 			strictness: 'listed-wins',
 		},
 		{
@@ -141,7 +143,7 @@ export interface ApplyOptions {
 	 * **强硬程度**（本次应用有多"以包为准"）。
 	 *
 	 * - `normal`（默认）：按设置 —— 本地改过的保留、分歧留两份、我独有的文件不动
-	 * - `listed-wins`：**回退到包里那一版** —— 包里点名的文件一律以包为准
+	 * - `listed-wins`（界面「以包为准」）：**只对包里点名的文件以包为准** —— 包里点名的文件一律
 	 *   （本地改过的那份进回收目录的「冲突」文件夹），包里**没提到**的一个不动。
 	 *   这是"我改坏了，想退回对方发来的那一版"用的那一档；因为不动没提到的文件，
 	 *   更新包（只有变过的那部分）也能开放它。
@@ -167,6 +169,15 @@ export interface ApplyOptions {
 	force?: boolean;
 	/** 被删掉的本地版本先进回收目录（默认跟随设置里的「删除前先备份」） */
 	keepBackup?: boolean;
+	/**
+	 * **这次不执行包里的删除**（界面上的一个勾）。
+	 *
+	 * 什么时候用：对方那台机器的基准不对时（比如它的 `sync-state.json` 是从另一台机器
+	 * 拷过去的，仓库却比状态旧），它会把"我没有、但基准里有"的文件报成"我删掉了它们"，
+	 * 于是这个包要求删掉你本地明明还在的文件（用户报过：两个 schedule 文件）。
+	 * 勾上它，包里点名要删的一律留着 —— 先别动，等两边的基准对齐了再说。
+	 */
+	skipDeletions?: boolean;
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
@@ -231,6 +242,8 @@ export interface ApplyReport {
 	keptDeletes: number;
 	/** 其中"本地有、包里没有、且基准里也有"的（＝对方删过的） */
 	extraDeletes: number;
+	/** 按"这次不执行包里的删除"跳过的（包里点名要删、但这次留着） */
+	deletesSkipped: number;
 	/** 本地与包已经完全一致的条目数 */
 	synchronized: number;
 	/**
@@ -328,7 +341,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// **更新包不开放破坏性方式**（引擎层兜底，不只靠界面）：
 	// 更新包里只装了变过的文件，"以包为准 / 完全镜像"会把它没提到的文件全当成"该删"，
 	// 一次就把仓库清空。所以不是完整副本时，这两档一律降级成 normal 并在报告里标出来。
-	// （`listed-wins`（回退）不在此列：它只动包里点名的那些，更新包也能用。）
+	// （`listed-wins`（以包为准）不在此列：它只动包里点名的那些，更新包也能用。）
 	const destructive = requested === 'bundle-wins' || requested === 'mirror';
 	const strictness: ApplyStrictness = header.mode === 'full' || !destructive ? requested : 'normal';
 	const strictnessDowngraded = strictness !== requested;
@@ -405,6 +418,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let extraDeletes = 0;
 
 	const localDeleted = new Set(header.deleted.map(item => item.path));
+	/** 这次按用户的选择跳过的删除（包里点名要删，但留着） */
+	let deletesSkipped = 0;
+	const skipDeletes = options.skipDeletions === true;
 
 	// ------------------------------------------------- 强制档：直接"以包为准"
 	if (strictness !== 'normal') {
@@ -433,8 +449,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		}
 
 		// ② 包里**没点名**的本地文件：
-		//   `listed-wins`（回退）→ 一个都不动 —— 包里没提到 ≠ 对方删了它。
-		//     更新包只有变过的那部分，这正是"回退"那一档敢给更新包用的原因；
+		//   `listed-wins`（以包为准）→ 一个都不动 —— 包里没提到 ≠ 对方删了它。
+		//     更新包只有变过的那部分，这正是"以包为准"那一档敢给更新包用的原因；
 		//     但包里**点名要删**的那些（`deleted`）要删 —— 那是它明说的，
 		//     本地那份先进回收目录（不备份的例外只留给"完全镜像"）。
 		//   `bundle-wins` → 只删"基准里也有"的（＝对方删过的；点名删除的文件在基准里，会被这里覆盖到）
@@ -442,6 +458,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (strictness === 'listed-wins') {
 			for (const item of header.deleted) {
 				if (!local.files.has(item.path)) continue;
+				if (skipDeletes) {
+					deletesSkipped++;
+					continue;
+				}
 				deletes++;
 				actions.push({ kind: 'delete', path: item.path });
 			}
@@ -450,6 +470,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				if (entriesByPath.has(file)) continue;
 				const seenBefore = baseline[file] !== undefined;
 				if (strictness === 'bundle-wins' && !seenBefore) continue;
+				if (skipDeletes) {
+					deletesSkipped++;
+					continue;
+				}
 				deletes++;
 				actions.push({ kind: 'delete', path: file });
 			}
@@ -493,6 +517,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				// 所以：更新包只按它**点名**的删除清单（`header.deleted`）删；
 				// 只有完整包才是"完整清单"，那时"基准里有、包里没有"确实是对方删过它。
 				if (header.mode !== 'full' && !localDeleted.has(action.path)) break;
+				if (skipDeletes) {
+					deletesSkipped++;
+					break;
+				}
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
@@ -586,8 +614,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	for (const item of header.deleted) {
 		const here = local.files.get(item.path);
 		if (!here) continue;
-		// 强制模式下这些会被删掉，就不算"保留"了
-		if (strictness !== 'normal') continue;
+		// 强制档下这些会被删掉，就不算"保留"了 —— 除非这次勾了"不执行包里的删除"
+		if (!skipDeletes && strictness !== 'normal' && strictness !== 'listed-wins') continue;
 		const base = baseline[item.path];
 		const stillBase = base && here.size === base.size && Math.abs(here.mtime - base.mtime) <= TOLERANCE;
 		if (!stillBase) keptDeletes++;
@@ -676,6 +704,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		deletes,
 		keptDeletes,
 		extraDeletes,
+		deletesSkipped,
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
 		pendingChanges: anchor ? pendingChanges : null,
@@ -883,6 +912,10 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	state.generation = Math.max(state.generation, plan.info.header.targetGeneration);
 	state.lastBundleId = plan.info.header.bundleId;
 
+	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
+	// 所以中间版本记录重置；应用更新包则保留
+	const isFull = plan.info.header.mode === 'full';
+
 	// 基准的正确含义是**"两边上次达成一致的样子"**，所以只能记两边都见过的东西：
 	// - 包里有的 → 真的写成了包里的样子才记（冲突没写成的、失败的都不记）
 	// - 包里点名删的 → 划掉
@@ -892,19 +925,32 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 下次一应用，它们就成了"基准里有、包里没有" → 被当成"对方删过它"而删掉。
 	// （用户的报障：第一次不删、第二次才删。）
 	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	/**
+	 * 应用**完整副本**时的新"共同基准"＝**这个包自己的清单里、我这边真的写成了一致**的那些。
+	 *
+	 * 绝不能拿"我原来的基准"当底（以前的写法是 `{...baseline}`）：我独有的、包里根本
+	 * 没有的文件会漏进基准 —— 之后我一导更新包，它们就被当成"我删掉了它们"发给对方。
+	 * 用户报过的现场：对方那台机器的**仓库比它的状态旧**（状态还是从另一台机器拷过去的），
+	 * 于是它凭空多出一批"我删过它"，要求我们删掉两个本地明明还在的 schedule 文件。
+	 *
+	 * 从"包自己的清单"出发还有个好处：只拿到一半（有些文件写失败了）时，基准也只包含
+	 * 真正拿到的那部分 —— 不会声称"我有"，也就不会把没有的算成"被我删了"。
+	 */
+	const freshAnchor: Record<string, FileRecord> = {};
 	for (const entry of plan.info.header.entries) {
 		const current = await statFile(toNative(options.vaultRoot, entry.path));
 		const agreed = current
 			&& current.size === entry.size
 			&& Math.abs(current.mtime - entry.mtime) <= TOLERANCE;
-		if (agreed) baseline[entry.path] = { size: entry.size, mtime: entry.mtime };
-		else delete baseline[entry.path];
+		if (!agreed) {
+			delete baseline[entry.path];
+			continue;
+		}
+		baseline[entry.path] = { size: entry.size, mtime: entry.mtime };
+		if (isFull) freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
 	}
 	for (const item of plan.info.header.deleted) delete baseline[item.path];
 
-	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
-	// 所以中间版本记录重置；应用更新包则保留
-	const isFull = plan.info.header.mode === 'full';
 	// 目录基准同理：只记**两边都见过**的目录（包里点了名的，且这次真的在本地）
 	const keepDirs: string[] = [];
 	for (const dir of dirsInBundle(plan.info.header)) {
@@ -914,7 +960,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
 		files: baseline,
-		fullFiles: isFull ? { ...baseline } : (state.bundle?.fullFiles ?? null),
+		fullFiles: isFull ? freshAnchor : (state.bundle?.fullFiles ?? null),
 		fullGeneration: isFull
 			? plan.info.header.targetGeneration
 			: (state.bundle?.fullGeneration ?? null),
@@ -923,9 +969,45 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		fullHash: isFull
 			? baselineOfBundle(plan.info.header)
 			: (state.bundle?.fullHash ?? null),
+		// 界面上要能说清"我站在哪份完整副本上"：应用完整副本时把它的文件名记下来
+		fullFile: isFull ? path.basename(options.file) : (state.bundle?.fullFile ?? null),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
 		dirs: keepDirs,
 	};
+	// 记一笔"我收过什么"（界面上的「更新记录」）
+	appendBundleLog(state, {
+		at: Date.now(),
+		direction: 'apply',
+		mode: plan.info.header.mode,
+		bundleId: plan.info.header.bundleId,
+		file: path.basename(options.file),
+		vault: plan.info.header.vault,
+		base: plan.info.header.baseGeneration,
+		target: plan.info.header.targetGeneration,
+		entries: plan.info.header.entries.length,
+		deleted: plan.info.header.deleted.length,
+	});
+
+	/**
+	 * 暂存"欠对方一个回传"，**不立刻生成回礼包**。
+	 *
+	 * 立刻生成的话：对方收到又会生成一个，两边互相套娃、没完没了（用户报过"无限套娃"）；
+	 * 而且那些包里大半是"回声"（刚收到的内容原样发回去），纯属白占地方。
+	 * 改正记账：下次导出更新包时一起带上 —— 更新包本来就是"自基准累积"的，
+	 * 我这半和对方那半都在里面；导完这笔账就结清（见 export.ts）。
+	 */
+	const pendingChanges = plan.report.pendingChanges ?? 0;
+	const pendingDeletes = plan.report.pendingDeletes ?? 0;
+	state.pendingReturn = pendingChanges + pendingDeletes > 0
+		? {
+			at: Date.now(),
+			bundleId: plan.info.header.bundleId,
+			file: path.basename(options.file),
+			vault: plan.info.header.vault,
+			changes: pendingChanges,
+			deletes: pendingDeletes,
+		}
+		: null;
 	await saveState(options.stateFile, state);
 
 	result.durationMs = Date.now() - started;

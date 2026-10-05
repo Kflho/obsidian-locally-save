@@ -10,6 +10,8 @@ import path from 'node:path';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
+import { appendBundleLog, BUNDLE_LOG_LIMIT, describeBundlePosition, describeLogEntry } from '../src/bundle/log';
+import type { BundleLogEntry } from '../src/sync/state';
 import { exportBundle, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
@@ -144,6 +146,7 @@ function applyOptions(
 		propagateDeletions?: boolean;
 		keepBackup?: boolean;
 		strictness?: ApplyStrictness;
+		skipDeletions?: boolean;
 	} = {},
 ): ApplyOptions {
 	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
@@ -1129,7 +1132,7 @@ check(
 	['normal', 'bundle-wins', 'mirror'],
 );
 check(
-	'更新包那套：按设置 / 回退 / 两边都留 / 以我为准',
+	'更新包那套：按设置 / 以包为准 / 两边都留 / 以我为准',
 	APPLY_CHOICES.changes.map(item => item.key),
 	['normal', 'listed-wins', 'keep-both', 'local-wins'],
 );
@@ -1141,7 +1144,7 @@ check(
 check('换包类型后原来那档不在新一套里 → 回到这一套的默认档', findApplyChoice('changes', 'mirror').key, 'normal');
 check('默认档就是第一项', findApplyChoice('full', 'normal').strictness, 'normal');
 
-// 35. 「回退到包里那一版」：改了的东西退回对方发来的版本，没提到的一个不动
+// 35. 「以包为准」：包里点名的文件一律用包里那一版，没提到的一个不动
 // （用户报的场景：应用过更新包 → 自己又改了这个文件 → 想退回包里那一版，但更新包只有"按设置"，
 //   本地改过的一律保留，这件事做不到）
 const ZA = path.join(ROOT, 'machineZA');
@@ -1175,11 +1178,11 @@ write(ZB, 'a.md', 'B-WRONG', T0 + 20_000);
 write(ZB, 'c.md', 'C-AGAIN', T0 + 20_000);
 write(ZB, 'mine.md', 'MINE', T0 + 20_000);
 
-// 换「回退到包里那一版」再应用同一个更新包
+// 换「以包为准」再应用同一个更新包
 const revertOptions = applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'listed-wins' });
 const revertPlan = await planBundleApply(revertOptions);
-check('回退档：更新包也能用（没被降级成"按设置"）', revertPlan.report.strictnessDowngraded, false);
-check('回退档：算出"覆盖一个本地改过的"', [revertPlan.report.forcedOverwrites, revertPlan.report.conflicts], [1, 0]);
+check('以包为准：更新包也能用（没被降级成"按设置"）', revertPlan.report.strictnessDowngraded, false);
+check('以包为准：算出"覆盖一个本地改过的"', [revertPlan.report.forcedOverwrites, revertPlan.report.conflicts], [1, 0]);
 await executeBundlePlan(revertPlan, revertOptions);
 check('a.md 退回了包里那一版', read(ZB, 'a.md'), 'A2');
 check('我改坏的那份没丢：在回收目录里', findBackups(ZB, 'a.md'), ['B-WRONG']);
@@ -1191,6 +1194,17 @@ check('包里没提到的：b.md 也还在', read(ZB, 'b.md'), 'B1');
 // 对照：会清空仓库的那两档对更新包仍然降级（引擎层兜底）
 const forcedPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'bundle-wins' }));
 check('「以包为准 / 完全镜像」对更新包仍然降级', forcedPlan.report.strictnessDowngraded, true);
+
+// 40. 同一个包**再应用一遍**：什么都不用做（不是失败）—— 界面上要能一眼看出"本地已经有了"
+// （用户报过：拿到对方发来的包，打开一看报告是"写入 0、跳过 N"，以为没应用，其实早就是那一版）
+const againPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zChanges.file as string));
+check('重复应用：一个动作都没有', againPlan.actions.length, 0);
+check('也没有要动的文件夹', againPlan.foldersToRemove.length, 0);
+check(
+	'报告里那个文件算"已一致"，既不是覆盖也不是冲突',
+	[againPlan.report.synchronized, againPlan.report.overwrites, againPlan.report.conflicts],
+	[1, 0, 0],
+);
 
 // 36. 世代回退之后再"两个一起导"，老的更新包**每次**都该被清掉
 // （用户报的场景：第一遍没清、第二遍清了 —— 因为应用一个更老的包会把世代设回那个包的世代，
@@ -1387,6 +1401,144 @@ check(
 	(await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string))).report.baselineMatch,
 	'match',
 );
+
+// 41. 应用完整副本时，新基准**只从这个包自己的清单里建**
+// （旧写法拿"我原来的基准"当底：我独有的、包里根本没有的文件会漏进基准 →
+//   之后我一导更新包，它们就被当成"我删掉了它们"要求对方删 ——
+//   用户报过的现场：对方那台机器的仓库比状态旧，凭空报出"删掉两个 schedule 文件"）
+const BA = path.join(ROOT, 'machineBA');
+const BB = path.join(ROOT, 'machineBB');
+const STATE_BA = path.join(ROOT, 'state-ba.json');
+const STATE_BB = path.join(ROOT, 'state-bb.json');
+const OUTB = path.join(ROOT, 'transferB');
+fs.mkdirSync(BA, { recursive: true });
+fs.mkdirSync(BB, { recursive: true });
+fs.mkdirSync(OUTB, { recursive: true });
+
+// B 自己导过一份完整包（于是它的基准里记着 ghost.md），然后本地把 ghost.md 删了
+write(BB, 'ghost.md', 'GHOST', T0);
+write(BB, 'keep.md', 'K1', T0);
+await exportBundle({ ...exportOptions(BB, STATE_BB), outDir: OUTB });
+fs.rmSync(abs(BB, 'ghost.md'));
+check('B 自己导的完整包基准里确实记着 ghost.md', (await loadState(STATE_BB)).bundle?.fullFiles?.['ghost.md'] !== undefined, true);
+
+// A 导一份完整包（只有 keep.md），B 应用它 —— 新基准只该包含"这个包里有、且真写成一致"的
+write(BA, 'keep.md', 'K1', T0);
+const baFull = await exportBundle({ ...exportOptions(BA, STATE_BA), outDir: OUTB });
+const bbApplyOptions = applyOptions(BB, STATE_BB, baFull.file as string);
+await executeBundlePlan(await planBundleApply(bbApplyOptions), bbApplyOptions);
+check(
+	'应用完整副本之后，基准里没有"包外"的文件（ghost.md 不该在）',
+	Object.keys((await loadState(STATE_BB)).bundle?.fullFiles ?? {}),
+	['keep.md'],
+);
+
+// B 再导更新包：不会凭空报"我删了 ghost.md"
+const bbChanges = await exportBundle({ ...exportOptions(BB, STATE_BB, 'changes'), outDir: OUTB });
+check('不会凭空报删除（那会让对方把它本地还在的文件删掉）', bbChanges.file, null);
+
+// 42. 「这次不执行包里的删除」：对方基准不对时的兜底（包里点名要删的一律留着）
+const SB = path.join(ROOT, 'machineSB');
+const SC = path.join(ROOT, 'machineSC');
+const STATE_SB = path.join(ROOT, 'state-sb.json');
+const STATE_SC = path.join(ROOT, 'state-sc.json');
+const OUTS = path.join(ROOT, 'transferS');
+fs.mkdirSync(SB, { recursive: true });
+fs.mkdirSync(SC, { recursive: true });
+fs.mkdirSync(OUTS, { recursive: true });
+write(SB, 'victim.md', 'V1', T0);
+write(SB, 'other.md', 'O1', T0);
+const sbFull = await exportBundle({ ...exportOptions(SB, STATE_SB), outDir: OUTS });
+const scFullOptions = applyOptions(SC, STATE_SC, sbFull.file as string);
+await executeBundlePlan(await planBundleApply(scFullOptions), scFullOptions);
+check('先同步过去', read(SC, 'victim.md'), 'V1');
+
+fs.rmSync(abs(SB, 'victim.md'));
+const sbChanges = await exportBundle({ ...exportOptions(SB, STATE_SB, 'changes'), outDir: OUTS });
+const plainPlan = await planBundleApply(applyOptions(SC, STATE_SC, sbChanges.file as string));
+check('默认：包里点名的删除会执行', plainPlan.actions.filter(a => a.kind === 'delete').map(a => a.path), ['victim.md']);
+
+const holdPlan = await planBundleApply(applyOptions(SC, STATE_SC, sbChanges.file as string, { skipDeletions: true }));
+check('勾了"这次不执行删除"：一个删除动作都没有', holdPlan.actions.filter(a => a.kind === 'delete').length, 0);
+check('报告里如实写跳过了几个', holdPlan.report.deletesSkipped, 1);
+await executeBundlePlan(holdPlan, applyOptions(SC, STATE_SC, sbChanges.file as string, { skipDeletions: true }));
+check('文件确实还留着', read(SC, 'victim.md'), 'V1');
+
+// 43. 更新记录（像 git log）：每次导出 / 应用都记一笔，界面靠它说清"从哪份完整副本开始"
+const LOGD = path.join(ROOT, 'machineLOG');
+const STATE_LOG = path.join(ROOT, 'state-log.json');
+const OUTLOG = path.join(ROOT, 'transferLOG');
+fs.mkdirSync(LOGD, { recursive: true });
+fs.mkdirSync(OUTLOG, { recursive: true });
+write(LOGD, 'a.md', 'L1', T0);
+const logFull = await exportBundle({ ...exportOptions(LOGD, STATE_LOG), outDir: OUTLOG });
+let logState = await loadState(STATE_LOG);
+check('导出完整副本记了一笔', logState.bundleLog.length, 1);
+check('记的是导出 / 完整副本 / 立基准', describeLogEntry(logState.bundleLog[0] as BundleLogEntry).includes('→ 导出 · 完整副本'), true);
+check('基准包里也记着"我站在哪份包上"', logState.bundle?.fullFile, path.basename(logFull.file as string));
+
+write(LOGD, 'a.md', 'L2', T0 + 10_000);
+const logChanges = await exportBundle({ ...exportOptions(LOGD, STATE_LOG, 'changes'), outDir: OUTLOG });
+const logApplyOptions = applyOptions(LOGD, STATE_LOG, logChanges.file as string);
+await executeBundlePlan(await planBundleApply(logApplyOptions), logApplyOptions);
+logState = await loadState(STATE_LOG);
+check('应用更新包也记一笔', logState.bundleLog.length, 3);
+check('应用那条记着来自哪个仓库', logState.bundleLog[2]?.vault, '我的笔记');
+check(
+	'应用那条的世代是"基准 → 目标"',
+	[logState.bundleLog[2]?.base, (logState.bundleLog[2]?.target ?? 0) > (logState.bundleLog[2]?.base ?? 0)],
+	[1, true],
+);
+const position = describeBundlePosition(logState);
+checkTrue('顶部能说清站在哪份基准上', position[0]?.includes('第 1 代') === true, position[0] ?? '');
+checkTrue(
+	'也说清了之后收发过多少',
+	position[1]?.includes('导出过 1 个') === true && position[1]?.includes('应用过 1 个') === true,
+	position[1] ?? '',
+);
+
+// 记录是有上限的：不能把状态文件撑大
+const capped = await loadState(STATE_LOG);
+for (let index = 0; index < BUNDLE_LOG_LIMIT + 20; index++) {
+	appendBundleLog(capped, {
+		at: Date.now(), direction: 'export', mode: 'changes', bundleId: `id-${index}`,
+		base: 1, target: 2, entries: 1, deleted: 0,
+	});
+}
+check('记录最多留上限那么多条', capped.bundleLog.length, BUNDLE_LOG_LIMIT);
+check('留下的是最近的', capped.bundleLog.at(-1)?.bundleId, `id-${BUNDLE_LOG_LIMIT + 19}`);
+
+// 44. 欠账式回传：应用别人的包**不会立刻生成回礼包**（那会互相套娃），只记一笔账
+const PD = path.join(ROOT, 'machinePD');
+const PE = path.join(ROOT, 'machinePE');
+const STATE_PD = path.join(ROOT, 'state-pd.json');
+const STATE_PE = path.join(ROOT, 'state-pe.json');
+const OUTP = path.join(ROOT, 'transferP');
+fs.mkdirSync(PD, { recursive: true });
+fs.mkdirSync(PE, { recursive: true });
+fs.mkdirSync(OUTP, { recursive: true });
+write(PD, 'shared.md', 'P1', T0);
+const pdFull = await exportBundle({ ...exportOptions(PD, STATE_PD), outDir: OUTP });
+const peApplyOptions = applyOptions(PE, STATE_PE, pdFull.file as string);
+await executeBundlePlan(await planBundleApply(peApplyOptions), peApplyOptions);
+
+// E 自己改了东西，PD 也改了东西：PD 的更新包发过来，E 应用
+write(PD, 'shared.md', 'P2', T0 + 10_000);
+write(PE, 'mine.md', 'M1', T0 + 10_000);
+const pdChanges = await exportBundle({ ...exportOptions(PD, STATE_PD, 'changes'), outDir: OUTP });
+const pePlan = await planBundleApply(applyOptions(PE, STATE_PE, pdChanges.file as string));
+await executeBundlePlan(pePlan, applyOptions(PE, STATE_PE, pdChanges.file as string));
+const peState = await loadState(STATE_PE);
+check('应用完只记一笔"欠回传"的账', peState.pendingReturn?.changes, 1);
+check('账里写着收到的是哪个包', peState.pendingReturn?.file, path.basename(pdChanges.file as string));
+check('没有立刻生成回礼包（不会套娃）', fs.readdirSync(path.join(OUTP, 'changes')).length, 1);
+
+// 导一次更新包：账结清，而且这一个包里两半都在（E 自己的 + 刚收到的回声）
+const peReturn = await exportBundle({ ...exportOptions(PE, STATE_PE, 'changes'), outDir: OUTP });
+const peReturnInfo = await readBundleInfo(peReturn.file as string);
+check('回传包里带着"我这半"', peReturnInfo.header.entries.some(e => e.path === 'mine.md'), true);
+check('也带着对方那半（累积语义，对方应用时会自动跳过）', peReturnInfo.header.entries.some(e => e.path === 'shared.md'), true);
+check('导出之后欠账结清', (await loadState(STATE_PE)).pendingReturn, null);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

@@ -1,6 +1,6 @@
 import { Notice } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { applyBundleAction, exportBundleAction, manageBundlesAction, previewSync, syncNow } from '../ui/actions';
+import { applyBundleAction, bundleLogAction, exportBundleAction, manageBundlesAction, previewSync, syncNow } from '../ui/actions';
 
 /**
  * 命令注册。
@@ -49,6 +49,12 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 		id: 'manage-bundles',
 		name: '管理同步包…',
 		callback: () => { manageBundlesAction(plugin); },
+	});
+
+	plugin.addCommand({
+		id: 'bundle-log',
+		name: '同步包更新记录…',
+		callback: () => { bundleLogAction(plugin); },
 	});
 
 	// 这条不受总开关限制 —— 它就是用来把插件重新打开的

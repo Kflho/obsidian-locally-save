@@ -75,16 +75,18 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   （放下面会被"最多 40vh 的滚动列表"顶出视野，用户翻不到就会问"删掉的包去哪了"）。
 - **应用同步包的"强硬程度"有四档**（`ApplyStrictness`：`normal` / `listed-wins` / `bundle-wins` / `mirror`）：
   - `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`）；
-  - **`listed-wins`（界面叫「回退到包里那一版」）**：走强制那条路，但**只动包里点名的文件** ——
-    条目以包为准（本地改过的那份进回收目录的「冲突」文件夹）、`header.deleted` 点名的照删，
-    **包里没提到的一个不动**。以前更新包只开放 `normal`，"我改坏了想退回对方那一版"根本做不到
+  - **`listed-wins`（界面叫「以包为准」）**：走强制那条路，但**只动包里点名的文件** ——
+    条目一律用包里的版本（不管包里那份是新的还是旧的；本地改过的那份进回收目录的「冲突」文件夹）、
+    `header.deleted` 点名的照删，
+    **包里没提到的一个不动**。以前更新包只开放 `normal`，"两边都改过时听包的"根本做不到
     （本地改过的一律保留，用户报过）；因为它不动没提到的文件，更新包也能安全地开放它；
+    （术语上别叫"回退"：包里那一版**可能比本地还新**，用户提过这个措辞不准确。）
   - **强制两档不走三方比对**，直接两侧比 —— 因为"只有本地改了、包里没改"时三方比对会判成
     "上传"（本地说了算），在包的方向上被过滤掉，那样就不叫"以包为准"了；
   - 强制两档**必然先备份**（`keepBackup` 忽略用户设置）：关掉回收 + 强制 = 不可恢复的批量删除，不给这个组合留口子；
   - `mirror` 会删掉"本机新建的文件"，所以界面上必须额外确认，且它是唯一会这么干的一档。
   - **下拉框按包的类型换一整套选项**（`APPLY_CHOICES`，界面 `renderChoices`）：完整副本给
-    "按设置 / 以包为准 / 完全镜像"；更新包给"按设置 / 回退 / 两边都留 / 以我为准"。
+    "按设置 / 以包为准 / 完全镜像"；更新包给"按设置 / 以包为准（只动点名的）/ 两边都留 / 以我为准"。
     **不是把不合适的选项灰掉留一个孤零零的可用项** —— 包里没有某个文件，在完整副本里
     ＝"对方删过它"，在更新包里＝"什么也不代表"，两套选项本来就该不一样（用户要求）。
   - 引擎层仍然兜底：把 `bundle-wins` / `mirror` 传给更新包会 clamp 成 `normal`
@@ -163,12 +165,35 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   应用更新包不动它。**光靠世代号判断不了"是不是同一份基准"**（两边各自 +1 会碰号、
   内容对不上也看不出来），用户报过"不确定更新状态"；旧状态文件/旧包没这个字段 → `unknown`，
   界面说明只能逐文件合并。
-- **两台机器互相发包要"回礼"**：更新包是累积语义 → 每台只握着改动的一半，
-  收下对方的之后必须把自己这半也导出来发回去（界面上是应用对话框里默认勾着的
-  「应用后顺便导一个更新包」，`bundle-modal.ts` 的 `exportReturnBundle()`）。
+- **欠账式回传：应用完别人的包之后不许立刻生成"回礼包"**（`state.pendingReturn`，
+  `bundle/apply.ts` 写、`bundle/export.ts` 结清）。更新包是累积语义 → 每台只握着改动的一半，
+  收下对方的之后确实得把自己这半也发回去；但**一应用就自动导一个包**会互相套娃：
+  对方收到那份又生成一份、再传回来，两边无限来回（用户报的"无限套娃"）。
+  所以只**记一笔账**（时间、包名、文件/仓库、改动数/删除数），通知、应用报告、更新记录里
+  都如实说"你这边还有 N 个改动没发出去"，等用户下次导出更新包（手动，或"同步后自动留改动包"）
+  时**自然一起带上** —— 累积语义下那一个包里两半都在，对方应用时已经一致的部分会走"✓ 已经有了"。
+  任何一次成功导出都把账清掉（`exportBundle` 一处），别让界面一直挂着一条过期的欠账。
   应用报告里的 `report.pendingChanges / pendingDeletes`（`planBundleApply` 里算）＝
-  "我这边对方还没有的改动"，先摊开给用户看，他才知道要回传多少；没有基准（没应用过完整副本）
-  时是 `null`，界面上不显示那行、回礼那里也会如实说明导不出来。
+  "我这边对方还没有的改动"，先摊开给用户看；没有基准（没应用过完整副本）时是 `null`，
+  界面上不显示那行 —— 那时他也导不出更新包，说了也没用。
+- **应用完整副本时，新基准只能从「这个包自己的清单」里建**（`apply.ts` 的 `freshAnchor`，
+  只收"真的写成了一致"的条目）：**绝不能拿"我原来的基准"当底**（以前是 `{...baseline}`）——
+  我独有的、包里根本没有的文件会漏进基准，之后我一导更新包，它们就被当成"我删掉了它们"
+  发给对方。用户报过的现场：对方那台机器的**仓库比它的状态旧**（`sync-state.json` 还是从
+  另一台机器拷过去的），于是凭空要求删掉我们本地明明还在的两个 schedule 文件。
+  从"包自己的清单"出发还顺带解决"只拿到一半"（有些文件写失败）的情况：不会声称"我有"。
+- **「这次不执行包里的删除」**（`ApplyOptions.skipDeletions` → `report.deletesSkipped`）：
+  应用时的一个兜底勾选 —— 包里点名要删的一律留着，先不动。对方基准不对时用它扛一下，
+  而不是赌一把把本地文件删掉（删了虽然进回收目录，但用户根本不该被迫做这个决定）。
+- **同步包更新记录（像 git log）**：`state.bundleLog`（`BundleLogEntry`，只留最近
+  `BUNDLE_LOG_LIMIT = 100` 条，别把状态文件撑大 —— 它每次同步都要读写）＋
+  `bundle/log.ts` 的 `appendBundleLog / describeLogEntry / describeBundlePosition`。
+  `exportBundle` 与 `executeBundlePlan` 在**成功之后、saveState 之前**追加一条
+  （方向、类型、世代 base→target、文件数/删除数、包名、来自哪个仓库）；
+  `state.bundle.fullFile` 记"我这份基准是哪份包"，界面上才说得清"我站在哪儿"。
+  界面是 `ui/log-modal.ts`（命令 `bundle-log`，管理弹窗里也有个「更新记录…」按钮）。
+  为什么要有：状态文件只记"现在什么样"，用户看不出"从哪份完整副本开始、中间收发过什么"
+  （用户提的："类似 git 的更新记录功能，比较直观"）。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
   上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
   填 0 ＝ 关掉）。到线弹窗，三个选项：**重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
@@ -193,7 +218,8 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 命令与设置是稳定接口
 
 - **命令 ID 不许改名**（用户快捷键认它）：`sync-now`、`sync-preview`、`upload-to-copy`、
-  `download-from-copy`、`export-bundle`、`apply-bundle`、`manage-bundles`、`toggle-enabled`。
+  `download-from-copy`、`export-bundle`、`apply-bundle`、`manage-bundles`、`bundle-log`、
+  `toggle-enabled`。
 - **设置字段名不许改名**（用户 `data.json` 里存着它），改名前要写迁移。
 - `test/commands.test.ts` 会把命令 ID 列表钉死；`test/settings.test.ts` 守住
   字段表完整性。
@@ -201,7 +227,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 647 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 674 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

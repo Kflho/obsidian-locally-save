@@ -5,6 +5,7 @@ import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
 import { listingHashOfFiles } from './baseline';
+import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { excludePatterns } from '../sync/runner';
@@ -310,6 +311,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		fullGeneration: mode === 'full' ? targetGeneration : (state.bundle?.fullGeneration ?? null),
 		// 基准令牌：导完整包 ＝ 换一份新基准（指纹换成新的）；导更新包不动它
 		fullHash: mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null),
+		// 界面上要能说清"我站在哪份完整副本上"，所以文件名也记下来
+		fullFile: mode === 'full' ? path.basename(file) : (state.bundle?.fullFile ?? null),
 		history: mode === 'full' ? {} : nextHistory,
 		// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
 		dirs: [...inventory.dirs],
@@ -317,6 +320,20 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	state.lastExportedBundleId = bundleId;
 	state.generation = targetGeneration;
 	pruneHashes(state, new Set(inventory.files.keys()));
+	// 该发的都发出去了：欠对方的那笔回传结清（见 state.pendingReturn）
+	state.pendingReturn = null;
+	// 记一笔"我导出过什么"（界面上的「更新记录」）—— 只在包写成功、状态要落盘时才记
+	appendBundleLog(state, {
+		at: now,
+		direction: 'export',
+		mode,
+		bundleId,
+		file: path.basename(file),
+		base: mode === 'changes' ? (state.bundle.fullGeneration ?? null) : null,
+		target: targetGeneration,
+		entries: sources.length,
+		deleted: deleted.length,
+	});
 	await saveState(options.stateFile, state);
 
 	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
