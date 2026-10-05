@@ -1,9 +1,8 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { APPLY_CHOICES, executeBundlePlan, findApplyChoice, isDestructivePlan, planBundleApply } from '../bundle/apply';
-import type { ApplyChoice, ApplyPlan, ApplyResult } from '../bundle/apply';
-import type { ConflictStrategy } from '../sync/types';
+import { executeBundlePlan, isDestructivePlan, planBundleApply } from '../bundle/apply';
+import type { ApplyPlan, ApplyResult } from '../bundle/apply';
 import type { StateIdInfo } from '../sync/state';
 import { describeStateId } from '../bundle/log';
 import { exportBundle, plannedExportModes } from '../bundle/export';
@@ -406,24 +405,16 @@ export class ApplyBundleModal extends Modal {
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
 	/**
-	 * 本次选的**应用方式**（选项见 `APPLY_CHOICES`）：
-	 * 完整副本与更新包各有一套 —— 更新包只有"包里点名的那部分"，
-	 * 所以它那套是"以包为准 / 两边都留 / 以我为准 / 按设置"，不会有会清空仓库的那两档。
+	 * **应用方式没得选**（0.11 起）：完整副本与更新包都走**严格同步** ——
+	 * 包里点名的文件一律用包里的版本、`header.deleted` 点名的照删、
+	 * 本地多出来的文件也挪进回收目录，应用完**仓库 == 包送到的状态**。
+	 * 想"合着来"的旧档位（按设置 / 以我为准 / 两边都留）在链条模型下只会合出一个
+	 * 谁都不是的状态，界面不再提供（引擎里还剩 `normal` 给自动收包那条保守的路用）。
 	 */
-	private applyChoiceKey = 'normal';
-	/** 下拉框现在摆的是哪一套选项（按选中包的类型换） */
-	private choicesFor: 'full' | 'changes' | null = null;
-	private keepBackup: boolean;
-	/** 这次不执行包里的删除（对方基准不对时的兜底） */
-	private skipDeletions = false;
 	private pathInput: TextComponent | null = null;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
 	private dropBindings: { name: string; handler: (event: Event) => void }[] = [];
-	private backupToggle: { setDisabled(disabled: boolean): unknown } | null = null;
-	/** 应用方式下拉：换包类型时要整组换掉选项 */
-	private strictnessDropdown: DropdownComponent | null = null;
-	private strictnessSelect: HTMLSelectElement | null = null;
 	/** 包列表（与导出弹窗、管理弹窗共用一套：选中、打开文件夹、复制路径、删除） */
 	private list: BundleListView | null = null;
 	private reportEl!: HTMLElement;
@@ -435,7 +426,6 @@ export class ApplyBundleModal extends Modal {
 		// 只显示"用户自己填的"，留空就是留空（灰字提示设置里那个包目录）
 		this.dir = plugin.settings.bundleDir.trim();
 		this.defaultDir = bundleBaseDir(plugin.settings);
-		this.keepBackup = plugin.settings.deletedToTrash;
 		// 拖进来的包（或命令带过来的路径）：打开就直接检查它
 		this.current = initialPath?.trim() ? initialPath.trim() : null;
 	}
@@ -489,57 +479,15 @@ export class ApplyBundleModal extends Modal {
 			});
 
 		// ---------------------------------------------------------- 应用方式
-		// **选项按包的类型换一套**（完整副本 / 更新包能做的事本就不一样，见 APPLY_CHOICES）
-		new Setting(contentEl)
-			.setName('应用方式')
-			.setDesc('默认按设置来。想让包里点名的文件一律**以包为准**（不管包里那份是新的还是旧的），'
-				+ '选「以包为准」；对面大删大改过、想让这台机器跟包一模一样时，用完整副本那几档')
-			.addDropdown(dropdown => {
-				this.strictnessDropdown = dropdown;
-				this.strictnessSelect = dropdown.selectEl;
-				// 还没选包：先按"更新包"摆一套（日常最多的场景），选中之后会按实际类型换
-				this.renderChoices('changes');
-				dropdown.onChange(value => {
-					this.applyChoiceKey = value;
-					void this.replan();
-				});
-			});
-
-		new Setting(contentEl)
-			.setName('覆盖 / 删掉的先进回收目录')
-			.setDesc('以包为准与完全镜像会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
-				+ '仍然捞得回来。**这几档必须开着**（关掉回收 + 强制 = 不可恢复的批量删除）')
-			.addToggle(toggle => {
-				this.backupToggle = toggle;
-				toggle
-					.setValue(this.keepBackup)
-					.setDisabled(!this.choiceIsGentle())
-					.onChange(value => {
-						this.keepBackup = value;
-						void this.replan();
-					});
-			});
-
-		// 兜底开关：对方基准不对时（比如它的状态是从别的机器拷过去的），它会把自己没有、
-		// 但基准里点名的文件报成"我删掉了它们"，于是要求删你本地明明还在的文件 ——
-		// 勾上这个就一律不删，先对齐基准再说
-		new Setting(contentEl)
-			.setName('这次不执行包里的删除')
-			.setDesc('包里点名要删的文件这次一律留着（默认照删，删掉的那份会进回收目录）。'
-				+ '跟上面「以我为准」不是一回事：那个只保护**你改过**的文件，'
-				+ '对方删掉、你没动过的照样会跟着删 —— 想一个都不删就勾这个。'
-				+ '对方那台机器的基准不对时用它兜一下：不然它会把"我没有、但基准里有"的文件当成自己删过，'
-				+ '要求你这边也删掉')
-			.addToggle(toggle => toggle
-				.setValue(this.skipDeletions)
-				.onChange(value => {
-					this.skipDeletions = value;
-					void this.replan();
-				}));
-
-		// 应用完顺手带上本地副本：不然后备会在应用包之后悄悄落后一截
-		// 0.8.0 砍掉「同步到本地副本」通道之后这一项没了 —— 包是唯一的搬运格式：
-		// 想让另一台机器跟上，就把包拷过去应用（那台机器自己再留一份包回传）。
+		// **没有可选项**（0.11 起）：完整副本与更新包都走严格同步 ——
+		// "应用完这个仓库就是包里的样子"是唯一一条能保证两边状态编号当场一致的语义，
+		// 所以这一段只是一个说明，不是控件。
+		contentEl.createEl('p', {
+			text: '应用方式：**严格同步** —— 包里点名的文件一律用包里的版本，'
+				+ '包里点名删掉的照删，本地多出来的也挪进回收目录。应用完这个仓库就是包送到的样子。'
+				+ '被换掉的那些本地版本进回收目录，捞得回来',
+			cls: 'locally-save-hint',
+		});
 
 		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -652,17 +600,16 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	/**
-	 * 重新算一遍（换包、换应用方式、换备份开关都要走这里）。
+	 * 重新算一遍（换包、换目录都走这里）。
 	 *
-	 * 防呆的第一层：**选项按包的类型换一套**（见 `renderChoices`）。
-	 * 更新包里只有变过的那部分，"包里没有"什么也不代表 —— 所以它没有"以包为准 / 完全镜像"
-	 * 这两档（会把仓库里其余文件全删掉），换成"只动包里点名文件"的那几档。
+	 * **只算不写**：算完把报告画出来，用户看过才点「应用」。
+	 * 应用方式固定严格同步（`strictness: 'mirror'`）：包的类型这会儿才知道，
+	 * 但两种类型走同一套语义 —— 应用完仓库就是包送到的状态。
 	 */
 	private async replan(): Promise<void> {
 		const file = this.current;
 		if (!file) return;
 		this.applyButton?.setDisabled(true);
-		const choice = this.currentChoice();
 		try {
 			const plan = await planBundleApply({
 				settings: this.plugin.settings,
@@ -671,60 +618,15 @@ export class ApplyBundleModal extends Modal {
 				stateFile: this.plugin.stateFile(),
 				file,
 				configDir: this.plugin.configDir(),
-				strictness: choice.strictness,
-				conflictStrategy: choice.conflictStrategy,
-				keepBackup: this.keepBackup,
-				skipDeletions: this.skipDeletions,
+				strictness: 'mirror',
 			});
 			this.plan = plan;
-			// 包的类型这会儿才知道：换成它该有的那一套选项。
-			// 原来选的那档在新一套里没有（比如从完整副本的"完全镜像"换到更新包）→ 回到默认档，
-			// 这一轮算出来的计划作废，按新档再算一遍。
-			const before = this.applyChoiceKey;
-			this.renderChoices(plan.info.header.mode);
-			if (this.applyChoiceKey !== before) {
-				void this.replan();
-				return;
-			}
-			// 会动本地原有文件的那几档，回收目录是强制开的（界面上灰掉，别让人以为能关）
-			this.backupToggle?.setDisabled(!this.choiceIsGentle());
 			this.renderReport(plan);
 			this.applyButton?.setDisabled(false);
 		} catch (error) {
 			this.reportEl.empty();
 			this.reportEl.setText(`打不开这个包：${describe(error)}`);
 		}
-	}
-
-	/**
-	 * 把下拉框换成这一类包该有的一套选项。
-	 *
-	 * 不是"灰掉几个"：**包里没有某个文件，在两种包里意思完全不同** ——
-	 * 完整副本是完整清单（没有＝对方删过它），更新包只装变过的（没有＝什么也不代表）。
-	 * 两套选项本来就不一样，那就换一套，而不是留一个孤零零的可用项。
-	 */
-	private renderChoices(mode: 'full' | 'changes'): void {
-		if (this.choicesFor === mode) return;
-		this.choicesFor = mode;
-		const choices = APPLY_CHOICES[mode];
-		// 换一套之后原来那档可能不存在了 → 回到这一套的默认档
-		this.applyChoiceKey = findApplyChoice(mode, this.applyChoiceKey).key;
-		const dropdown = this.strictnessDropdown;
-		// 测试替身里没有真的 select（只需要不炸）
-		if (!dropdown?.selectEl) return;
-		dropdown.selectEl.empty();
-		dropdown.addOptions(Object.fromEntries(choices.map(item => [item.key, item.label])));
-		dropdown.setValue(this.applyChoiceKey);
-	}
-
-	/** 此刻这一档对应的引擎参数（在当前摆着的那一套选项里找） */
-	private currentChoice(): ApplyChoice {
-		return findApplyChoice(this.choicesFor ?? 'changes', this.applyChoiceKey);
-	}
-
-	/** 这一档会不会主动覆盖本地改动（那种档必须开着回收目录） */
-	private choiceIsGentle(): boolean {
-		return this.currentChoice().strictness === 'normal';
 	}
 
 	private renderReport(plan: ApplyPlan): void {
@@ -744,23 +646,18 @@ export class ApplyBundleModal extends Modal {
 			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`
 			+ `${report.bundleDirsUnknown ? '（旧版包没记空文件夹，只能数到有文件的那些）' : ''}`);
 
-		// 改动包说清它自己的那套选项是干什么的
+		// 两种包都说清"应用完会变成什么样"：严格档下这是确定的
+		// （更新包的起点必须与本机站的基准点完全相等，`checkAncestor` 拦在前面）
 		if (report.bundle.mode !== 'full') {
-			if (report.strictnessDowngraded) {
-				this.reportEl.createEl('p', {
-					text: '⚠ 「以包为准 / 完全镜像」只对完整副本开放，这次已改用「按设置」（更新包只装变过的文件，'
-						+ '拿它清理会把仓库里其余文件全删掉）',
-					cls: 'locally-save-warn',
-				});
-			}
 			this.reportEl.createEl('p', {
-				text: '更新包：只装自起点那一点以来变过的文件 —— 下面几档**只动包里点名的文件**，'
-					+ '没提到的一律不动（"没提到"不等于"被删了"）。',
+				text: '更新包：只装自起点那一点以来变过的文件。应用方式是**严格同步** —— '
+					+ '包里点名的用包里的版本、点名的删除照删，其余按"你站的基准点 ＋ 这些条目 − 这些删除"补全'
+					+ '（不在这份状态里的本地文件挪进回收目录）。',
 				cls: 'locally-save-hint',
 			});
 		} else {
 			this.reportEl.createEl('p', {
-				text: '完整副本：**镜像**，没有别的档 —— 包里没有的本地文件全挪进回收目录，'
+				text: '完整副本：**完全镜像** —— 包里没有的本地文件全挪进回收目录，'
 					+ '仓库会变成和那个包一模一样（本机改过的、自己新建的都不留）。',
 				cls: 'locally-save-hint',
 			});
@@ -897,7 +794,7 @@ export class ApplyBundleModal extends Modal {
 		line(`新增 ${report.adds} 个`);
 		line(`覆盖 ${report.overwrites} 个`);
 		if (report.forcedOverwrites > 0) {
-			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（按这次选的"以包为准"覆盖，本地那份进回收目录）`);
+			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（严格同步用包里那一版覆盖，本地那份进回收目录）`);
 		}
 		if (report.historyMatches > 0) {
 			line(`其中 ${report.historyMatches} 个：本地停在对方发过的中间版本上，直接覆盖`);
@@ -906,9 +803,6 @@ export class ApplyBundleModal extends Modal {
 		if (report.deletes > 0) line(`删除 ${report.deletes} 个（本地未改动过的）`);
 		if (report.keptDeletes > 0) line(`包里要求删、但本地改过所以保留的：${report.keptDeletes} 个`);
 		if (report.extraDeletes > 0) line(`本地有、包里没有、且对方删过的：${report.extraDeletes} 个`);
-		if (report.deletesSkipped > 0) {
-			line(`跳过了 ${report.deletesSkipped} 个删除（包里点名要删的那些这次留着）`);
-		}
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个`);
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹`);
@@ -923,25 +817,14 @@ export class ApplyBundleModal extends Modal {
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
-		const strategyText: Record<ConflictStrategy, string> = {
-			'keep-both': '留两份（新的占原名，旧的进回收目录的「冲突」）',
-			'local-wins': '以我为准',
-			'remote-wins': '以包为准',
-		};
-		// 这一档是不是"这一趟特意选的"：选了就别再说"按设置里那套规则"
-		const overrode = this.currentChoice().conflictStrategy !== undefined
-			|| this.currentChoice().strictness !== 'normal';
-		const loserText = report.strictness === 'listed-wins'
-			? '本地那份挪进回收目录的「冲突」文件夹'
-			: '输的那份挪进回收目录的「冲突」文件夹（不留在仓库里）';
 		this.reportEl.createEl('p', {
-			text: `${overrode ? '这一趟按你选的方式' : '按设置'}：两边都改过时 ${strategyText[report.conflictStrategy]}；`
-				+ `${loserText}。`
-				+ (report.strictness === 'listed-wins'
-					? '包里没提到的文件一个都不动。'
-					: `对方删掉的文件${report.propagateDeletions ? '这边也删' : '取回来'}。`)
-				+ (report.keepBackup ? '' : '⚠ 回收目录已关：删掉的本地版本会直接消失'),
-			cls: report.keepBackup ? 'locally-save-hint' : 'locally-save-warn',
+			text: report.strictness === 'listed-wins'
+				? '以包为准：包里点名的文件一律用包里的版本（本地那份挪进回收目录的「冲突」文件夹），'
+					+ '包里没提到的文件一个都不动。'
+				: '严格同步：包里点名的文件一律用包里的版本、点名的删除照删、'
+					+ '本地多出来的（包里送到的状态里没有的）也挪进回收目录；'
+					+ '动到的东西全在回收目录里（仓库/.trash/locally-save），捞得回来。',
+			cls: 'locally-save-hint',
 		});
 
 		const mode = this.reportEl.createEl('p');
@@ -998,11 +881,37 @@ export class ApplyBundleModal extends Modal {
 			case 'match':
 				return `✓ 跟对方完全一致（${mine}）`;
 			case 'mismatch':
-				return `${mine}，跟对方导出时的 ${peer?.id ?? '?'} 不一样`
-					+ '（就差你这边还没发出去的那些改动）';
+				// 严格档下"差"的原因很具体：包没提到、而你又改过的那些文件（包里没有它们的字节）
+				// —— 它们会随你下次导出的更新包过去，对方应用完两边就一致了
+				return `${mine}，跟对方导出时的 ${peer?.id ?? '?'} 还差一点`
+					+ '（包没提到、而你又改过的那些文件；下次导出更新包会带上，对方应用完就一致了）';
 			default:
 				return `${mine}（对方那个包没记编号，比不了）`;
 		}
+	}
+
+	/**
+	 * **动手前先把"我这边的最新改动"存成一个更新包**（用户要的："本地最新更新保存为一个更新包"）。
+	 *
+	 * 为什么非做不可：严格档（「严格同步」）会**用包里的版本覆盖我改过的文件、把我多出来的文件挪走** ——
+	 * 我那一版如果只躺在回收目录里，就是散的、认不出是一整套改动。存成一个包之后：
+	 * 它是一份完整、可搬运的备份，也能直接发给对方（那边站在同一点上就能应用）。
+	 *
+	 * **存不下就不动手**：宁可这次不应用，也不能让本地改动在"存不下来"的情况下被覆盖掉。
+	 */
+	private async parkLocalChanges(): Promise<string> {
+		const outcome = await exportBundle({
+			settings: this.plugin.settings,
+			log: this.plugin.log,
+			vaultRoot: this.plugin.vaultRoot(),
+			vaultName: this.plugin.vaultName(),
+			stateFile: this.plugin.stateFile(),
+			mode: 'changes',
+			outDir: this.effectiveDir(),
+			configDir: this.plugin.configDir(),
+		});
+		if (!outcome.file) throw new Error(outcome.reason ?? '没能把你的改动存成更新包');
+		return outcome.file;
 	}
 
 	private async runApply(): Promise<void> {
@@ -1011,6 +920,18 @@ export class ApplyBundleModal extends Modal {
 		if (!plan || !file) return;
 		this.reportEl.setText('正在应用……');
 		try {
+			/**
+			 * 严格档会覆盖 / 挪走我这边的东西 → 先把"我这一半"存成一个更新包。
+			 * 没有改动要存（`pendingChanges/Deletes` 都是 0）时跳过，不白写一个空包。
+			 */
+			const strict = plan.report.strictness === 'mirror' || plan.report.strictness === 'bundle-wins';
+			const owedBefore = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
+			let parked: string | null = null;
+			if (strict && owedBefore > 0) {
+				this.reportEl.setText(`正在把你这边的 ${owedBefore} 个改动先存成一个更新包……`);
+				parked = await this.parkLocalChanges();
+				this.reportEl.setText('正在应用……');
+			}
 			const result = await executeBundlePlan(plan, {
 				settings: this.plugin.settings,
 				log: this.plugin.log,
@@ -1029,7 +950,12 @@ export class ApplyBundleModal extends Modal {
 
 			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
-			if (result.deleted > 0) parts.push(`删除 ${result.deleted}`);
+			if (result.deleted > 0) {
+				parts.push(`删除 ${result.deleted}`
+					+ (plan.report.localExtras > 0 ? `（其中 ${plan.report.localExtras} 个是你本地多出来的）` : ''));
+			}
+			const overwritten = plan.report.forcedOverwrites;
+			if (overwritten > 0) parts.push(`覆盖你改过的 ${overwritten} 个（你那一版挪进了回收目录）`);
 			if (result.moved > 0) parts.push(`改名 ${result.moved}`);
 			if (result.foldersCreated > 0) parts.push(`新建文件夹 ${result.foldersCreated}`);
 			if (result.foldersRemoved > 0) parts.push(`清理空文件夹 ${result.foldersRemoved}`);
@@ -1042,8 +968,14 @@ export class ApplyBundleModal extends Modal {
 
 			// 欠账式回传：**不立刻生成回礼包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
 			// 只在通知里提一句"你这边还有 N 个改动没发出去"，它们会随下次导出更新包一起带过去。
+			// （`parked` 那条路例外：改动在应用前已经存进一个包里了，这里就不再说"没发出去"）
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
-			if (owed > 0) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
+			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
+
+			// 本地改动先存成的那个包：不说的话用户不知道它从哪儿冒出来的。
+			// **别说"可以直接发给对方"**：它接在**应用前**那个基准点上，而对方导出这个包之后
+			// 已经走到新点上了 —— 他直接应用会被判"接不上"（要发给他，得等改动放回新点之后重导）
+			if (parked) parts.push(`你那边的改动已存成 ${parked}（接在应用前那个基准点上，留着当备份）`);
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
 			// "两边到底一不一样"就是他最想知道的那句。
@@ -1132,7 +1064,12 @@ class ConfirmApplyModal extends Modal {
 			facts.createEl('li', { text: `会覆盖 ${report.forcedOverwrites} 个本地改动过的文件` });
 		}
 		if (paths.length > 0) {
-			facts.createEl('li', { text: `会删除 ${paths.length} 个本地文件` });
+			facts.createEl('li', {
+				text: `会删除 ${paths.length} 个本地文件`
+					+ (report.localExtras > 0
+						? `（其中 ${report.localExtras} 个是你本地多出来的：包里送到的状态里没有它们）`
+						: ''),
+			});
 		}
 		if (this.plan.foldersToRemove.length > 0) {
 			facts.createEl('li', {

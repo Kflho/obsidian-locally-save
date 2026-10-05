@@ -148,7 +148,6 @@ function applyOptions(
 		propagateDeletions?: boolean;
 		keepBackup?: boolean;
 		strictness?: ApplyStrictness;
-		skipDeletions?: boolean;
 	} = {},
 ): ApplyOptions {
 	return { settings: settings(), log, vaultRoot: root, stateFile, file, ...options };
@@ -906,8 +905,9 @@ check('强制一致：多余的文件被删掉', exists(U, '自己的一摊/mine
 check('腾空的目录跟着收拾掉（不是靠目录规则删的）', exists(U, '自己的一摊'), false);
 check('结果里也算进了清理数', uResult.foldersRemoved, 1);
 
-// 21. 更新包 + 破坏性方式 → **引擎层直接降级**（不能只靠界面提示）
-// 更新包里只装了变过的文件，拿它"清老的/强制应用"会把仓库里其余文件全当"该删"
+// 21. 更新包 + 严格档 → **应用完就是包送到的状态**（0.11 起不再降级）
+// 起点必须与本机站的基准点相等（`checkAncestor` 保证），所以"送到的状态"是确定的：
+// ＝ 我站的那一点 ＋ 包里点名的条目 − 包里点名的删除 —— 镜像它不会清空仓库。
 const V = path.join(ROOT, 'machineV');
 const STATE_V = path.join(ROOT, 'state-v.json');
 fs.mkdirSync(V, { recursive: true });
@@ -918,16 +918,16 @@ await executeBundlePlan(
 );
 write(V, 'notes/keep.md', 'KEEP'); // 应用之后才建：本机独有，包里没有它
 const vPlan = await planBundleApply(applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
-check('更新包用强制档 → 降级成默认档', vPlan.report.strictness, 'normal');
-check('报告里标出"被降级了"（界面要说明白）', vPlan.report.strictnessDowngraded, true);
-check('报告里 forced 也不再成立', vPlan.report.forced, false);
+check('更新包用严格档 → 就是严格档', vPlan.report.strictness, 'mirror');
+check('报告里 forced 成立（严格档）', vPlan.report.forced, true);
 check(
-	'删除动作只有包里点名的那个（notes/b.md）；没提到的 notes/keep.md 不在里面',
-	vPlan.actions.filter(action => action.kind === 'delete').map(action => action.path),
-	['notes/b.md'],
+	'删除动作：包里点名的 notes/b.md，加上包里没有的 notes/keep.md（严格档下本地多出来的也要挪走）',
+	vPlan.actions.filter(action => action.kind === 'delete').map(action => action.path).sort(),
+	['notes/b.md', 'notes/keep.md'],
 );
 await executeBundlePlan(vPlan, applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
-check('仓库里我自己的文件还在（没被清空）', read(V, 'notes/keep.md'), 'KEEP');
+check('应用完仓库就是包送到的状态', [read(V, 'notes/a.md'), read(V, 'notes/keep.md')], ['AAA-CHANGED', null]);
+checkTrue('我自己的文件没丢：挪进了回收目录', findBackups(V, 'notes/keep.md').includes('KEEP'), JSON.stringify(findBackups(V, 'notes/keep.md')));
 check('包里点名要删的照做（那是它明说的）', exists(V, 'notes/b.md'), false);
 check(
 	'完整包不受影响：强制档照旧生效',
@@ -1343,25 +1343,25 @@ check(
 	[['c-new', 'c-mid'], ['f-new', 'f-old'], ['weird']],
 );
 
-// 34. 「应用方式」按包的类型给两套选项（不是把不合适的灰掉）
+// 34. 「应用方式」两类包各只剩一项（0.11 起界面上不再给选择，见 APPLY_CHOICES 上的注释）
 // 完整副本**没有可选项**：应用方式固定是镜像 —— 合并它会有无穷多种结果，
-// 每一种都能配出一个"既不等于包、又不等于本机"的仓库（见 APPLY_CHOICES 上的注释）
+// 每一种都能配出一个"既不等于包、又不等于本机"的仓库
 check(
 	'完整副本那套：只有完全镜像一项',
 	APPLY_CHOICES.full.map(item => item.key),
 	['mirror'],
 );
 check(
-	'更新包那套：按设置 / 以包为准 / 两边都留 / 以我为准',
+	'更新包那套：只剩严格同步一项',
 	APPLY_CHOICES.changes.map(item => item.key),
-	['normal', 'listed-wins', 'keep-both', 'local-wins'],
+	['strict'],
 );
 check(
-	'更新包那套里没有会清空仓库的两档（包里没有 ≠ 对方删了它）',
-	APPLY_CHOICES.changes.some(item => item.strictness === 'bundle-wins' || item.strictness === 'mirror'),
-	false,
+	'默认那档就是「严格同步」—— 应用完仓库 == 包送到的状态',
+	[APPLY_CHOICES.changes[0]?.key, APPLY_CHOICES.changes[0]?.strictness],
+	['strict', 'mirror'],
 );
-check('换包类型后原来那档不在新一套里 → 回到这一套的默认档', findApplyChoice('changes', 'mirror').key, 'normal');
+check('选了一个不在这一套里的档 → 落到默认档（严格同步）', findApplyChoice('changes', 'bundle-wins').key, 'strict');
 check(
 	'完整副本那一套只剩一项 → 传什么进来都落到它',
 	[findApplyChoice('full', 'normal').key, findApplyChoice('full', 'bundle-wins').key],
@@ -1405,7 +1405,6 @@ write(ZB, 'mine.md', 'MINE', T0 + 20_000);
 // 换「以包为准」再应用同一个更新包
 const revertOptions = applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'listed-wins' });
 const revertPlan = await planBundleApply(revertOptions);
-check('以包为准：更新包也能用（没被降级成"按设置"）', revertPlan.report.strictnessDowngraded, false);
 check('以包为准：算出"覆盖一个本地改过的"', [revertPlan.report.forcedOverwrites, revertPlan.report.conflicts], [1, 0]);
 await executeBundlePlan(revertPlan, revertOptions);
 check('a.md 退回了包里那一版', read(ZB, 'a.md'), 'A2');
@@ -1415,9 +1414,14 @@ check('它同样进了回收目录', findBackups(ZB, 'c.md').includes('C-AGAIN')
 check('包里没提到的：我自己的文件一个没动', read(ZB, 'mine.md'), 'MINE');
 check('包里没提到的：b.md 也还在', read(ZB, 'b.md'), 'B1');
 
-// 对照：会清空仓库的那两档对更新包仍然降级（引擎层兜底）
+// 对照：更新包的严格档现在**不降级**，而且删的只有「包里点名 ＋ 本地多出来」的那些
 const forcedPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'bundle-wins' }));
-check('「以包为准 / 完全镜像」对更新包仍然降级', forcedPlan.report.strictnessDowngraded, true);
+check('严格档对更新包一样是严格档', forcedPlan.report.strictness, 'bundle-wins');
+check(
+	'删的不是「没提到的所有文件」，而是包里点名 ＋ 本地多出来的那些',
+	forcedPlan.actions.filter(action => action.kind === 'delete').map(action => action.path).sort(),
+	['c.md', 'mine.md', 'notes/keep.md'].filter(name => exists(ZB, name)).sort(),
+);
 
 // 40. 同一个包**再应用一遍**：什么都不用做（不是失败）—— 界面上要能一眼看出"本地已经有了"
 // （用户报过：拿到对方发来的包，打开一看报告是"写入 0、跳过 N"，以为没应用，其实早就是那一版）
@@ -1705,11 +1709,12 @@ const sbChanges = await exportBundle({ ...exportOptions(SB, STATE_SB, 'changes')
 const plainPlan = await planBundleApply(applyOptions(SC, STATE_SC, sbChanges.file as string));
 check('默认：包里点名的删除会执行', plainPlan.actions.filter(a => a.kind === 'delete').map(a => a.path), ['victim.md']);
 
-const holdPlan = await planBundleApply(applyOptions(SC, STATE_SC, sbChanges.file as string, { skipDeletions: true }));
-check('勾了"这次不执行删除"：一个删除动作都没有', holdPlan.actions.filter(a => a.kind === 'delete').length, 0);
-check('报告里如实写跳过了几个', holdPlan.report.deletesSkipped, 1);
-await executeBundlePlan(holdPlan, applyOptions(SC, STATE_SC, sbChanges.file as string, { skipDeletions: true }));
-check('文件确实还留着', read(SC, 'victim.md'), 'V1');
+// 0.11 删掉了「这次不执行包里的删除」那个勾：应用只有一种语义 —— 严格和包一致，
+// 包里点名要删的照删（删掉的那份进回收目录，捞得回来）。
+const holdPlan = await planBundleApply(applyOptions(SC, STATE_SC, sbChanges.file as string, { strictness: 'mirror' }));
+check('严格档：点名要删的照删（没有那个开关了）', holdPlan.actions.filter(a => a.kind === 'delete').map(a => a.path), ['victim.md']);
+await executeBundlePlan(holdPlan, applyOptions(SC, STATE_SC, sbChanges.file as string, { strictness: 'mirror' }));
+check('文件删掉了', read(SC, 'victim.md'), null);
 
 // 43. 更新记录（像 git log）：每次导出 / 应用都记一笔，界面靠它说清"从哪份完整副本开始"
 const LOGD = path.join(ROOT, 'machineLOG');

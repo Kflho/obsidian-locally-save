@@ -121,11 +121,8 @@ for (const def of definitions) {
 	);
 }
 
-// 4. 依赖其它开关的谓词：0.8.0 砍掉副本通道之后，「删除前先备份」不再跟着
-//    「包里删掉的文件，这边也删」变灰 —— 应用包时回收是独立的一件事
-//    （强制两档更是必然备份，不看这一项）
-check("「删除前先备份」不再依赖别的开关", byKey(definitions, 'deletedToTrash')?.control?.disabled, undefined);
-check("删除开关本身不设 disabled", byKey(definitions, 'propagateDeletions')?.control?.disabled, undefined);
+// 4. 应用那一组设置已经删掉（0.11 起应用只剩严格同步，没有可配的地方）：
+//    字段覆盖检查（第 1 项）会保证它们不会再出现在面板上
 
 // 5. 写入时收敛脏数据并保存
 const { tab: writeTab, settings: written, saveCount } = createTab();
