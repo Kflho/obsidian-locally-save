@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleHeader, BundleInfo } from './format';
-import { baselineOfBundle, compareBaseline } from './baseline';
+import { baselineOfBundle, compareBaseline, listingHashOfFiles } from './baseline';
 import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
@@ -72,7 +72,7 @@ export interface ApplyChoice {
  * 每一种都能配出一个"既不等于包、又不等于本机"的仓库 —— 之后导出的更新包 `base` 就对不上，
  * 两台机器开始互相报"基准对不上"。收掉选择权，语义就只剩一句：**应用完，仓库就是那个包**。
  *
- * **更新包只有"只动包里点名文件"的几档**：它只装自完整副本以来变过的文件，
+ * **更新包只有"只动包里点名文件"的几档**：它只装自起点那一点以来变过的文件，
  * 包里没有**什么也不代表** —— 拿它清仓库一次就清空（报过的 bug）。
  * 所以它给的是：按设置 / 以包为准 / 两边都留 / 以我为准。
  */
@@ -262,7 +262,7 @@ export interface ApplyReport {
 	 * 两台机器互相发更新包时，每台只握着改动的一半：收下对方的之后，
 	 * 自己这半得导出来发回去，对方才补得齐（用户问过："数据各半，会不会缺"）。
 	 * 这个数就是"回礼包"里真正属于我的那部分 —— 包里刚带来的那些不算
-	 * （对方本来就有，回礼包里会有但它们只是累积语义的副产品）。
+	 * （对方本来就有；而且它们已经进了基准点，下一个包不会再带上）。
 	 *
 	 * `null` ＝ 这台机器还没有基准（没应用过完整副本），算不出来。
 	 */
@@ -392,8 +392,8 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		if (header.mode === 'full') return { ok: true, kind: 'first' };
 		return {
 			ok: false,
-			message: '这台机器还没有基准（没导过、也没应用过完整副本）：更新包是"从某份完整副本往后累积"的差量，'
-				+ '没有起点就没法算。让对方先导一份**完整副本**发过来，应用它之后这台机器才有基准。',
+			message: '这台机器还没有基准点（没导过、也没应用过完整副本）：更新包是"从某一个基准点往后延伸"的差量，'
+				+ '没有起点就没法算。让对方先导一份**完整副本**发过来，应用它之后这台机器才有基准点。',
 		};
 	}
 	// 完整副本：自带完整清单，就是一份新基准 —— 放行（对方重新立基准是正路）
@@ -408,21 +408,35 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		};
 	}
 	if (theirs !== mine) {
-		// 差量包的特例：**它要送到的地方正好就是我站的基准** → 放行。
+		// 差量包的特例：**它要送到的地方正好就是我站的基准点** → 放行。
 		// 这种情况下包里点名要送的东西我全都有（应用它一个文件都不会改），
 		// 而报告里那句 `targetIsMine` 正是给用户看的"白跑一趟，让对方按我的指纹重导"。
 		// 拦在这里反而看不出这个结论，只剩一句"基准对不上"。
 		if (header.targetBaselineHash !== undefined && header.targetBaselineHash === mine) {
 			return { ok: true, kind: 'update' };
 		}
+		/**
+		 * **链条中间断了：拒绝，并把"从哪个基准点开始"指出来。**
+		 *
+		 * 更新包是从**某一个基准点**往外延伸的差分，"起点里有、包里没提到"不算被删 ——
+		 * 可一旦起点跟本机站的不是同一个点，这条前提就没了：本机一大批文件会被当成
+		 * "对方删过它们"（用户报过的"删除一万个"）。所以不猜着合。
+		 *
+		 * 出路按**成功率**排：让对方从本机这一点重导（最省事，前提是对方手里有这个点）；
+		 * 把中间缺的那几份包一起发过来按顺序应用（链本身就在文件夹里）；完整副本兜底。
+		 */
+		const at = state.bundle?.fullGeneration !== null && state.bundle?.fullGeneration !== undefined
+			? `（第 ${state.bundle.fullGeneration} 代${state.bundle.fullFile ? ` · 来自 ${state.bundle.fullFile}` : ''}）`
+			: '';
 		return {
 			ok: false,
-			message: `**接不上，不合并**：这个更新包基于「${theirs}」，本机站在「${mine}」上。`
-				+ '更新包只装"变过的那部分"，基准不是同一份时，本机一大批文件会被当成"对方删过"删掉 —— '
-				+ '所以插件不猜着合，直接停下来。\n'
-				+ `要往下走，二选一：\n`
-				+ `① 让对方**按本机的基准指纹 ${mine} 重导一份更新包**（导出时把「更新包：从哪个状态」选成这一项）；\n`
-				+ '② 让对方导一份**完整副本**发过来 —— 完整清单自带基准，本机可以直接应用（但它会镜像覆盖本机内容）。',
+			message: `**接不上，不合并**：这个更新包从「${theirs}」这个基准点往外延伸，本机站在「${mine}」上${at} —— `
+				+ '不是同一个点，插件不猜着合（起点对不上时，本机一大批文件会被当成"对方删过它们"）。\n'
+				+ '按顺序往下走，二选一：\n'
+				+ `① 让对方**从本机这个基准点重导**一份更新包：导出时把「更新包：从哪个状态」选成`
+				+ `「第 ${state.bundle?.fullGeneration ?? '?'} 代 · 基准 ${mine}」；\n`
+				+ '② 或者让对方把**中间缺的那几份包**一起发过来，按顺序应用（本机站在链条上某一点，缺的是它后面那几步）。\n'
+				+ '都不行就让对方导一份**完整副本**：完整清单自带基准，可以直接应用（但它会镜像覆盖本机内容）。',
 		};
 	}
 	return { ok: true, kind: 'update' };
@@ -482,7 +496,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
-	// 更新包是累积的：接收方只要**应用过基准那个完整包**（世代 ≥ 基准世代）就能收
+	// 更新包是链条上的一环：接收方只要**站在它声明的那一点上**（基准指纹相等）就能收
 	const sameGeneration = header.baseGeneration === null
 		|| (sameLineage && state.generation >= header.baseGeneration);
 	const fastPath = sameGeneration;
@@ -658,7 +672,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				break;
 			}
 			case 'delete-local': {
-				// ⚠ **更新包里"没提到"不等于"被删了"**：它只装自完整副本以来变过的文件，
+				// ⚠ **更新包里"没提到"不等于"被删了"**：它只装自起点那一点以来变过的文件，
 				// 其余文件在包里根本不出现。要是照着三方比对的结果删，接收方仓库里
 				// 每个没被提到的文件都会被判成"对方删过它" —— 一个 1 万文件的仓库、
 				// 一个只改了 1 个文件的更新包，会算出"删除 10203 个"（用户报过的 bug）。
@@ -1139,7 +1153,6 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// - 包里有的 → 真的写成了包里的样子才记（冲突没写成的、失败的都不记）
 	// - 包里点名删的 → 划掉
 	// - 其余（我独有的、对方从没见过的文件）→ **保持原样**，绝不能记进去
-	//
 	// 以前这里图省事写成"当前仓库的完整清单"，于是把我独有的文件也记进了基准；
 	// 下次一应用，它们就成了"基准里有、包里没有" → 被当成"对方删过它"而删掉。
 	// （用户的报障：第一次不删、第二次才删。）
@@ -1159,20 +1172,28 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * 这个路径**不记进基准** —— 基准是"两边都见过的那一版"，对方手里是包里那一版，
 	 * 本机那一份相对基准就是一处改动，下次导更新包会带上它（`base` 由更新包自己说）。
 	 */
+	/** 应用**之前**那个基准点的清单（见下面 `nextFullFiles`） */
+	const anchorBefore: Record<string, FileRecord> = { ...(state.bundle?.fullFiles ?? {}) };
+	/** 这次**真的写成了一致**的那些条目（新基准点由它拼出来） */
 	const freshAnchor: Record<string, FileRecord> = {};
 	for (const entry of plan.info.header.entries) {
 		const current = await statFile(toNative(options.vaultRoot, entry.path));
 		const agreed = current
 			&& current.size === entry.size
 			&& Math.abs(current.mtime - entry.mtime) <= TOLERANCE;
+		// 这一个路径先按"没成一致"算：一致的话下面再补回来
+		delete anchorBefore[entry.path];
 		if (!agreed) {
 			delete baseline[entry.path];
 			continue;
 		}
 		baseline[entry.path] = { size: entry.size, mtime: entry.mtime };
-		if (isFull) freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
+		freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
 	}
-	for (const item of plan.info.header.deleted) delete baseline[item.path];
+	for (const item of plan.info.header.deleted) {
+		delete baseline[item.path];
+		delete anchorBefore[item.path];
+	}
 
 	// 目录基准同理：只记**两边都见过**的目录（包里点了名的，且这次真的在本地）
 	const keepDirs: string[] = [];
@@ -1180,20 +1201,41 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		if (await dirExists(toNative(options.vaultRoot, dir))) keepDirs.push(dir);
 	}
 	keepDirs.sort();
+	/**
+	 * **基准点跟着应用往前走**（0.11 起的链条模型）：
+	 *
+	 * 应用任何包之后，本机站到**这个包送到的那一点**上 —— 完整副本是它自己的清单，
+	 * 更新包是"起点那份清单 ＋ 包里写成了一致的条目 − 包里点名的删除"（＝对方导出时站的
+	 * 那一点，对方头部 `targetBaselineHash` 报的就是它的指纹）。
+	 *
+	 * 为什么必须与对方算得一模一样：两边的点对不上，下一个包就会报"基准对不上"，
+	 * 而链条本来要的就是"**点与点之间严格镜像、链条上每个节点内容都确定**"——
+	 * 谁也不必去猜、去合，文件也就不会冲突。
+	 *
+	 * 应用是"**确认的**基准点"（`pointConfirmed: true`）：对方导出时手里就是这一点，
+	 * 我这边也到了，两边都有。自己导出的那一点只算"可能的"（见 `export.ts`），
+	 * 等对方应用、并把这一点报成它的基准时再翻成确认。
+	 *
+	 * 收益（用户的原话：一台机器常导包、另一台常应用包，两边互相不知道对方在哪）：
+	 * 接收方应用完自动站到链条末端，下次它导出的更新包就"从末端往外延伸"（只有新改动），
+	 * 回传对方直接收 —— 不必再手动「立新基准」，那份几百 MB 的完整包也省了。
+	 * 开销：状态文件里的 `fullFiles` 从"只有完整副本时才有"变成"每次都写"
+	 * （一万文件约 +0.7–1 MB）；**读盘与 CPU 零额外开销**（复用这次本来就做过的扫描与编号计算）。
+	 */
+	const nextFullFiles: Record<string, FileRecord> = isFull
+		? { ...freshAnchor }
+		: { ...anchorBefore, ...freshAnchor };
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
-		files: baseline,
-		fullFiles: isFull ? freshAnchor : (state.bundle?.fullFiles ?? null),
-		fullGeneration: isFull
-			? plan.info.header.targetGeneration
-			: (state.bundle?.fullGeneration ?? null),
-		// 基准令牌：应用了完整副本 ＝ 我这边也站到这份基准上了（旧版包没记指纹就现算一个）；
-		// 应用更新包不动它 —— 基准没变，只是往后累积了改动
-		fullHash: isFull
-			? baselineOfBundle(plan.info.header)
-			: (state.bundle?.fullHash ?? null),
-		// 界面上要能说清"我站在哪份完整副本上"：应用完整副本时把它的文件名记下来
-		fullFile: isFull ? path.basename(options.file) : (state.bundle?.fullFile ?? null),
+		// 三方比对的祖先与"我站的那一点"是同一份东西（都是"两边都见过的那一份"）
+		files: nextFullFiles,
+		fullFiles: nextFullFiles,
+		fullGeneration: plan.info.header.targetGeneration,
+		// 令牌按新基准点重算：对方下一个包一比就知道我站在哪一点上
+		fullHash: listingHashOfFiles(nextFullFiles),
+		// 界面上要能说清"我站在哪一点上"：就是刚应用完的这一份包
+		fullFile: path.basename(options.file),
+		pointConfirmed: true,
 		history: isFull ? {} : (state.bundle?.history ?? {}),
 		dirs: keepDirs,
 	};
@@ -1217,7 +1259,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *
 	 * 立刻生成的话：对方收到又会生成一个，两边互相套娃、没完没了（用户报过"无限套娃"）；
 	 * 而且那些包里大半是"回声"（刚收到的内容原样发回去），纯属白占地方。
-	 * 改正记账：下次导出更新包时一起带上 —— 更新包本来就是"自基准累积"的，
+	 * 改正记账：下次导出更新包时一起带上 —— 那一环本来就是"从当前基准点往外延伸"的，
 	 * 我这半和对方那半都在里面；导完这笔账就结清（见 export.ts）。
 	 */
 	const pendingChanges = plan.report.pendingChanges ?? 0;

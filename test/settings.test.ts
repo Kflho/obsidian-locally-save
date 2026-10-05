@@ -146,7 +146,7 @@ check("settingsFrom(null) 得到默认值", settingsFrom(null), DEFAULT_SETTINGS
 check("settingsFrom(缺字段) 补齐默认值", settingsFrom({ enabled: false }), { ...DEFAULT_SETTINGS, enabled: false });
 check(
 	"settingsFrom(脏数据) 全部收敛",
-	settingsFrom({ enabled: 'yes', logLevel: 'xyz', syncAfterSaveDelay: 7, bundleSizeWarnLimit: '999TB', ribbonIcon: null, showStatusBar: 'on' }),
+	settingsFrom({ enabled: 'yes', logLevel: 'xyz', syncAfterSaveDelay: 7, bundleDiscard: 'yes', ribbonIcon: null, showStatusBar: 'on' }),
 	DEFAULT_SETTINGS,
 );
 checkTrue("settingsFrom 不把未知字段带进来", !('legacyField' in settingsFrom({ legacyField: 1 })), '多余的键会写回 data.json');
@@ -169,9 +169,6 @@ check(
 	Object.keys(settingsFrom({ startupNotice: true, greeting: '你好', rememberFingerprints: false, pruneSupersededBundles: false })),
 	Object.keys(DEFAULT_SETTINGS),
 );
-// 更新包大小提醒：以前是自由文本（认 200MB / 500KB / 1GB / 留空 / 0），现在只认下拉里那几个
-check("大小提醒：下拉选项外的值收敛到默认", settingsFrom({ bundleSizeWarnLimit: '300MB' }).bundleSizeWarnLimit, '');
-check("大小提醒：选项内的值原样保留", settingsFrom({ bundleSizeWarnLimit: '1GB' }).bundleSizeWarnLimit, '1GB');
 
 // 6c. 迁移：0.8.0 砍掉了「同步到本地副本」通道（targetDir / syncDirection 一起删了）。
 //     老用户的包原本就放在 `<目标文件夹>/.lsave/bundles` —— 把包目录迁到那个位置，

@@ -72,6 +72,16 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
 }
 
 /**
+ * 基准点是不是"两边都到过"（一句话，接在位置行后面）：
+ * 自己导出的那一点只是**可能的**基准点，对方应用了才算数；
+ * 应用别人的包落到的那一点，两边都已经在过。
+ */
+export function describePointConfirmed(bundle: PluginState['bundle']): string {
+	if (!bundle || bundle.pointConfirmed === null || bundle.pointConfirmed === undefined) return '';
+	return bundle.pointConfirmed ? ' · 已确认' : ' · 待对方合并';
+}
+
+/**
  * 同步包界面上那一行「本机现在站在哪儿」——**世代与状态编号必须一起写**。
  *
  * 为什么不能只写世代号：它只说"内容走到第几版"，
@@ -80,8 +90,8 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
 export function describeLocalState(state: PluginState): string {
 	const bundle = state.bundle;
 	const anchor = bundle?.fullGeneration !== null && bundle?.fullGeneration !== undefined
-		? `基于第 ${bundle.fullGeneration} 代完整副本${bundle.fullFile ? `（${bundle.fullFile}）` : ''}`
-		: '还没有基准（没导过、也没应用过完整副本）';
+		? `基准点：第 ${bundle.fullGeneration} 代${bundle.fullFile ? `（${bundle.fullFile}）` : ''}${describePointConfirmed(bundle)}`
+		: '还没有基准点（没导过、也没应用过完整副本）';
 	const id = state.stateId ? `状态 ${state.stateId.id}` : '状态编号还没算过（下次导出 / 应用时会有）';
 	return `本机：第 ${state.generation} 代 · ${anchor} · ${id}`;
 }
@@ -115,7 +125,7 @@ export function describeBundlePosition(state: PluginState): string[] {
 	}
 	const name = bundle.fullFile ?? '（不知道是哪份包，旧版本留下的记录）';
 	lines.push(
-		`基准：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}`,
+		`基准点：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}${describePointConfirmed(bundle)}`,
 	);
 	/**
 	 * 「我现在长什么样」—— 用**状态编号**说，不用世代号。

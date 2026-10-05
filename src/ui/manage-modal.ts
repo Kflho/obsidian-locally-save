@@ -24,7 +24,7 @@ import { openFolderInExplorer } from './reveal';
  * 但两边**共用同一个列表组件**，不会出现"这边能删、那边不能"的错位。
  *
  * 这里还有两件**跟"基准"有关**的事（用户提的两条需求都落在这儿）：
- * 1. **以本机现状立一份新完整包**（顶上的按钮）：本机领先于基准时，更新包会越滚越大，
+ * 1. **以本机现状立一份新完整包**（顶上的按钮）：多留一个还原点，
  *    把现状固化成分新完整包当基准，之后的更新包就从零开始攒；这份完整包同时也是备份；
  * 2. **把某一份完整副本设为基准**（每行那个按钮）：拿到别人发来的完整副本时用它 ——
  *    走的是应用那条路（先算报告再动手），本机已有的改动会留在原地成为"相对新基准的改动"。
@@ -82,7 +82,7 @@ export class BundleManagerModal extends Modal {
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
 			.setName('立新基准')
-			.setDesc('按本机现状导一份新完整副本并换基准：更新包从此从零累积。仓库文件不动')
+			.setDesc('按本机现状导一份新完整副本，并站到它上面（多一个还原点）。仓库文件不动')
 			.addButton(button => button
 				.setButtonText('立新基准…')
 				.onClick(() => { void this.confirmResetBaseline(); }));
