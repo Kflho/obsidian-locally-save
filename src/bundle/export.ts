@@ -198,6 +198,34 @@ export function plannedExportModes(want: { changes: boolean; full: boolean }): B
 	return modes;
 }
 
+/**
+ * **本机自基准以来改了什么** —— 只统计，不写盘。
+ *
+ * 给"要不要换基准""立一份新完整包"这类决定用的：用户得先看到"我这边有多少东西
+ * 是基准里没有的"，才知道换掉基准会不会把没传出去的改动留在一份老包上。
+ * 判据与导出挑成员同一条（大小 + 修改时间，2 秒容差），所以数字跟"下一次导更新包
+ * 会装几个文件"对得上。
+ *
+ * `null` ＝ 本机还没有基准（没导过、也没应用过完整副本），那就算不出来。
+ */
+export function describeLocalChanges(
+	state: PluginState,
+	inventory: Inventory,
+): { changed: number; deleted: number } | null {
+	const anchor = state.bundle?.fullFiles ?? null;
+	if (!anchor) return null;
+	let changed = 0;
+	let deleted = 0;
+	for (const [file, record] of inventory.files) {
+		const at = anchor[file];
+		if (!at || !sameRecord(record, at, DEFAULT_MTIME_TOLERANCE_MS)) changed++;
+	}
+	for (const file of Object.keys(anchor)) {
+		if (!inventory.files.has(file)) deleted++;
+	}
+	return { changed, deleted };
+}
+
 /** 一次导出"要装什么"的挑选结果，连同后续要用的基准数据（**不写盘**） */
 interface BundleWork {
 	state: PluginState;

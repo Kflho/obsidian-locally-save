@@ -1,15 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
-import type { BundleEntry, BundleInfo } from './format';
+import type { BundleEntry, BundleHeader, BundleInfo } from './format';
 import { baselineOfBundle, compareBaseline } from './baseline';
 import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
-import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
+import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pathExists, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { loadState, saveState } from '../sync/state';
-import type { StateIdInfo, StateIdRecord } from '../sync/state';
+import type { PluginState, StateIdInfo, StateIdRecord } from '../sync/state';
 import { compareStateId, computeStateId } from '../sync/state-id';
 import type { StateIdCompare } from '../sync/state-id';
 import { formatStamp } from '../utils/format';
@@ -65,33 +65,22 @@ export interface ApplyChoice {
 }
 
 /**
- * 「应用方式」的选项 —— **按包的类型给两套**，而不是一套里灰掉几个。
+ * 「应用方式」的选项 —— **按包的类型给两套**。
  *
- * 为什么两套不一样：**包里没有某个文件，在两种包里意思完全不同**。
- * - 完整副本是"完整清单" → 包里没有 ＝ 对方删过它 → 所以能承诺"以包为准 / 完全镜像"；
- * - 更新包只装了自完整副本以来变过的文件 → 包里没有**什么也不代表** →
- *   拿它做上面那两档会把仓库里其余文件全当成"该删"（一次清空，报过的 bug）。
+ * **完整副本没有选项**：它就是"另一台机器此刻的完整样子"，应用方式固定是镜像。
+ * 合并它会有无穷多种结果（本机改过的算谁的、本机独有的留不留、删除传不传播），
+ * 每一种都能配出一个"既不等于包、又不等于本机"的仓库 —— 之后导出的更新包 `base` 就对不上，
+ * 两台机器开始互相报"基准对不上"。收掉选择权，语义就只剩一句：**应用完，仓库就是那个包**。
  *
- * 所以更新包给的是**只动包里点名文件**的几档：以包为准、两边都留、以我为准，
- * 外加默认的"按设置"。用户想把"两边都改过"的那些一律听包的（不管包里那份是新的还是旧的），
- * 或者就是自己改坏了想退回对方发来的那一版 —— 都选它。
- * 以前更新包只留"按设置"一档，本地改过的一律保留，这件事根本做不到。
+ * **更新包只有"只动包里点名文件"的几档**：它只装自完整副本以来变过的文件，
+ * 包里没有**什么也不代表** —— 拿它清仓库一次就清空（报过的 bug）。
+ * 所以它给的是：按设置 / 以包为准 / 两边都留 / 以我为准。
  */
 export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 	full: [
 		{
-			key: 'normal',
-			label: '按设置（安全）：本地改过的保留，分歧留两份，我独有的文件不动',
-			strictness: 'normal',
-		},
-		{
-			key: 'bundle-wins',
-			label: '以包为准：分歧一律听包的（本地那份进回收目录），对方删过的也跟着删',
-			strictness: 'bundle-wins',
-		},
-		{
 			key: 'mirror',
-			label: '完全镜像：包里没有的本地文件全删（连我本机新建的），仓库 = 包',
+			label: '完全镜像（完整副本只有这一种）：包里没有的本地文件全挪进回收目录，仓库 = 包',
 			strictness: 'mirror',
 		},
 	],
@@ -145,17 +134,18 @@ export interface ApplyOptions {
 	/**
 	 * **强硬程度**（本次应用有多"以包为准"）。
 	 *
+	 * - **完整副本忽略它**：完整副本一律镜像（见 `mirrorFull`），传什么都不影响结果；
 	 * - `normal`（默认）：按设置 —— 本地改过的保留、分歧留两份、我独有的文件不动
 	 * - `listed-wins`（界面「以包为准」）：**只对包里点名的文件以包为准** —— 包里点名的文件一律
 	 *   （本地改过的那份进回收目录的「冲突」文件夹），包里**没提到**的一个不动。
 	 *   这是"我改坏了，想退回对方发来的那一版"用的那一档；因为不动没提到的文件，
 	 *   更新包（只有变过的那部分）也能开放它。
-	 * - `bundle-wins`：分歧一律听包的（本地那份进回收目录）；对方删过的文件跟着删，
-	 *   不管本地改没改 —— 用在"对方做过颠覆性改动"之后
-	 * - `mirror`：在 `bundle-wins` 之上，**包里没有的本地文件全删**（连我本机新建的也删）
-	 *   → 参与同步的那部分内容与包完全一致
+	 * - `bundle-wins` / `mirror`：**只对完整副本有过意义**（现在它一律镜像，所以这两个值
+	 *   在引擎里已经走不到那条分支）。留在类型里是为了兼容旧调用方：
+	 *   传给**更新包**会被 clamp 成 `normal`（`strictnessDowngraded` 标出来）——
+	 *   更新包只装变过的文件，拿它清仓库会一次清空。
 	 *
-	 * 排除规则命中的东西（配置目录等）四档都不动。
+	 * 排除规则命中的东西（配置目录等）都不动。
 	 */
 	strictness?: ApplyStrictness;
 	/** 本次临时覆盖"删不删多余文件"；不填就跟随设置 */
@@ -371,6 +361,70 @@ function matchesHistory(local: FileRecord, entry: BundleEntry): boolean {
 	);
 }
 
+/** 共同祖先检查的结论 */
+type AncestorCheck =
+	/** 放行。`first` ＝ 本机第一份（还没有基准）／`full` ＝ 同一条血脉的新完整副本／`update` ＝ 接在同一份基准上的更新包 */
+	| { ok: true; kind: 'first' | 'full' | 'update' }
+	| { ok: false; message: string };
+
+/**
+ * **这个包跟本机有没有共同祖先** —— 没有就不让应用（见 `planBundleApply` 里那段）。
+ *
+ * 三条规矩，判据都是"我这边站的基准"（`state.bundle.fullHash`，见 `bundle/baseline.ts`）：
+ *
+ * 1. **本机还没有基准** → 只收**完整副本**（它就是来立基准的），`first`。
+ *    更新包一律拒绝：它只有"变过的那部分"，没有起点连算都算不出来。
+ * 2. **完整副本** → 放行，`full`。它自带完整清单，就是一份新基准：
+ *    对方重新立了基准、导了一份新的完整副本发过来 —— 这是**正路**，不是"没有共同祖先"。
+ *    能不能接得上由三方比对逐文件回答（基准检查照样在，本机独有的文件不会被删）。
+ * 3. **更新包** → 必须跟本机**同一份**基准（`baselineHash` 相等），否则拒绝。
+ *    这条是要害：更新包只有变过的那部分，"基准里有、包里没有"才敢当成"对方删过它"；
+ *    基准不是同一份时，本机一大批文件会被当成"对方删过"删掉 —— **那是丢数据的路**。
+ *
+ * 旧包（那会儿还没记指纹）在更新包这一条上判不出来 → 拒绝，并说清下一步：
+ * 让对方用新版本重导一份，或者删掉本机状态文件从零开始（那等于"重新装机"）。
+ */
+function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck {
+	const mine = state.bundle?.fullHash ?? null;
+	// 第一次用（没有基准）：只收完整副本 —— 更新包没有起点，算都算不出来
+	if (mine === null) {
+		if (header.mode === 'full') return { ok: true, kind: 'first' };
+		return {
+			ok: false,
+			message: '这台机器还没有基准（没导过、也没应用过完整副本）：更新包是"从某份完整副本往后累积"的差量，'
+				+ '没有起点就没法算。让对方先导一份**完整副本**发过来，应用它之后这台机器才有基准。',
+		};
+	}
+	// 完整副本：自带完整清单，就是一份新基准 —— 放行（对方重新立基准是正路）
+	if (header.mode === 'full') return { ok: true, kind: 'full' };
+	const theirs = baselineOfBundle(header);
+	if (theirs === null) {
+		return {
+			ok: false,
+			message: '这个更新包是旧版本插件导的（没记基准指纹），跟本机的基准对不上号。'
+				+ `本机现在的基准是 ${mine} —— 让对方用新版本插件按这个基准重导一份；`
+				+ '要么删掉本机的状态文件重新开始（那等于重新装机，本机会当成第一份完整副本收下）。',
+		};
+	}
+	if (theirs !== mine) {
+		// 差量包的特例：**它要送到的地方正好就是我站的基准** → 放行。
+		// 这种情况下包里点名要送的东西我全都有（应用它一个文件都不会改），
+		// 而报告里那句 `targetIsMine` 正是给用户看的"白跑一趟，让对方按我的指纹重导"。
+		// 拦在这里反而看不出这个结论，只剩一句"基准对不上"。
+		if (header.targetBaselineHash !== undefined && header.targetBaselineHash === mine) {
+			return { ok: true, kind: 'update' };
+		}
+		return {
+			ok: false,
+			message: `基准对不上：这个更新包基于「${theirs}」，本机是「${mine}」。`
+				+ '更新包只有"变过的那部分"，基准不是同一份的话，本机一大批文件会被当成"对方删过"删掉 —— 所以不让应用。'
+				+ `下一步二选一：让对方按本机的基准指纹 ${mine} 重导一份更新包（认指纹，别只看第几代）；`
+				+ '或者让对方导一份**完整副本**发过来（完整清单自带基准，本机可以直接应用）。',
+		};
+	}
+	return { ok: true, kind: 'update' };
+}
+
 /** 只读地算一遍：包与本地差在哪儿、能同步到什么程度 */
 export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan> {
 	const info = await readBundleInfo(options.file);
@@ -383,13 +437,32 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	const requested = options.strictness ?? 'normal';
+	/**
+	 * **完整副本一律"完全镜像"**（不合并、不按设置）。
+	 *
+	 * 为什么把选择权收掉：完整副本是"另一台机器此刻的完整样子"，合并它会有无穷多种结果 ——
+	 * 本机改过的算谁的、本机独有的留不留、删除要不要传播，每一种都能配出一个"看起来对、
+	 * 实际上两边都不一样"的仓库。仓库一旦既不等于包、又不等于本机，后面导出的更新包
+	 * `base` 就对不上，两台机器开始互相报"基准对不上"（用户报过这类乱七八糟的错误）。
+	 *
+	 * 改成镜像之后语义只有一句：**应用完，这个仓库就是那个包**。
+	 * - 本机独有的文件**挪进回收目录**（不是删掉，随时捞得回来）；
+	 * - 本机改过的文件被包的版本覆盖（旧的同样进回收目录）；
+	 * - 包里没提到的目录也跟着清掉。
+	 *
+	 * 更新包不受影响：它只装"变过的那部分"，仍然是"只动它点名的文件"那一套
+	 * （包里没提到 ≠ 对方删了它）。那边**没有共同祖先就直接拒收**（见 `checkAncestor`），
+	 * 所以也不存在"合出一个乱七八糟的状态"。
+	 */
+	const mirrorFull = header.mode === 'full';
 	// **更新包不开放破坏性方式**（引擎层兜底，不只靠界面）：
 	// 更新包里只装了变过的文件，"以包为准 / 完全镜像"会把它没提到的文件全当成"该删"，
 	// 一次就把仓库清空。所以不是完整副本时，这两档一律降级成 normal 并在报告里标出来。
 	// （`listed-wins`（以包为准）不在此列：它只动包里点名的那些，更新包也能用。）
 	const destructive = requested === 'bundle-wins' || requested === 'mirror';
-	const strictness: ApplyStrictness = header.mode === 'full' || !destructive ? requested : 'normal';
-	const strictnessDowngraded = strictness !== requested;
+	// 完整副本一律是镜像档；更新包用不了破坏性两档（降级成按设置）
+	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : (destructive ? 'normal' : requested);
+	const strictnessDowngraded = !mirrorFull && strictness !== requested;
 	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
 	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
 	const conflictStrategy = strictness === 'normal'
@@ -411,11 +484,43 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		|| (sameLineage && state.generation >= header.baseGeneration);
 	const fastPath = sameGeneration;
 
+	/**
+	 * **没有共同祖先就拒绝**（只放行完整副本）。
+	 *
+	 * - 本机**还没有基准**（第一次用、或刚把状态文件清了）→ 只收**完整副本**：
+	 *   它就是来立基准的，而且应用方式固定是镜像（见 `mirrorFull`），不存在"猜着合并"；
+	 * - **更新包**必须跟本机**同一份**基准 —— 它只有变过的那部分，
+	 *   基准不是同一份的话，本机一大批文件会被当成"对方删过"删掉。拒绝，并说清下一步。
+	 */
+	const ancestor = checkAncestor(state, header);
+	if (!ancestor.ok) throw new Error(ancestor.message);
+
 	// ------------------------------------------------------------ 三方
 	const local = await scanTree(options.vaultRoot, {
 		exclude: excludePatterns(settings.excludePatterns, options.configDir),
 		skipTopLevelDirs: [VAULT_TRASH_DIR],
 	});
+
+	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
+	// （包说"我以为你原来是这样"，对一台新机器来说这就是它的基准）
+	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	/**
+	 * 包**自己带的 base 优先**（它比本机那份记录更贴近事实）。
+	 *
+	 * 为什么不能让本机记录压过它：本机那份记录只是"上一次我这边记下的样子" ——
+	 * 对方重新立过基准、或者我这边中间导/应用过别的包时，它对**这个包**来说就是过期的。
+	 * 过期的后果很具体：接收方明明停在"对方发过的中间版本"上（包的 `history` 里写着那一版），
+	 * 却因为 base 对不上被判成"本地改动"，于是不走 `history` 那条路 ——
+	 * 白白留一个冲突副本，甚至拿包里那份盖掉本地（用户报过的"应用完反而多出一堆冲突"）。
+	 *
+	 * 没有 base 的（完整副本、旧包）不碰本机记录：那种情况下本机的记忆才是唯一的依据。
+	 */
+	const seed = (path: string, size?: number, mtime?: number) => {
+		if (size === undefined || mtime === undefined) return;
+		baseline[path] = { size, mtime };
+	};
+	for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
+	for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
 
 	// "对方"＝包：完整包是完整清单；更新包只有它提到的那部分（这正是我们要的 ——
 	// 没提到的一律当作"与我无关"，绝不推断删除）
@@ -425,18 +530,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		dirs: new Set(header.emptyDirs ?? []),
 	};
 
-	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
-	// （包说"我以为你原来是这样"，对一台新机器来说这就是它的基准）
-	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
-	const seed = (path: string, size?: number, mtime?: number) => {
-		if (baseline[path] === undefined && size !== undefined && mtime !== undefined) {
-			baseline[path] = { size, mtime };
-		}
-	};
-	for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
-	for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
-
-	// `listed-wins` 也走三方比对：它要的正是"哪些是包里点名的、哪些只是我独有的"，
+	// 完整副本走上面那段镜像逻辑（不比对）；更新包按 `normal` / `listed-wins` 走三方比对 ——
+	// `listed-wins` 要的正是"哪些是包里点名的、哪些只是我独有的"
 	const planned = strictness === 'normal'
 		? planSync(local, remote, baseline, {
 			// 包是只读的：借"仅下载"方向只为不产生写回对方的动作，冲突裁决仍听设置
@@ -446,7 +541,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			propagateDeletions,
 			mtimeToleranceMs: TOLERANCE,
 		})
-		// 强制两档不走三方比对：目标是"仓库 == 包"，直接两侧比就行
+		// 完整副本与强制档都不走三方比对：目标是"仓库 == 包"，直接两侧比就行
 		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
 		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [], removedFolders: [] };
 
@@ -461,14 +556,28 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let moves = 0;
 	/** 本地多出来、这次要删的（对方删过的，或镜像档下我独有的） */
 	let extraDeletes = 0;
-
 	const localDeleted = new Set(header.deleted.map(item => item.path));
 	/** 这次按用户的选择跳过的删除（包里点名要删，但留着） */
 	let deletesSkipped = 0;
 	const skipDeletes = options.skipDeletions === true;
 
-	// ------------------------------------------------- 强制档：直接"以包为准"
-	if (strictness !== 'normal') {
+	// ------------------------------------------- 不走三方比对的两条路
+	//
+	// **镜像**（完整副本）：规则只有一句 —— 应用完，这个仓库就是那个包。
+	//   - 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先进回收目录）；
+	//   - 包里没提到的本地文件：**全删**（连本机新建的也删）—— 完整副本是完整清单，
+	//     "包里没有它"就是它不该在；
+	//   - 不搞三方比对、不按设置合并：合并出来的状态既不等于包、也不等于本机，
+	//     下一次导出的更新包 `base` 就对不上，两台机器开始互相报"基准对不上"。
+	//
+	// **`listed-wins`（界面「以包为准」，只给更新包）**：只动**包里点名**的文件 ——
+	//   - 条目一律用包里的版本（不管包里那份是新的还是旧的），本地改过的那份进回收目录；
+	//   - `header.deleted` 点名的照删；
+	//   - **包里没提到的一个不动**（更新包只有变过的那部分，"没提到"什么也不代表）。
+	//
+	// 两条都不能走三方比对：因为"只有本地改了、包里没改"时三方比分会判成"上传"（本地说了算），
+	// 在包的方向上被过滤掉 —— 那就不叫"以包为准"了。
+	if (mirrorFull || strictness === 'listed-wins') {
 		// ① 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
 		for (const entry of header.entries) {
 			const here = local.files.get(entry.path);
@@ -489,18 +598,22 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				kind: 'write',
 				path: entry.path,
 				entry,
+				// 本地那份动过的先挪进回收目录，别让"以包为准"顺手把本地改动抹掉
 				backup: localChanged && keepBackup,
 			});
 		}
 
-		// ② 包里**没点名**的本地文件：
-		//   `listed-wins`（以包为准）→ 一个都不动 —— 包里没提到 ≠ 对方删了它。
-		//     更新包只有变过的那部分，这正是"以包为准"那一档敢给更新包用的原因；
-		//     但包里**点名要删**的那些（`deleted`）要删 —— 那是它明说的，
-		//     本地那份先进回收目录（不备份的例外只留给"完全镜像"）。
-		//   `bundle-wins` → 只删"基准里也有"的（＝对方删过的；点名删除的文件在基准里，会被这里覆盖到）
-		//   `mirror`      → 全删（连本机新建的也删）
-		if (strictness === 'listed-wins') {
+		// ② 包里**没有**的本地文件
+		if (mirrorFull) {
+			// 镜像的承诺就是"仓库 == 包"：全删（连本机新建的也删）。
+			// 走的是 `delete` 动作，所以开着回收目录时它们都进回收目录，捞得回来。
+			for (const file of local.files.keys()) {
+				if (entriesByPath.has(file)) continue;
+				deletes++;
+				actions.push({ kind: 'delete', path: file });
+			}
+		} else {
+			// `listed-wins`：只删 `header.deleted` **点名**的那些，其余一个不动
 			for (const item of header.deleted) {
 				if (!local.files.has(item.path)) continue;
 				if (skipDeletes) {
@@ -509,18 +622,6 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				}
 				deletes++;
 				actions.push({ kind: 'delete', path: item.path });
-			}
-		} else {
-			for (const file of local.files.keys()) {
-				if (entriesByPath.has(file)) continue;
-				const seenBefore = baseline[file] !== undefined;
-				if (strictness === 'bundle-wins' && !seenBefore) continue;
-				if (skipDeletes) {
-					deletesSkipped++;
-					continue;
-				}
-				deletes++;
-				actions.push({ kind: 'delete', path: file });
 			}
 		}
 	}
@@ -548,8 +649,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					kind: 'write',
 					path: action.path,
 					entry,
-					// 以包为准/镜像时，本地那份动过的要先挪进回收目录（默认模式下走到这儿说明它没动过，没什么可备份的）
-					backup: strictness !== 'normal' && localChanged && keepBackup,
+					// 完整副本镜像时，本地那份动过的要先挪进回收目录（默认档下走到这儿说明它没动过）
+					backup: mirrorFull && localChanged && keepBackup,
 				});
 				break;
 			}
@@ -639,7 +740,22 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const anchor = state.bundle?.fullFiles ?? null;
 	let pendingChanges = 0;
 	let pendingDeletes = 0;
-	if (anchor) {
+	/**
+	 * 应用**完整副本**时，"我这边对方还没有的"要按**这个包**当基准算，不能按旧基准 ——
+	 * 基准马上就要换成它了。
+	 *
+	 * 算得还特别准：包里的清单与本地一致的有 `synchronized` 个，其余本地文件
+	 * （本机改过的、本机独有的）就是"我这一半"。本机删过的那些在包里有、本地没有，
+	 * 也算我这一半的删除。
+	 *
+	 * 前提是**本机有基准**：没有基准时这台机器压根导不出更新包，算这个没有意义。
+	 */
+	if (anchor && header.mode === 'full' && strictness === 'normal') {
+		pendingChanges = local.files.size - synchronized;
+		for (const entry of header.entries) {
+			if (!local.files.has(entry.path)) pendingDeletes++;
+		}
+	} else if (anchor) {
 		for (const [file, record] of local.files) {
 			// 跟基准一模一样 → 不是改动
 			const atAnchor = anchor[file];
@@ -671,18 +787,17 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// ------------------------------------------------- 目录（空文件夹）
 	//
 	// 包里的目录 = `emptyDirs` ＋ 所有条目的上级目录（后者随文件写入顺带建出来）。
-	// 本地有、包里没有的**空**目录要不要删，三档不同：
-	// - `mirror`（强制一致）：删 —— 这一档的承诺就是"仓库和包完全一样"（文件如此，目录也该如此）；
-	// - `bundle-wins`：只删**基准里记过**的（＝对方删过它），本机新建的留着 ——
-	//   和它处理文件的那条规矩一模一样（`seenBefore`）；
-	// - `normal`：与 `bundle-wins` 同，但还要看「同步删除」开关。
+	// 本地有、包里没有的**空**目录要不要删：
+	// - **完整副本镜像**：删 —— 它的承诺就是"仓库和包完全一样"（文件如此，目录也该如此）；
+	// - 更新包（`normal`）：只删**基准里记过**的（＝对方删过它），本机新建的留着，
+	//   还要看「同步删除」开关。
 	// 执行时只走 `rmdir`（非空必然失败），所以判断错了也只会"没删掉"，不会连带删掉有内容的目录。
 	const bundleDirs = dirsInBundle(header);
 	/**
 	 * 这个包**记没记**空文件夹。
 	 *
 	 * 早期版本导的包头部没有 `emptyDirs` 这个字段 —— 它没能力表达"我有这些空文件夹"，
-	 * 所以**不能**拿它反推"本地多出来的目录都是对方没有的"：那样"完全镜像"会把本机
+	 * 所以**不能**拿它反推"本地多出来的目录都是对方没有的"：那样完整副本镜像会把本机
 	 * 和对方都有的空文件夹也删掉。这种情况下目录只建不删，并在报告里说明白。
 	 */
 	const bundleRecordsDirs = Array.isArray(header.emptyDirs);
@@ -696,7 +811,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		for (const dir of local.dirs) {
 			if (bundleDirs.has(dir)) continue;
 			if (filled.has(dir)) continue; // 里面有文件：交给文件规则，别在这里抢着删
-			if (strictness === 'mirror') {
+			// 完整副本是镜像：包里没有的目录都得清掉（连本机新建的）
+			if (mirrorFull) {
 				candidates.push(dir);
 				continue;
 			}
@@ -743,7 +859,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		targetIsMine: (header.targetBaselineHash ?? null) !== null
 			&& header.targetBaselineHash === state.bundle?.fullHash,
 		peerStateId: header.stateId ?? null,
-		forced: strictness !== 'normal',
+		forced: mirrorFull || strictness !== 'normal',
 		adds,
 		overwrites,
 		skips: synchronized,
@@ -770,7 +886,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		bundleDirsUnknown: !bundleRecordsDirs,
 	};
 
-	return { info, report, actions, foldersToRemove, options: { conflictStrategy, propagateDeletions, keepBackup } };
+	return {
+		info,
+		report,
+		actions,
+		foldersToRemove,
+		options: { conflictStrategy, propagateDeletions, keepBackup },
+	};
 }
 
 /**
@@ -868,8 +990,17 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					break;
 				}
 				case 'delete': {
-					if (keepBackup) await moveToTrash(target, trashRoot, action.path, stamp);
-					else await fs.promises.rm(target, { force: true });
+					/**
+					 * 它可能**已经被这次应用里的前一个动作挪走了**：完整副本镜像时，
+					 * "本地这里是个同名文件夹、包里是个文件"会让 write 动作把整个文件夹挪进回收目录，
+					 * 而计划里同时还有"删掉那个文件夹里的文件"这条（两者说的是同一批东西）。
+					 * 源文件已经不在就别再当成失败 —— 它是被**同一个操作**收拾掉的，
+					 * 东西在回收目录里好好的（以前这里会多报一条 ENOENT，看着像出错）。
+					 */
+					if (!plan.report.forced || await pathExists(target)) {
+						if (keepBackup) await moveToTrash(target, trashRoot, action.path, stamp);
+						else await fs.promises.rm(target, { force: true });
+					}
 					result.deleted++;
 					break;
 				}
@@ -1011,6 +1142,10 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *
 	 * 从"包自己的清单"出发还有个好处：只拿到一半（有些文件写失败了）时，基准也只包含
 	 * 真正拿到的那部分 —— 不会声称"我有"，也就不会把没有的算成"被我删了"。
+	 *
+	 * 本地这一份跟包里那一版不一致时的处理（冲突里本地那份赢了、或者压根没写成）：
+	 * 这个路径**不记进基准** —— 基准是"两边都见过的那一版"，对方手里是包里那一版，
+	 * 本机那一份相对基准就是一处改动，下次导更新包会带上它（`base` 由更新包自己说）。
 	 */
 	const freshAnchor: Record<string, FileRecord> = {};
 	for (const entry of plan.info.header.entries) {

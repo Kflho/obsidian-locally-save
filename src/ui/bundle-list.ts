@@ -41,6 +41,15 @@ export interface BundleListViewOptions {
 	/** 行内主动作（如「应用…」「检查」）；不给就不显示这个按钮 */
 	actionLabel?: string;
 	onAction?: (item: ManagedBundle) => void;
+	/**
+	 * **完整副本**那一行多出来的动作（如「以这一份为基准…」）。
+	 *
+	 * 只对完整副本出现：更新包说不了"我以你为基准"（它自己还是靠一份完整副本累积的）。
+	 * 给的是回调而不是直接在这里干活 —— 真正的动作走应用对话框（先出报告、再动手），
+	 * 免得管理窗口里点一下就把仓库改了。
+	 */
+	baselineLabel?: string;
+	onBaseline?: (item: ManagedBundle) => void;
 	/** 某个包被挪进回收站之后（导入弹窗要把当前选中的清掉） */
 	onRemove?: (file: string) => void;
 	/** 显示回收站那一行（只有管理弹窗要） */
@@ -197,16 +206,11 @@ export class BundleListView {
 			cls: `locally-save-row is-bundle${item.file === this.selected ? ' is-selected' : ''}`
 				+ `${item.header ? '' : ' is-unknown'}`,
 		});
+		// 文件名不写进行里（用户提的：名字一长串挤占大量空间，一行就废了）——
+		// 想认它是哪个包，鼠标停在这行上就是完整路径；「复制路径」也还在。
 		row.setAttribute('title', item.error ? `读不出包头部：${item.error}` : item.file);
-		// 类型由分组标题说了，行里不再重复标一遍；世代要写出来 ——
-		// 两台机器的 full/ 目录各有一堆包时，靠它才看得出谁跟谁是同一份基准
-		row.createSpan({ text: item.name, cls: 'locally-save-file' });
-		row.createSpan({
-			text: `${formatBytes(item.size)} · ${formatTime(item.mtime)}`
-				+ `${this.describeGeneration(item)}`
-				+ (item.header ? '' : '（读不出头部，可能不是我们的包）'),
-			cls: 'locally-save-reason',
-		});
+		// 类型由分组标题说了，行里只写**看包的判据**：第几代 → 第几代 · 状态编号 · 大小 · 时间
+		row.createSpan({ text: this.describeRow(item), cls: 'locally-save-reason' });
 		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"
 		if (this.local?.bundle?.fullFile === item.name) {
 			row.createSpan({ text: '← 本机现在的基准', cls: 'locally-save-current' });
@@ -215,6 +219,11 @@ export class BundleListView {
 		const actions = row.createDiv({ cls: 'locally-save-bundle-actions' });
 		if (this.options.actionLabel && this.options.onAction) {
 			this.addButton(actions, this.options.actionLabel, false, () => this.options.onAction?.(item));
+		}
+		// 「以这一份为基准」只给完整副本：更新包是按某份完整副本累积的，
+		// 自己都还站在别人的基准上，谈不上"以我为基准"
+		if (this.options.baselineLabel && this.options.onBaseline && item.mode === 'full' && item.header) {
+			this.addButton(actions, this.options.baselineLabel, false, () => this.options.onBaseline?.(item));
 		}
 		this.addButton(actions, '文件夹', false, () => openFolderInExplorer(
 			item.dir,
@@ -235,6 +244,25 @@ export class BundleListView {
 	}
 
 	/**
+	 * 一行里写的那些字 —— **没有文件名**，只有认包要用的判据。
+	 *
+	 * 顺序按"最想先看到的"排：**是第几代 · 状态编号**（认包靠这两个），再是大小与修改时间。
+	 * 用户提的："名字一长串挤占大量空间" —— 包名里那串本来就是这几项拼出来的
+	 * （`<仓库名>-完整-36代-状态xxxx-5f4807`），把它整个抄一遍等于同一件事说两遍，
+	 * 还把行撑到换行。要文件名的地方照样有：鼠标停在行上是完整路径，「复制路径」也在。
+	 *
+	 * 头部读不出来的（不是我们的包 / 传坏了）连世代都没有，那就只剩大小与时间，
+	 * 后面跟一句"读不出头部" —— 它照样列得出来、删得掉。
+	 */
+	private describeRow(item: ManagedBundle): string {
+		const size = formatBytes(item.size);
+		const time = formatTime(item.mtime);
+		return item.header
+			? `${this.describeGeneration(item)} · ${size} · ${time}`
+			: `${size} · ${time} · 读不出头部（可能不是我们的包）`;
+	}
+
+	/**
 	 * 一个包"是第几代"——**世代与状态编号一起写**。
 	 *
 	 * 只写世代会认错包：两台机器各自 +1 会碰号；状态编号才是"这一刻文件长什么样"。
@@ -248,7 +276,7 @@ export class BundleListView {
 		const generation = header.mode === 'full'
 			? `第 ${header.targetGeneration} 代`
 			: `第 ${header.baseGeneration ?? '?'} → ${header.targetGeneration} 代`;
-		return ` · ${generation} · ${stateId}`;
+		return `${generation} · ${stateId}`;
 	}
 
 	/** 顶上那行：本机第几代、基于哪份完整副本、状态编号是什么 */

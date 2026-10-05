@@ -156,6 +156,41 @@ function applyOptions(
 
 const STATE_A = path.join(ROOT, 'state-a.json');
 const STATE_B = path.join(ROOT, 'state-b.json');
+/**
+ * 一份**跟那些更新包同源**的完整副本（＝ A 的第一份完整包，内容一字不差）。
+ *
+ * 为什么单独立一份：更新包（`KEPT_CHANGES` / `fourth` …）都以 A 的**第一份**完整包为基准，
+ * 而机器要应用更新包就必须跟它同一份基准（见 `checkAncestor`）。
+ * 后面导出会清掉被取代的旧包，所以留一份稳定的副本给那些机器当起点。
+ */
+const WITH_KEEP = path.join(OUT, 'with-keep.lsave');
+
+/**
+ * 手搓一个「更新包」：只给要覆盖的头部字段。
+ *
+ * 用来演那几处**真导出凑不出来**的边角 —— 真包的 `emptyDirs` 是"导出方全部空文件夹"的清单、
+ * 跟着仓库内容走，临时造不出"包里就有这几个空文件夹"这种特定清单。
+ * 写出来的包跟真包一样走 plan / execute 两步，不是替身。
+ */
+async function craftBundle(file: string, overrides: Partial<Parameters<typeof writeBundle>[1]>): Promise<string> {
+	await writeBundle(file, {
+		format: BUNDLE_FORMAT,
+		version: BUNDLE_VERSION,
+		bundleId: '00000000-0000-4000-8000-0000000000ee',
+		parentBundleId: null,
+		created: Date.now(),
+		mode: 'changes',
+		vault: '我的笔记',
+		lineage: 'crafted-lineage',
+		source: { copyId: 'crafted-copy', generation: 0 },
+		baseGeneration: 0,
+		targetGeneration: 1,
+		deleted: [],
+		emptyDirs: [],
+		...overrides,
+	}, []);
+	return file;
+}
 
 // -------------------------------------------------------------------- 用例
 // 1. 导出完整包
@@ -254,19 +289,35 @@ const again = await planBundleApply(applyOptions(B, STATE_B, fourth.file as stri
 check('已经应用过的包 → 同步程度 100%', again.report.syncPercent, 100);
 check('全部条目都被跳过', again.report.skips, 2);
 
-// 5a2. 基准丢了（比如状态文件被删）也不该误判成冲突：
+// 刚才应用的那个完整包（`FILE_CHANGES` 所基于的那一份）存一份稳定的副本：
+// 后面凡是要"先应用完整副本、再应用更新包"的机器都得从它起步（同一份基准才收更新包）
+fs.copyFileSync(FILE_FULL, WITH_KEEP);
+
+// 5a2. 手里停在我发过的**中间版本**上 → 不算冲突：
 //      包里记着"这个文件经历过的中间版本"，认得出"这是你发过的，不是我自己改的"
+//
+// （这一条以前是拿"状态文件被删"来演的。现在**没有共同祖先就直接拒绝应用**
+//   —— 见 `checkAncestor`，所以这里换成等价的一幕：本机跟对方同一份基准，
+//   但这个文件的本地版本是我上一轮导出去的中间版本 —— 基准那一栏对不上、
+//   `history` 对得上，于是走"直接覆盖、不留冲突副本"。）
 const I = path.join(ROOT, 'machineI');
-const STATE_LOST = path.join(ROOT, 'state-lost.json');
+const STATE_I = path.join(ROOT, 'state-i.json');
 fs.mkdirSync(I, { recursive: true });
+// 拿一份稳定副本应用：后面每导一个新包都会清掉被取代的旧包，而这一步要用"那一份包"
+// （WITH_KEEP 跟这些更新包同源：同一份基准才收更新包，见 `checkAncestor`）
+await executeBundlePlan(
+	await planBundleApply(applyOptions(I, STATE_I, WITH_KEEP)),
+	applyOptions(I, STATE_I, WITH_KEEP),
+);
+write(I, 'notes/a.md', 'I 自己的东西', T3 - 500_000); // 应用之后再改的 → 基准里是 AAA
 const fourthInfoForHistory = await readBundleInfo(fourth.file as string);
 const aEntry = fourthInfoForHistory.header.entries.find(entry => entry.path === 'notes/a.md');
 const past = aEntry?.history?.[0];
 checkTrue('包里带着中间版本记录', past !== undefined, JSON.stringify(aEntry?.history));
 if (past) {
 	write(I, 'notes/a.md', 'AAA', past.mtime); // 手里正是那个中间版本（记录对得上）
-	const lostPlan = await planBundleApply(applyOptions(I, STATE_LOST, fourth.file as string));
-	check('基准丢了、但手里是我发过的版本 → 不算冲突', lostPlan.report.conflicts, 0);
+	const lostPlan = await planBundleApply(applyOptions(I, STATE_I, fourth.file as string));
+	check('手里是我发过的中间版本 → 不算冲突', lostPlan.report.conflicts, 0);
 	checkTrue('而且认得出来', lostPlan.report.historyMatches >= 1, `实际 ${lostPlan.report.historyMatches}`);
 }
 
@@ -317,7 +368,7 @@ try {
 }
 checkTrue('损坏的包在计划阶段就被拒绝', thrown.includes('校验失败'), `实际：${thrown}`);
 
-// 8. 删除与新增：与副本同步同一套规则 —— 只有"基准里也有、这次包里没有"的才删（＝对方删过的）
+// 8. 删除与新增：应用**完整副本**是镜像 —— 包里没有的本地文件（含"对方从没见过"的）都挪进回收目录
 const C = path.join(ROOT, 'machineC');
 const STATE_C = path.join(ROOT, 'state-c.json');
 fs.mkdirSync(C, { recursive: true });
@@ -326,12 +377,12 @@ const full = await exportBundle(exportOptions(A, STATE_A));
 checkTrue('再导一个完整包', full.file !== null, full.reason ?? '');
 const fullInfo = await readBundleInfo(full.file as string);
 
-// C 先应用一遍，于是它有了基准 —— 删除判断全靠基准
+// C 先应用一遍，于是它有了基准
 await executeBundlePlan(
 	await planBundleApply(applyOptions(C, STATE_C, full.file as string)),
 	applyOptions(C, STATE_C, full.file as string),
 );
-// C 自己也有一个"对方从没见过"的文件
+// C 自己也有一个"包里根本没有"的文件
 write(C, 'only-mine.md', 'MINE', fullInfo.header.created + 60_000);
 
 // 对方删掉一个文件、又加了一个，重新导完整包
@@ -343,18 +394,20 @@ const second = await exportBundle(exportOptions(A, STATE_A));
 checkTrue('第二个完整包', second.file !== null, second.reason ?? '');
 
 plan = await planBundleApply(applyOptions(C, STATE_C, second.file as string));
-check('对方删掉的会被删', plan.report.deletes, 1);
-check('算进"对方删过"这一类', plan.report.extraDeletes, 1);
+check('镜像：要挪走 2 个（对方删掉的 notes/a.md + 我独有的 only-mine.md）', plan.report.deletes, 2);
+check('两个都算"包里没有它"（不是包里点名删的）', plan.report.extraDeletes, 2);
 check('对方新加的是新增', plan.report.adds, 1);
 
 result = await executeBundlePlan(plan, applyOptions(C, STATE_C, second.file as string));
 check('对方删掉的文件这边也删了', exists(C, victim), false);
 check('删掉的进了回收目录（没直接消失）', fs.existsSync(path.join(C, '.trash', 'locally-save')), true);
-checkTrue('我独有的文件一个都没删', exists(C, 'only-mine.md'), '基准里没有的文件不该删');
+// 镜像的承诺就是"仓库 == 包"：本机独有的文件也留不下（但它是**挪进回收目录**，不是真删）
+checkTrue('本机独有的文件也挪走了（镜像的语义）', !exists(C, 'only-mine.md'), '镜像不该留下包里没有的文件');
+check('那份同样在回收目录里，捞得回来', findBackups(C, 'only-mine.md'), ['MINE']);
 check('对方新加的文件到了', read(C, 'brand-new.md'), 'NEW');
 
-// 9. 冲突：**新的那份占原名**，旧的那份存成冲突副本 —— 与副本同步完全一致
-// （以前是"包的内容无条件占原名"，本地改得更新也没用 —— 这就是用户报的那个问题）
+// 9. 应用**完整副本**时的"两边都改过"：镜像是**包里的版本占原名**，本机那份挪进回收目录
+// （更新包那边才是"留两份、新的占原名"，见用例 15；完整副本不合并，所以没有冲突副本这一说）
 const F = path.join(ROOT, 'machineF');
 const STATE_F = path.join(ROOT, 'state-f.json');
 fs.mkdirSync(F, { recursive: true });
@@ -365,23 +418,23 @@ await executeBundlePlan(
 );
 check('基准建立：文件在 F 里', read(F, 'brand-new.md'), 'NEW');
 
-// 两边都改同一个文件，F 改得更新
+// 两边都改同一个文件，F 改得更新（镜像不看新旧：包的版本一律赢）
 write(F, 'brand-new.md', 'F 改的（更新）', Date.now() + 600_000);
 write(A, 'brand-new.md', 'A 改的（更旧）', Date.now() + 300_000);
 const thirdFull = await exportBundle(exportOptions(A, STATE_A));
 checkTrue('第三个完整包', thirdFull.file !== null, thirdFull.reason ?? '');
 
 plan = await planBundleApply(applyOptions(F, STATE_F, thirdFull.file as string));
-check('两边都改过 → 冲突', plan.report.conflicts, 1);
+check('镜像没有"冲突"这一说', plan.report.conflicts, 0);
 result = await executeBundlePlan(plan, applyOptions(F, STATE_F, thirdFull.file as string));
-check('新的那份（本地的）占原名', read(F, 'brand-new.md'), 'F 改的（更新）');
-checkTrue('仓库里**不再**留下冲突副本', !hasConflictCopy(F, '.'), '留在原地的副本会跟着同步传出去');
+check('包里的版本占原名（哪怕本机那份更新）', read(F, 'brand-new.md'), 'A 改的（更旧）');
+checkTrue('仓库里不会留下冲突副本（镜像不需要它）', !hasConflictCopy(F, '.'), '留在原地的副本会跟着同步传出去');
 checkTrue(
-	'输的那份进了回收目录的「冲突」文件夹',
-	hasConflictCopy(F, '.trash/locally-save'),
-	'没找到冲突文件夹',
+	'本机改过的那份挪进了回收目录（捞得回来）',
+	findBackups(F, 'brand-new.md').includes('F 改的（更新）'),
+	'没在回收目录里找到本机那一份',
 );
-check('回收目录里存的是包里的内容', readConflictCopy(F), 'A 改的（更旧）');
+check('回收目录里存的就是它（一字不差，没被谁改过）', readConflictCopy(F), 'F 改的（更新）');
 
 // 10. 本地那份只是"旧副本"（包里没给基准）→ 直接覆盖，不该留冲突副本
 const G = path.join(ROOT, 'machineG');
@@ -393,8 +446,8 @@ plan = await planBundleApply(applyOptions(G, STATE_G, thirdFull.file as string))
 check('比包旧的本地副本不算冲突', plan.report.conflicts, 0);
 checkTrue('算作覆盖', plan.report.overwrites >= 1, `实际 ${plan.report.overwrites}`);
 
-// 12. 应用两次同一个包：我独有的文件**不该**在第二次被删
-// （基准只能记"两边上次一致的样子"，把我独有的文件记进去的话，第二次就会被当成"对方删过它"）
+// 12. 应用**完整副本**（镜像）：本机独有的文件会被挪进回收目录 —— 第一次就挪，不是"第二次才删"
+// （镜像是"仓库 == 包"，所以它留不下；但它是挪走，`.trash` 里捞得回来）
 const J = path.join(ROOT, 'machineJ');
 const STATE_J = path.join(ROOT, 'state-j.json');
 fs.mkdirSync(J, { recursive: true });
@@ -403,21 +456,44 @@ await executeBundlePlan(
 	await planBundleApply(applyOptions(J, STATE_J, second.file as string)),
 	applyOptions(J, STATE_J, second.file as string),
 );
-checkTrue('第一次应用后它还在', exists(J, 'only-mine-2.md'), '不该在第一次就被删');
+checkTrue('镜像第一次就把它挪走了（仓库 == 包）', !exists(J, 'only-mine-2.md'), '镜像不该留下包里没有的文件');
+check('那份在回收目录里，捞得回来', findBackups(J, 'only-mine-2.md'), ['MINE']);
 
+// 再应用一次：这次什么都没得挪（仓库已经等于包）
 const appliedAgain = await planBundleApply(applyOptions(J, STATE_J, second.file as string));
-check('第二次应用也不会删它（基准里没记它）', appliedAgain.report.deletes, 0);
-await executeBundlePlan(appliedAgain, applyOptions(J, STATE_J, second.file as string));
-checkTrue('第二次应用后它依然在', exists(J, 'only-mine-2.md'), '被当成"对方删过它"删掉了');
+check('第二次应用一个删除都没有（已经等于包了）', appliedAgain.report.deletes, 0);
+check('动作也是空的', appliedAgain.actions.length, 0);
 
-// 13. 强硬程度三档：默认 / 以包为准 / 完全镜像
+// 12b. 同一件事在**更新包**那条路上再验一遍：完整副本是镜像，本来就留不下我独有的东西，
+//      所以"基准别把它记进去"这个坑只能拿更新包来演 ——
+//      基准只记"两边都见过"的路径，记错了第二次就会被当成"对方删过它"删掉（报过的 bug）
+const J2 = path.join(ROOT, 'machineJ2');
+const STATE_J2 = path.join(ROOT, 'state-j2.json');
+fs.mkdirSync(J2, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(J2, STATE_J2, WITH_KEEP)),
+	applyOptions(J2, STATE_J2, WITH_KEEP),
+);
+write(J2, 'only-mine-3.md', 'MINE'); // 站上基准之后才建：包里、基准里都没有它
+await executeBundlePlan(
+	await planBundleApply(applyOptions(J2, STATE_J2, KEPT_CHANGES)),
+	applyOptions(J2, STATE_J2, KEPT_CHANGES),
+);
+checkTrue('更新包第一次应用后它还在', exists(J2, 'only-mine-3.md'), '更新包只动它点名的文件');
+const appliedTwice = await planBundleApply(applyOptions(J2, STATE_J2, KEPT_CHANGES));
+check('第二次应用也不会删它（基准里没记它）', appliedTwice.report.deletes, 0);
+await executeBundlePlan(appliedTwice, applyOptions(J2, STATE_J2, KEPT_CHANGES));
+checkTrue('第二次应用后它依然在', exists(J2, 'only-mine-3.md'), '被当成"对方删过它"删掉了');
+
+// 13. 应用**完整副本**时，三档选项在引擎层其实是一回事：**镜像**
+//     （`APPLY_CHOICES.full` 只剩 `mirror` 一项；这里照样把别的值传进来，验证引擎不认它们）
 //     场景：对方做过"颠覆性改动"（大删大改），这台机器要跟包一模一样
 //     （下面会从 A 删掉 notes/new.md，test 11 还要用到它，所以用完再加回来）
 write(A, 'notes/new.md', 'NEW');
 const L = path.join(ROOT, 'machineL');
 const STATE_L = path.join(ROOT, 'state-l.json');
 fs.mkdirSync(L, { recursive: true });
-// 先应用 second（里面有 only.md），再把 only.md 改掉 —— 造出"对方删了、我改了"
+// 先应用 second（里面有 only.md），再造出"对方删了、我改了"和"本机新建的"
 await executeBundlePlan(
 	await planBundleApply(applyOptions(L, STATE_L, second.file as string)),
 	applyOptions(L, STATE_L, second.file as string),
@@ -438,26 +514,20 @@ const normalPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as 
 const winsPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as string, { strictness: 'bundle-wins' }));
 const mirrorPlan = await planBundleApply(applyOptions(L, STATE_L, noNew.file as string, { strictness: 'mirror' }));
 
-check('默认：我改过的、对方删了的 → 保留', hasDelete(normalPlan, 'notes/new.md'), false);
-check('以包为准：删掉它', hasDelete(winsPlan, 'notes/new.md'), true);
-check('默认：本机新建的保留', hasDelete(normalPlan, 'mine-new.md'), false);
-check('以包为准：本机新建的也保留（它不属于"对方删过"）', hasDelete(winsPlan, 'mine-new.md'), false);
-check('完全镜像：连本机新建的也删', hasDelete(mirrorPlan, 'mine-new.md'), true);
-check('镜像档删得最多', mirrorPlan.report.deletes > winsPlan.report.deletes, true);
+check('传 normal 也是镜像（完整副本不合并）', normalPlan.report.strictness, 'mirror');
+check('传 bundle-wins 也一样', winsPlan.report.strictness, 'mirror');
+check('三档算出同一份删除清单', [mirrorPlan.report.deletes, winsPlan.report.deletes, normalPlan.report.deletes], [2, 2, 2]);
+check('我改过的、对方删了的：挪走', hasDelete(normalPlan, 'notes/new.md'), true);
+check('本机新建的也挪走（镜像的承诺是"仓库 == 包"）', hasDelete(mirrorPlan, 'mine-new.md'), true);
 
-// 镜像档执行：仓库该与包一致（参与同步的那部分）
+// 执行：仓库该与包一致
 await executeBundlePlan(mirrorPlan, applyOptions(L, STATE_L, noNew.file as string, { strictness: 'mirror' }));
 checkTrue('执行后：我改过的、对方删了的没了', !exists(L, 'notes/new.md'), '');
 checkTrue('执行后：本机新建的也没了', !exists(L, 'mine-new.md'), '');
 check('执行后：包里别的文件都在', read(L, 'brand-new.md'), 'A 改的（更旧）');
-checkTrue(
-	'被删的两份都进了回收目录（没真消失）',
-	fs.existsSync(path.join(L, '.trash', 'locally-save')),
-	'',
-);
-//（「同步删除」关掉时则取回来；与副本同步一致。12b 那个"我独有的"是另一回事，见 test 12）
-// 11. 删除传播：两边都见过、对方又删了的文件 → 第一次就该跟着删
-//（「同步删除」关掉时则取回来，与副本同步一致。test 13 删过 notes/new.md，这里先加回来）
+check('被挪走的那份在回收目录里（没真消失）', findBackups(L, 'mine-new.md'), ['本机新建的']);
+// 11. 删除传播：完整副本**必然传播** —— 它一律镜像，"仓库 == 包"，留着包里没有的文件反而是错的
+//（「同步删除」那个开关只管**更新包**那条"按设置"的路，见这组最后两段）
 write(A, 'notes/new.md', 'NEW');
 const H = path.join(ROOT, 'machineH');
 const STATE_H = path.join(ROOT, 'state-h.json');
@@ -481,11 +551,30 @@ check('开着同步删除 → 对方删的这边也删', deleteOn.report.deletes
 const deleteOff = await planBundleApply(applyOptions(H, STATE_H, fourthFull.file as string, {
 	propagateDeletions: false,
 }));
-check('关掉同步删除 → 一个都不删（取回来）', deleteOff.report.deletes, 0);
+check('关掉也一样删：完整副本不看这个开关（镜像必然传播）', deleteOff.report.deletes, 1);
 checkTrue(
-	'而且报告里说明了策略',
-	deleteOff.report.propagateDeletions === false,
+	'报告里如实说明这次不按开关走',
+	deleteOff.report.propagateDeletions === true,
 	`实际 ${deleteOff.report.propagateDeletions}`,
+);
+
+// 开关真正管用的是**更新包**（那边走"按设置"）：站到同一份基准上试一次
+const HD = path.join(ROOT, 'machineHD');
+const STATE_HD = path.join(ROOT, 'state-hd.json');
+fs.mkdirSync(HD, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(HD, STATE_HD, WITH_KEEP)),
+	applyOptions(HD, STATE_HD, WITH_KEEP),
+);
+check(
+	'更新包 + 关掉同步删除 → 包里点名要删的先留着',
+	(await planBundleApply(applyOptions(HD, STATE_HD, KEPT_CHANGES, { propagateDeletions: false }))).report.deletes,
+	0,
+);
+check(
+	'更新包 + 开着 → 照删',
+	(await planBundleApply(applyOptions(HD, STATE_HD, KEPT_CHANGES, { propagateDeletions: true }))).report.deletes,
+	1,
 );
 
 // 10. 复用同步扫好的清单：传进去的清单就是准的（自动留包靠它省一次全库遍历）
@@ -529,6 +618,8 @@ check('改动包落在 changes 子目录', FILE_CHANGES.replace(/\\/g, '/').incl
 checkTrue('包文件名带上了包 ID 前几位', path.basename(FILE_FULL).endsWith('.lsave'), FILE_FULL);
 
 // 14. 边界：本地同路径是个**文件夹**，包里是个文件
+//     - 完整副本（镜像档）：文件夹整个挪进回收目录腾位置，文件就位 —— 仓库 == 包；
+//     - 更新包（"按设置"档）：报成明确失败、**不动那个文件夹**（强推只在镜像那条路上有）。
 const M = path.join(ROOT, 'machineM');
 const STATE_M = path.join(ROOT, 'state-m.json');
 fs.mkdirSync(M, { recursive: true });
@@ -536,29 +627,41 @@ const clash = 'brand-new.md';
 fs.mkdirSync(abs(M, clash), { recursive: true });
 fs.writeFileSync(path.join(abs(M, clash), 'inside.txt'), 'x');
 
-const clashNormal = await planBundleApply(applyOptions(M, STATE_M, noNew.file as string));
-const clashNormalResult = await executeBundlePlan(clashNormal, applyOptions(M, STATE_M, noNew.file as string));
-checkTrue('默认档：目录挡路 → 记成失败而不是静默', clashNormalResult.failed.length >= 1, '没记失败');
+const clashFull = await planBundleApply(applyOptions(M, STATE_M, noNew.file as string));
+check('完整副本一律镜像：报告里 forced 成立（界面会先问一句）', clashFull.report.forced, true);
+const clashFullResult = await executeBundlePlan(clashFull, applyOptions(M, STATE_M, noNew.file as string));
+// 计划里同时有"挪走这个文件夹"与"删掉文件夹里那个文件"（说的是同一批东西）：
+// 后者不该因为"源已经被前一个动作搬走了"而报一条吓人的失败
+check('镜像档：报告里没有失败（同一批东西被挪两次不算错）', clashFullResult.failed.map(item => item.path), []);
+checkTrue('镜像档：文件就位（原来的文件夹被挪走了）', !fs.statSync(abs(M, clash)).isDirectory(), '还是目录');
+check('仓库就是包：文件内容也在', read(M, clash), 'A 改的（更旧）');
+check('文件夹里那份东西跟着进了回收目录（没真丢）', findBackups(M, 'inside.txt'), ['x']);
+
+const M2 = path.join(ROOT, 'machineM2');
+const STATE_M2 = path.join(ROOT, 'state-m2.json');
+fs.mkdirSync(M2, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(M2, STATE_M2, WITH_KEEP)),
+	applyOptions(M2, STATE_M2, WITH_KEEP),
+);
+fs.rmSync(abs(M2, 'notes/a.md')); // 把包里点名的那个文件换成一个同名文件夹
+write(M2, 'notes/a.md/locked.txt', 'locked');
+const clashNormal = await planBundleApply(applyOptions(M2, STATE_M2, KEPT_CHANGES));
+const clashNormalResult = await executeBundlePlan(clashNormal, applyOptions(M2, STATE_M2, KEPT_CHANGES));
+checkTrue('按设置档：目录挡路 → 记成失败而不是静默', clashNormalResult.failed.length >= 1, '没记失败');
 checkTrue(
-	'默认档：失败原因说得清',
+	'按设置档：失败原因说得清',
 	(clashNormalResult.failed[0]?.error ?? '').includes('文件夹'),
 	clashNormalResult.failed[0]?.error ?? '',
 );
 checkTrue(
-	'默认档：不会去动别人的文件夹',
-	fs.existsSync(path.join(abs(M, clash), 'inside.txt')),
+	'按设置档：不会去动别人的文件夹',
+	fs.existsSync(path.join(abs(M2, 'notes/a.md'), 'locked.txt')),
 	'文件夹被动了',
 );
 
-const clashForce = await planBundleApply(applyOptions(M, STATE_M, noNew.file as string, { strictness: 'bundle-wins' }));
-const clashForceResult = await executeBundlePlan(
-	clashForce,
-	applyOptions(M, STATE_M, noNew.file as string, { strictness: 'bundle-wins' }),
-);
-check('强制档：没有失败', clashForceResult.failed.length, 0);
-checkTrue('强制档：文件就位（原来的文件夹被挪走了）', !fs.statSync(abs(M, clash)).isDirectory(), '还是目录');
-
-// 15. 强制档必然先备份 —— 不给"不可恢复的批量删除"留口子
+// 15. 镜像/强制档必然先备份 —— 不给"不可恢复的批量删除"留口子
+//（完整副本一律镜像，所以它天然落在"强制"那一档：用户关掉回收目录也没用）
 const N = path.join(ROOT, 'machineN');
 const STATE_N = path.join(ROOT, 'state-n.json');
 fs.mkdirSync(N, { recursive: true });
@@ -567,8 +670,20 @@ const strictPlan = await planBundleApply(applyOptions(N, STATE_N, noNew.file as 
 	strictness: 'mirror',
 	keepBackup: false, // 用户想把回收目录关掉
 }));
-check('强制档下回收目录强制开', strictPlan.options.keepBackup, true);
-check('默认档下照样听用户的', (await planBundleApply(applyOptions(N, STATE_N, noNew.file as string, {
+check('镜像档下回收目录强制开', strictPlan.options.keepBackup, true);
+check('连"不选方式"的完整副本也一样（它本来就是镜像）', (await planBundleApply(
+	applyOptions(N, STATE_N, noNew.file as string, { keepBackup: false }),
+)).options.keepBackup, true);
+
+// 更新包走"按设置"那一档，这里照样听用户的
+const N2 = path.join(ROOT, 'machineN2');
+const STATE_N2 = path.join(ROOT, 'state-n2.json');
+fs.mkdirSync(N2, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(N2, STATE_N2, WITH_KEEP)),
+	applyOptions(N2, STATE_N2, WITH_KEEP),
+);
+check('更新包（按设置档）下照样听用户的', (await planBundleApply(applyOptions(N2, STATE_N2, KEPT_CHANGES, {
 	keepBackup: false,
 }))).options.keepBackup, false);
 
@@ -623,22 +738,49 @@ check('应用过一次之后再打开这个包：不需要再补建', (await pla
 	applyOptions(R, STATE_R, R_FILE),
 )).report.foldersToCreate, 0);
 
-// 18. 空文件夹的位置上杵着个同名文件 → 如实报出来，不硬来
+// 18. 空文件夹的位置上杵着个同名文件
+//     - 完整副本（镜像档）：那个文件本来就"包里没有" → 先挪进回收目录，目录照建，不报失败；
+//     - 更新包（"按设置"档）：那是本机的东西（包里、基准里都没有它）→ 建目录这一步如实报失败，
+//       **不删它腾位置**（这条路上没有强推）。
 const S = path.join(ROOT, 'machineS');
 const STATE_S = path.join(ROOT, 'state-s.json');
 fs.mkdirSync(S, { recursive: true });
 write(S, '空目录', 'I AM A FILE');
 const sPlan = await planBundleApply(applyOptions(S, STATE_S, R_FILE));
+check('完整副本一律镜像：报告里 forced 成立', sPlan.report.forced, true);
 const sResult = await executeBundlePlan(sPlan, applyOptions(S, STATE_S, R_FILE));
-checkTrue(
-	'同名文件挡路 → 记成失败（而不是把它删掉腾位置）',
-	sResult.failed.some(item => item.error.includes('同名文件')),
-	JSON.stringify(sResult.failed),
-);
-check('那个文件原样还在', read(S, '空目录'), 'I AM A FILE');
+check('镜像下没有"挡路"这回事了（文件先被挪走）', sResult.failed.map(item => item.path), []);
+check('那份文件在回收目录里（没真丢）', findBackups(S, '空目录'), ['I AM A FILE']);
+check('目录照建', exists(S, '空目录'), true);
+check('而且是文件夹（不再是同名文件）', fs.statSync(abs(S, '空目录')).isDirectory(), true);
 check('能建的目录照样建', exists(S, 'notes/子目录'), true);
 
-// 19. 强制应用能不能让**文件夹**也完全一致？
+const S2 = path.join(ROOT, 'machineS2');
+const STATE_S2 = path.join(ROOT, 'state-s2.json');
+fs.mkdirSync(S2, { recursive: true });
+await executeBundlePlan(
+	await planBundleApply(applyOptions(S2, STATE_S2, WITH_KEEP)),
+	applyOptions(S2, STATE_S2, WITH_KEEP),
+);
+write(S2, '空目录', 'I AM A FILE'); // 应用之后才放的本机文件：基准里没有它
+const craftEmptyDirs = await craftBundle(path.join(OUT, 'crafted-empty-dirs.lsave'), {
+	baselineHash: baselineOfBundle((await readBundleInfo(WITH_KEEP)).header) as string,
+	emptyDirs: ['空目录', 'notes/子目录'],
+});
+const s2Plan = await planBundleApply(applyOptions(S2, STATE_S2, craftEmptyDirs));
+const s2Result = await executeBundlePlan(s2Plan, applyOptions(S2, STATE_S2, craftEmptyDirs));
+checkTrue(
+	'更新包：同名文件挡路 → 记成失败（而不是把它删掉腾位置）',
+	s2Result.failed.some(item => item.error.includes('同名文件')),
+	JSON.stringify(s2Result.failed),
+);
+check('那个文件原样还在', read(S2, '空目录'), 'I AM A FILE');
+check('能建的目录照样建', exists(S2, 'notes/子目录'), true);
+
+// 19. 目录（空文件夹）的两条路完全不同
+//     - 完整副本（镜像档）：包里没有的本地目录**一律清掉**（连本机新建的）—— 仓库 == 包；
+//     - 更新包（"按设置"档）：只删**基准里记过**的（＝对方删过它），本机新建的留着；
+//       「同步删除」关掉时一个都不删。
 // 造一台机器：先应用一次包拿到基准，再故意多出两个本地空目录 ——
 // 一个"本机新建的"（基准里没有），一个"上一版包里有过、对方删了"（基准里有）。
 const T2 = path.join(ROOT, 'machineT');
@@ -677,28 +819,14 @@ for (const entry of qInfo.header.entries) {
 	for (let i = 1; i < parts.length; i++) bundleDirs.add(parts.slice(0, i).join('/'));
 }
 
-// 默认档：只删"对方删过的"（基准里有、包里没有），本机新建的一律留着
-const t2Normal = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE));
-check('默认档：只删基准里记过的那个', t2Normal.foldersToRemove, ['对方删过的目录']);
-check('默认档：报告里也写了要删几个', t2Normal.report.foldersToRemove, 1);
-const t2NormalResult = await executeBundlePlan(t2Normal, applyOptions(T2, STATE_T2, R_FILE));
-check('默认档：删掉了', exists(T2, '对方删过的目录'), false);
-check('默认档：本机新建的留着', exists(T2, '本机新建的'), true);
-check('默认档：结果里记了清理数', t2NormalResult.foldersRemoved, 1);
-
-// 关掉「同步删除」：目录也一个都不删（开关不能只管文件）
-fs.mkdirSync(abs(T2, '对方删过的目录'), { recursive: true });
-const t2NoDelete = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE, { propagateDeletions: false }));
-check('关掉同步删除 → 目录也不删', t2NoDelete.foldersToRemove, []);
-
-// 强制一致：本机新建的也删 —— 这一档的承诺就是"仓库和包完全一样"
-const t2Mirror = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE, { strictness: 'mirror' }));
-check('强制一致：本机新建的也删', t2Mirror.foldersToRemove, ['对方删过的目录', '本机新建的']);
-const t2MirrorResult = await executeBundlePlan(t2Mirror, applyOptions(T2, STATE_T2, R_FILE, { strictness: 'mirror' }));
-check('强制一致：两个都删掉了', [exists(T2, '本机新建的'), exists(T2, '对方删过的目录')], [false, false]);
-check('强制一致：结果里记了清理数', t2MirrorResult.foldersRemoved, 2);
+// 完整副本＝镜像：两个都清掉（它不看基准，也不看「同步删除」开关）
+const t2Mirror = await planBundleApply(applyOptions(T2, STATE_T2, R_FILE));
+check('镜像：本机新建的也删', t2Mirror.foldersToRemove.slice().sort(), ['对方删过的目录', '本机新建的'].sort());
+const t2MirrorResult = await executeBundlePlan(t2Mirror, applyOptions(T2, STATE_T2, R_FILE));
+check('镜像：两个都删掉了', [exists(T2, '本机新建的'), exists(T2, '对方删过的目录')], [false, false]);
+check('镜像：结果里记了清理数', t2MirrorResult.foldersRemoved, 2);
 check(
-	'强制一致之后：仓库里没有"包里没有的目录"了（文件与文件夹都对齐）',
+	'镜像之后：仓库里没有"包里没有的目录"了（文件与文件夹都对齐）',
 	listDirs(T2).filter(dir => !bundleDirs.has(dir)),
 	[],
 );
@@ -707,6 +835,37 @@ check(
 	listDirs(T2).every(dir => bundleDirs.has(dir)),
 	true,
 );
+
+// 更新包那条路才看基准与「同步删除」开关：把两个目录与基准都补回来
+fs.mkdirSync(abs(T2, '本机新建的'), { recursive: true });
+fs.mkdirSync(abs(T2, '对方删过的目录'), { recursive: true });
+const reseed = await loadState(STATE_T2);
+reseed.bundle = {
+	...reseed.bundle!,
+	dirs: [...(reseed.bundle?.dirs ?? []), '对方删过的目录'],
+};
+await saveState(STATE_T2, reseed);
+
+// 更新包的 `emptyDirs` 是"导出方**全部**空文件夹"的清单（不是增量）：这份里没有"对方删过的目录"
+// → 对站在基准上的接收方来说，那就是"对方把它删了"
+const craftDirs = await craftBundle(path.join(OUT, 'crafted-dirs.lsave'), {
+	baselineHash: baselineOfBundle(qInfo.header) as string,
+	lineage: qInfo.header.lineage,
+	baseGeneration: 1,
+	emptyDirs: qInfo.header.emptyDirs,
+});
+const t2Normal = await planBundleApply(applyOptions(T2, STATE_T2, craftDirs));
+check('按设置档：只删基准里记过的那个', t2Normal.foldersToRemove, ['对方删过的目录']);
+check('按设置档：报告里也写了要删几个', t2Normal.report.foldersToRemove, 1);
+
+// 关掉「同步删除」：目录也一个都不删（开关不能只管文件）
+const t2NoDelete = await planBundleApply(applyOptions(T2, STATE_T2, craftDirs, { propagateDeletions: false }));
+check('关掉同步删除 → 目录也不删', t2NoDelete.foldersToRemove, []);
+
+const t2NormalResult = await executeBundlePlan(t2Normal, applyOptions(T2, STATE_T2, craftDirs));
+check('按设置档：删掉了', exists(T2, '对方删过的目录'), false);
+check('按设置档：本机新建的留着', exists(T2, '本机新建的'), true);
+check('按设置档：结果里记了清理数', t2NormalResult.foldersRemoved, 1);
 
 // 20. 目录里还有文件时，目录规则不插手；非空的目录 rmdir 也删不动
 const U = path.join(ROOT, 'machineU');
@@ -727,18 +886,24 @@ check('结果里也算进了清理数', uResult.foldersRemoved, 1);
 const V = path.join(ROOT, 'machineV');
 const STATE_V = path.join(ROOT, 'state-v.json');
 fs.mkdirSync(V, { recursive: true });
-write(V, 'notes/keep.md', 'KEEP'); // 更新包里没有它
+// 先站到同一份基准上：**更新包必须有共同祖先才收**（见 checkAncestor）
+await executeBundlePlan(
+	await planBundleApply(applyOptions(V, STATE_V, WITH_KEEP)),
+	applyOptions(V, STATE_V, WITH_KEEP),
+);
+write(V, 'notes/keep.md', 'KEEP'); // 应用之后才建：本机独有，包里没有它
 const vPlan = await planBundleApply(applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
 check('更新包用强制档 → 降级成默认档', vPlan.report.strictness, 'normal');
 check('报告里标出"被降级了"（界面要说明白）', vPlan.report.strictnessDowngraded, true);
 check('报告里 forced 也不再成立', vPlan.report.forced, false);
 check(
-	'没有把"包里没提到的文件"当成该删',
+	'删除动作只有包里点名的那个（notes/b.md）；没提到的 notes/keep.md 不在里面',
 	vPlan.actions.filter(action => action.kind === 'delete').map(action => action.path),
-	[],
+	['notes/b.md'],
 );
 await executeBundlePlan(vPlan, applyOptions(V, STATE_V, KEPT_CHANGES, { strictness: 'mirror' }));
-check('仓库里那个文件还在（没被清空）', read(V, 'notes/keep.md'), 'KEEP');
+check('仓库里我自己的文件还在（没被清空）', read(V, 'notes/keep.md'), 'KEEP');
+check('包里点名要删的照做（那是它明说的）', exists(V, 'notes/b.md'), false);
 check(
 	'完整包不受影响：强制档照旧生效',
 	(await planBundleApply(applyOptions(V, STATE_V, R_FILE, { strictness: 'mirror' }))).report.strictness,
@@ -824,34 +989,37 @@ check('新版包不会被误判成旧包', (await planBundleApply(applyOptions(X
 const Y = path.join(ROOT, 'machineY');
 const STATE_Y = path.join(ROOT, 'state-y.json');
 fs.mkdirSync(Y, { recursive: true });
-const yFull = await planBundleApply(applyOptions(Y, STATE_Y, R_FILE));
-await executeBundlePlan(yFull, applyOptions(Y, STATE_Y, R_FILE));
-check('先应用完整包：文件进基准', read(Y, 'notes/keep.md'), 'KEEP');
-
+// 更新包必须有共同祖先才收（见 checkAncestor），所以先站到它基于的那份完整副本上
+const yFull = await planBundleApply(applyOptions(Y, STATE_Y, WITH_KEEP));
+await executeBundlePlan(yFull, applyOptions(Y, STATE_Y, WITH_KEEP));
+write(Y, 'notes/keep.md', 'KEEP'); // 应用之后才建：本机独有，基准里没有它
+check('先应用完整包：本机自己那份也在', read(Y, 'notes/keep.md'), 'KEEP');
 const yChanges = await planBundleApply(applyOptions(Y, STATE_Y, KEPT_CHANGES));
 check(
-	'更新包：没提到的文件不许当成"被删了"',
+	'更新包：只删它点名的那个（notes/b.md），没提到的 notes/keep.md 不在里面',
 	yChanges.actions.filter(action => action.kind === 'delete').map(action => action.path),
-	[],
+	['notes/b.md'],
 );
-check('报告里的删除数也是 0', yChanges.report.deletes, 0);
-check('"对方删过的"这个数同样是 0', yChanges.report.extraDeletes, 0);
+check('报告里的删除数就是那一个', yChanges.report.deletes, 1);
+check('"对方删过的"这个数还是 0（更新包只认自己的删除清单）', yChanges.report.extraDeletes, 0);
 await executeBundlePlan(yChanges, applyOptions(Y, STATE_Y, KEPT_CHANGES));
-check('应用之后那个文件还在（更新包只动它提到的东西）', read(Y, 'notes/keep.md'), 'KEEP');
+check('应用之后我自己的文件还在（更新包只动它提到的东西）', read(Y, 'notes/keep.md'), 'KEEP');
 check('包里点名删的、本地没有的：什么都不用做', yChanges.report.keptDeletes, 0);
 
-// 另一半：**完整包**才是完整清单 —— 基准里有、包里没有 = 对方删过它 → 跟着删
+// 另一半：**完整副本**是完整清单 + 镜像 —— 包里没有的一律清掉（对方删过的、我独有的都在内）
 fs.rmSync(abs(Q, 'notes/keep.md'));
 const qFull2 = await exportBundle(exportOptions(Q, STATE_Q));
 checkTrue('再导一份不含 notes/keep.md 的完整包', qFull2.file !== null, qFull2.reason ?? '');
 const yFull2 = await planBundleApply(applyOptions(Y, STATE_Y, qFull2.file as string));
+check('完整副本一律镜像：报告里 forced 成立', yFull2.report.forced, true);
 check(
-	'完整包：对方删过的要跟着删（notes/a.md 是刚才更新包带进来的，这份完整包里也没有）',
+	'完整包：包里没有的都清掉（notes/a.md 是刚才更新包带进来的，notes/keep.md 是我自己的）',
 	yFull2.actions.filter(action => action.kind === 'delete').map(action => action.path),
 	['notes/a.md', 'notes/keep.md'],
 );
 await executeBundlePlan(yFull2, applyOptions(Y, STATE_Y, qFull2.file as string));
 check('删掉了', exists(Y, 'notes/keep.md'), false);
+check('我自己那份也挪进了回收目录（没真丢）', findBackups(Y, 'notes/keep.md'), ['KEEP']);
 
 // 26. 「更新包攒大了提醒换基准」那套判断（纯逻辑，先钉死）
 check('留空 → 默认 200MB', parseSizeLimit(''), 200 * 1024 * 1024);
@@ -1160,11 +1328,13 @@ check(
 	[['c-new', 'c-mid'], ['f-new', 'f-old'], ['weird']],
 );
 
-// 34. 「应用方式」两套选项：完整副本一套、更新包一套（不是把不合适的灰掉）
+// 34. 「应用方式」按包的类型给两套选项（不是把不合适的灰掉）
+// 完整副本**没有可选项**：应用方式固定是镜像 —— 合并它会有无穷多种结果，
+// 每一种都能配出一个"既不等于包、又不等于本机"的仓库（见 APPLY_CHOICES 上的注释）
 check(
-	'完整副本那套：按设置 / 以包为准 / 完全镜像',
+	'完整副本那套：只有完全镜像一项',
 	APPLY_CHOICES.full.map(item => item.key),
-	['normal', 'bundle-wins', 'mirror'],
+	['mirror'],
 );
 check(
 	'更新包那套：按设置 / 以包为准 / 两边都留 / 以我为准',
@@ -1177,7 +1347,11 @@ check(
 	false,
 );
 check('换包类型后原来那档不在新一套里 → 回到这一套的默认档', findApplyChoice('changes', 'mirror').key, 'normal');
-check('默认档就是第一项', findApplyChoice('full', 'normal').strictness, 'normal');
+check(
+	'完整副本那一套只剩一项 → 传什么进来都落到它',
+	[findApplyChoice('full', 'normal').key, findApplyChoice('full', 'bundle-wins').key],
+	['mirror', 'mirror'],
+);
 
 // 35. 「以包为准」：包里点名的文件一律用包里那一版，没提到的一个不动
 // （用户报的场景：应用过更新包 → 自己又改了这个文件 → 想退回包里那一版，但更新包只有"按设置"，
@@ -1415,24 +1589,31 @@ check(
 	'match',
 );
 
-// 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上 → 明确判成"对不上"
+// 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上
+// → 更新包**直接拒绝**（没有共同祖先就不合：基准不是同一份时，"基准里有、包里没有"
+//   会被当成"对方删过它"，一大片本机文件要没）。拒绝时要说清下一步怎么走。
 write(RMA, 'x.md', 'X3', T0 + 20_000);
 const raFull2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA), outDir: OUTRA });
 // 换完基准再改一笔：紧接着完整包导的更新包必然是空的（那条语义有专门用例）
 write(RMA, 'x.md', 'X4', T0 + 30_000);
 const raChanges2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA, 'changes'), outDir: OUTRA });
 checkTrue('换基准之后的更新包有内容', raChanges2.file !== null, raChanges2.reason ?? '');
-const rmbMismatch = await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string));
-check('A 换基准之后 B 仍能收下更新包（不拒绝服务）', rmbMismatch.report.baselineMatch, 'mismatch');
-check(
-	'两个指纹都报出来，便于对账',
-	[typeof rmbMismatch.report.myBaseline, typeof rmbMismatch.report.bundleBaseline],
-	['string', 'string'],
+let mismatchError = '';
+try {
+	await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string));
+} catch (error) {
+	mismatchError = error instanceof Error ? error.message : String(error);
+}
+checkTrue('基准对不上的更新包被拒绝', mismatchError.includes('基准对不上'), mismatchError || '（没拒绝）');
+checkTrue(
+	'拒绝时说清两条出路（按我的指纹重导 / 导一份完整副本）',
+	mismatchError.includes('完整副本') && mismatchError.includes('基准指纹'),
+	mismatchError,
 );
 const rmbAlignOptions = applyOptions(RMB, STATE_RMB, raFull2.file as string);
 await executeBundlePlan(await planBundleApply(rmbAlignOptions), rmbAlignOptions);
 check(
-	'应用新的完整副本 → 基准又对上了（这就是"对齐"那一步）',
+	'换成完整副本就对上了（完整清单自带基准，随时能接）',
 	(await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string))).report.baselineMatch,
 	'match',
 );
@@ -1989,6 +2170,51 @@ const abMissingPreview = await planBundleExport({
 });
 checkTrue('预览不抛错，把原因写在界面上', (abMissingPreview.problem ?? '').includes('ffffffffffffffff'), String(abMissingPreview.problem));
 check('预览里没有状态', [abMissingPreview.anchorGeneration, abMissingPreview.targetGeneration], [null, null]);
+
+// 47. **更新包自带的 base 优先于本机那份记录**（踩过的坑）
+//
+// 场景：接收方手里已经有一份"我以为我们一致"的记录（`state.bundle.files`），
+// 但对方后来重新立过基准 / 我中间应用过别的包 —— 对**这个包**来说那份记录已经过期。
+// 过期的后果很具体：本地明明停在"对方发过的中间版本"上（包的 `history` 里写着那一版），
+// 却因为 base 对不上被判成"本地改动"，于是不走 `history` 那条路 ——
+// 白白留一个冲突副本。所以 `planBundleApply` 里那个 `seed` 让**包的 base 覆盖本机记录**。
+const HK_A = path.join(ROOT, 'machine-hk-a');
+const HK_B = path.join(ROOT, 'machine-hk-b');
+const STATE_HK_A = path.join(ROOT, 'state-hk-a.json');
+const STATE_HK_B = path.join(ROOT, 'state-hk-b.json');
+const OUT_HK = path.join(ROOT, 'transfer-hk');
+const T_HK = Date.now() - 120_000;
+fs.mkdirSync(HK_A, { recursive: true });
+fs.mkdirSync(HK_B, { recursive: true });
+fs.mkdirSync(OUT_HK, { recursive: true });
+
+write(HK_A, 'h.md', 'H1', T_HK);
+const hkFull = await exportBundle({ ...exportOptions(HK_A, STATE_HK_A), outDir: OUT_HK });
+// A 改两轮：第一次改动会成为更新包里的"中间版本"，第二次是最新版。
+// 时间各拉开 1 分钟，免得落在 2 秒容差里被当成"没改过"
+write(HK_A, 'h.md', 'H2 中间版', T_HK + 60_000);
+await exportBundle({ ...exportOptions(HK_A, STATE_HK_A, 'changes'), outDir: OUT_HK });
+write(HK_A, 'h.md', 'H3 最新版', T_HK + 120_000);
+const hkChanges = await exportBundle({ ...exportOptions(HK_A, STATE_HK_A, 'changes'), outDir: OUT_HK });
+
+// B 站到同一份基准上，再把手里的文件换成"我发过的那个中间版本"
+const hkFullOptions = applyOptions(HK_B, STATE_HK_B, hkFull.file as string);
+await executeBundlePlan(await planBundleApply(hkFullOptions), hkFullOptions);
+const hkEntry = (await readBundleInfo(hkChanges.file as string)).header.entries.find(item => item.path === 'h.md');
+const hkPast = hkEntry?.history?.[0];
+checkTrue('更新包里带着中间版本记录', hkPast !== undefined, JSON.stringify(hkEntry?.history));
+if (hkPast) {
+	write(HK_B, 'h.md', 'H2', hkPast.mtime);
+	// 本机那份记录"过期"：跟包里说的 base 不是一回事（对方重立过基准时就会这样）
+	const hkState = await loadState(STATE_HK_B);
+	if (hkState.bundle) hkState.bundle.files['h.md'] = { size: 999, mtime: T_HK };
+	await saveState(STATE_HK_B, hkState);
+
+	const hkPlan = await planBundleApply(applyOptions(HK_B, STATE_HK_B, hkChanges.file as string));
+	check('本机记录过期也不误判成冲突', hkPlan.report.conflicts, 0);
+	check('认得出"这是我发过的中间版本"（靠包自带的 base）', hkPlan.report.historyMatches, 1);
+	check('直接覆盖成包里那一版', hkPlan.report.overwrites, 1);
+}
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

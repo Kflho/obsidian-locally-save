@@ -86,7 +86,7 @@
 }
 
 /* 头部读不出来的包：看得见、也能删，但要一眼看出它不对劲 */
-.locally-save-row.is-unknown .locally-save-file {
+.locally-save-row.is-unknown .locally-save-reason {
 	color: var(--text-muted);
 }
 
@@ -96,7 +96,7 @@
 	gap: 0.3em;
 	align-items: center;
 	/* 按钮有点多（应用 / 文件夹 / 复制路径 / 挪进回收站 / 彻底删除）：
-	   窄窗口下让它们自己换行，别把文件名挤成一列 */
+	   窄窗口下让它们自己换行，别把那行信息挤成一列 */
 	flex-wrap: wrap;
 	justify-content: flex-end;
 }
@@ -186,15 +186,17 @@
 	color: var(--text-muted);
 }
 
-.locally-save-file {
-	flex: 1 1 auto;
-	word-break: break-all;
-}
-
 .locally-save-reason {
 	flex: 0 1 auto;
 	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
+}
+
+/* 包列表里那一行信息：**顶上没有文件名了**（用户提的：名字一长串挤占大量空间），
+   所以让它自己把剩下的宽度占满，按钮一律靠右 */
+.locally-save-row.is-bundle .locally-save-reason {
+	flex: 1 1 auto;
+	min-width: 0;
 }
 
 .locally-save-more {
