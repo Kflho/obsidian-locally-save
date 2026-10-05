@@ -678,7 +678,14 @@ export class ApplyBundleModal extends Modal {
 		const baseGen = plan.info.header.baseGeneration;
 		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 代`;
 		if (report.bundle.mode !== 'full') {
-			if (report.baselineMatch === 'match') {
+			if (report.viaMine) {
+				// 合并相邻更新包之后常见：链条上只剩两端的点，而我站在被吞掉的某一个点上
+				this.reportEl.createEl('p', {
+					text: `✓ 这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
+						+ '**你站的这一点正好在它的路线上**：应用它会直接把你送到终点（中间那几环不用补）。',
+					cls: 'locally-save-hint',
+				});
+			} else if (report.baselineMatch === 'match') {
 				this.reportEl.createEl('p', {
 					text: `基准：✓ 与这个包同一份完整副本（${baseGenText}）—— 接着应用是确定的`,
 					cls: 'locally-save-hint',

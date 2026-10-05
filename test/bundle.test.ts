@@ -18,6 +18,7 @@ import { exportBundle, parkLocalChangesFor, planBundleExport, plannedExportModes
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, readEntry, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
+import { mergeBundleGroup, planBundleMerges } from '../src/bundle/merge';
 import {
 	bundleTrashRoot,
 	deleteBundles,
@@ -2636,6 +2637,114 @@ check('**那一点上有的空目录一个不少**（notes/keep 与 notes/ 都�
 check('那一点上没有的空目录被清掉了', exists(DIRS_B, 'mine-only'), false);
 check('收拾空目录那一步没有多删（notes 是被保住的，不是删了又建）', dirsResult.foldersRemoved, 1);
 check('状态编号跟包里记的一致（目录也算进编号里）', dirsResult.stateIdCompare, 'match');
+
+// 47. 合并相邻的更新包：三环并一环，基准点重新算（用户要的"防止基准点太多、更新太碎"）
+//
+// 以及他问的那件事：**合并之后，站在"被吞掉的那个点"上的机器还收得下吗** ——
+// 收得下（头部 `viaHashes` 记着这个包一路经过哪几个点，`checkAncestor` 认它）。
+const MG = path.join(ROOT, 'merge');
+const MG_A = path.join(MG, 'a');
+const MG_B = path.join(MG, 'b');
+const MG_C = path.join(MG, 'c');
+const MG_D = path.join(MG, 'd');
+const MG_OUT = path.join(MG, 'transfer');
+const STATE_MG_A = path.join(MG, 'state-a.json');
+const STATE_MG_B = path.join(MG, 'state-b.json');
+const STATE_MG_C = path.join(MG, 'state-c.json');
+const STATE_MG_D = path.join(MG, 'state-d.json');
+for (const dir of [MG_A, MG_B, MG_C, MG_D, MG_OUT]) fs.mkdirSync(dir, { recursive: true });
+const mgExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: MG_OUT });
+const mgApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+
+const mgT0 = Date.now();
+write(MG_A, 'a.md', 'A1', mgT0);
+const mgFull = await exportBundle(mgExport(MG_A, STATE_MG_A, 'full'));
+
+// 三环：1→2→3→4（每次都从"我站的这一点"往外延伸，所以首尾相接）
+const mgLinks: string[] = [];
+for (const [index, content] of ['A2 长长一点', 'A3 再长一点点', 'A4 又长一点点了'].entries()) {
+	write(MG_A, 'a.md', content, mgT0 + (index + 1) * 30_000);
+	const link = await exportBundle(mgExport(MG_A, STATE_MG_A));
+	mgLinks.push(link.file as string);
+}
+check('本机站到第 4 代', (await loadState(STATE_MG_A)).generation, 4);
+
+// 两台机器先各自走到中间：B 站在段首（第 1 代），C 站在中间那一点（第 2 代）
+await executeBundlePlan(
+	await planBundleApply(mgApply(MG_B, STATE_MG_B, mgFull.file as string)),
+	mgApply(MG_B, STATE_MG_B, mgFull.file as string),
+);
+await executeBundlePlan(
+	await planBundleApply(mgApply(MG_C, STATE_MG_C, mgFull.file as string)),
+	mgApply(MG_C, STATE_MG_C, mgFull.file as string),
+);
+await executeBundlePlan(
+	await planBundleApply(mgApply(MG_C, STATE_MG_C, mgLinks[0] as string)),
+	mgApply(MG_C, STATE_MG_C, mgLinks[0] as string),
+);
+check('B 站在段首（第 1 代）', (await loadState(STATE_MG_B)).generation, 1);
+check('C 站在中间那一点（第 2 代）', (await loadState(STATE_MG_C)).generation, 2);
+
+const mgLineage = (await loadState(STATE_MG_A)).lineage;
+const mgBefore = (await planBundleMerges(MG_OUT, mgLineage)).plans;
+check('算出可以合并的一段', mgBefore.length, 1);
+check(
+	'这段从第 1 代到第 4 代、吞掉三份包、中间两个点',
+	[mgBefore[0]?.anchorGeneration, mgBefore[0]?.targetGeneration, mgBefore[0]?.links.length, mgBefore[0]?.middlePoints.length],
+	[1, 4, 3, 2],
+);
+
+const mgMerged = await mergeBundleGroup(mgExport(MG_A, STATE_MG_A), mgBefore[0] as NonNullable<typeof mgBefore[0]>);
+checkTrue('合并后的包写出来了', typeof mgMerged.file === 'string' && mgMerged.file.length > 0, mgMerged.reason ?? '没有文件名');
+check('那三份小包都挪进了回收站', mgMerged.trashed.length, 3);
+check('回收站里能捞回来', (await readBundleTrash(MG_OUT)).count >= 3, true);
+
+const mgMergedInfo = await readBundleInfo(mgMerged.file);
+check(
+	'合并后：起点还是段首那一点、落点还是段末那一点（基准点重算过）',
+	[mgMergedInfo.header.baseGeneration, mgMergedInfo.header.targetGeneration, mgMergedInfo.header.baselineHash],
+	[1, 4, mgFull.header?.baselineHash],
+);
+check('合并后装的是"1 代到 4 代之间变过的"', mgMergedInfo.header.entries.map(entry => entry.path), ['a.md']);
+check(
+	'合并后内容取的是**段末那一刻**的（不是我现在的仓库）',
+	(await readEntry(mgMerged.file, mgMergedInfo, mgMergedInfo.header.entries[0]!)).toString('utf8'),
+	'A4 又长一点点了',
+);
+check('头部记着这个包一路经过哪几个点（两个中间点）', (mgMergedInfo.header.viaHashes ?? []).length, 2);
+check('本机什么都不推进（还是第 4 代）', (await loadState(STATE_MG_A)).generation, 4);
+check('合并完再看：没有可合并的了', (await planBundleMerges(MG_OUT, mgLineage)).plans.length, 0);
+
+// 段首那台：基准正好对得上
+const mgPlanB = await planBundleApply(mgApply(MG_B, STATE_MG_B, mgMerged.file));
+check('B（段首）基准对得上', mgPlanB.report.baselineMatch, 'match');
+const mgResultB = await executeBundlePlan(mgPlanB, mgApply(MG_B, STATE_MG_B, mgMerged.file));
+check('B 应用合并后的包：内容就是段末那一刻的', read(MG_B, 'a.md'), 'A4 又长一点点了');
+check('B 落在第 4 代（段末）', (await loadState(STATE_MG_B)).generation, 4);
+check('两边状态编号一致', mgResultB.stateIdCompare, 'match');
+
+// **中间那台**（C，站在第 2 代）：包覆盖了它站的这一点 → 收得下，而且直接落到段末
+const mgPlanC = await planBundleApply(mgApply(MG_C, STATE_MG_C, mgMerged.file));
+check('C（中间点）报告里认出"我站的这一点在包的路线上"', mgPlanC.report.viaMine, true);
+const mgResultC = await executeBundlePlan(mgPlanC, mgApply(MG_C, STATE_MG_C, mgMerged.file));
+check('C 应用合并后的包：内容就是段末那一刻的', read(MG_C, 'a.md'), 'A4 又长一点点了');
+check('C 落在第 4 代（中间那两环不用补）', (await loadState(STATE_MG_C)).generation, 4);
+check('C 那边状态编号也一致', mgResultC.stateIdCompare, 'match');
+
+// 兄弟不算覆盖：从第 4 代分出去的"4 → 5"，对**站在第 1 代**的机器照旧拒收
+write(MG_A, 'b.md', 'B1', mgT0 + 200_000);
+const mgSibling = await exportBundle(mgExport(MG_A, STATE_MG_A));
+await executeBundlePlan(
+	await planBundleApply(mgApply(MG_D, STATE_MG_D, mgFull.file as string)),
+	mgApply(MG_D, STATE_MG_D, mgFull.file as string),
+);
+check('D 站在第 1 代（不在兄弟包的路线上）', (await loadState(STATE_MG_D)).generation, 1);
+const mgSiblingRejected = await planBundleApply(mgApply(MG_D, STATE_MG_D, mgSibling.file as string))
+	.then(() => '收了')
+	.catch((error: unknown) => (error instanceof Error && error.message.includes('接不上') ? '接不上' : '别的错'));
+check('兄弟包不认"站在别的点上"的机器：照旧拒收', mgSiblingRejected, '接不上');
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
