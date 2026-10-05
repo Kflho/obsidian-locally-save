@@ -1,12 +1,15 @@
 import path from 'node:path';
-import { BUNDLE_EXT, readBundleInfo } from './format';
+import { randomUUID } from 'node:crypto';
+import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
+import type { BundleDeletedEntry, BundleEntry, BundleHeader, BundleSource, BundleWriteProgress } from './format';
 import { bundleDirForMode } from './paths';
 import { listFiles } from '../sync/disk';
 import { listFullAnchors } from './anchor';
 import { listPointRefsSync } from './points';
 import { trashBundles } from './manage';
-import { exportBundle } from './export';
-import type { ExportOptions } from './export';
+import { appendBundleLog } from './log';
+import { copyRef, loadState, saveState } from '../sync/state';
+import type { Logger } from '../utils/log';
 
 /**
  * **把相邻的更新包合并成一环**（用户要的："防止基准点太多、更新太碎"）。
@@ -14,21 +17,24 @@ import type { ExportOptions } from './export';
  * 链条模型下每份更新包是"从哪一点 → 落到哪一点"的一环。导出几次就攒出好几环：
  *
  * ```
- *   39 ──L1──► 44 ──L2──► 47 ──L3──► 51        三份包、四个点
- *   39 ────────── M ──────────► 51             合并后：一份包、两个点
+ *   39 ──L1──► 54 ──L2──► 55        两环、三个点
+ *   39 ────────── M ──────────► 55  合并后：一环、两个点
  * ```
  *
- * 合并做的事就是**用一次"从段首到段末"的导出把中间那几环顶掉**：
- * - 起点＝段首那一环的起点，落点＝段末那一环的落点（所以**基准点重新算过**：
- *   中间那几个点不再有包，链条上只剩段首与段末）；
- * - 内容沿链条取（`points.ts` 的 `sources`：改过的在那一环的包里，没动过的还在起点那份包里）——
- *   复用现成的差量导出那条路（`baseFingerprint` + `toFingerprint`），不另写一套；
- * - 那几份小包**挪进回收站**（不是真删：万一还有机器站在中间某个点上，捞回来就能补上）；
- * - **本机什么都不推进**（差量包语义），只是如果本机正好站在段末那一点上，
- *   `state.bundle.fullFile` 要改指合并后的那一份（原来那份挪走了）。
+ * **合并 ＝ 把那几环的负载接起来**：顺着链条把每一环的条目叠上去（后面的环覆盖前面的），
+ * 段首那一环记的 `base` 就是段首那一点的版本，删除项取"最后一次提到它时是删"的那些。
+ * 头部两端照旧：起点＝段首那一环的起点、落点＝段末那一环的落点（所以**基准点重新算过**，
+ * 中间那几个点不再有自己的包）。
  *
- * **只合"直线段"**：每一步只有一条出边的那些。有分叉（同一个点导过好几份不同落点的包）
- * 就跳过 —— 哪条是正路只有用户知道，插件不猜。
+ * 为什么是"拼装"而不是"重新导一遍"（**用户报的「39 到 54、54 到 55 合不上」之后改的**）：
+ * 重新导要先把**段首那一点**算出来，而它得从一份完整副本起步 —— 用户把第 39 代那份完整副本
+ * 删了（几百 MB，太占地方），于是"算不出起点"就什么都合不了。可合并要的东西其实**全在这几环里**：
+ * 内容在它们的负载里、版本关系在它们的 `base` 里。拼装这条路**一份完整副本都不需要**，
+ * 也不读仓库 —— 手头只有这几环，照样合得成。
+ *
+ * 顺带：拼装出来的包**跟"重新导一份"给接收方的东西是一样的**（同样的两个端点、同样的内容），
+ * 而且中间版本的记录（`history`）也一并带上 —— 站在被吞掉的那一点上的机器照样收得下
+ * （见 `apply.ts` 的 `checkAncestor`：起点相等，或者"算一遍落点"正好对得上）。
  */
 
 /** 一段可以合并的相邻更新包 */
@@ -73,17 +79,25 @@ export async function planBundleMerges(
 	}
 
 	const plans: MergePlan[] = [];
-	let forks = 0;
+	/** 有分叉的那几个点（同一个点导过好几份不同落点的包）：按点去重，界面上报"几处" */
+	const forkPoints = new Set<string>();
 	/** 同一段链条可能从中间某个点起也被走一遍（走出来的更短）—— 按"落点"去重，留最长的那段 */
 	const longest = new Map<string, MergePlan>();
 	for (const start of refs) {
-		const run: typeof refs = [];
+		/**
+		 * 从这一点往后能接上的那一串环 —— **含它自己这一环**（它就是"从这一点出发"的那一环）。
+		 *
+		 * 踩过：这里曾经只收"后继的那几环"，段首那一环自己反倒被丢掉，于是
+		 * 报出来的区间整体偏一环；手里只有两环时（用户报的「39 到 54、54 到 55 合不上」）
+		 * 连"两环"都凑不齐，合并窗口里空空的、什么都合不了。
+		 */
+		const run: typeof refs = start.from ? [start] : [];
 		/** 防环：包被手工改坏时也不至于转不停 */
 		const guard = new Set<string>([start.hash]);
 		let current = start;
 		while (true) {
 			const next = outgoing.get(current.hash) ?? [];
-			if (next.length > 1) forks++;
+			if (next.length > 1) forkPoints.add(current.hash);
 			if (next.length !== 1) break;
 			const step = next[0] as (typeof refs)[number];
 			if (guard.has(step.hash)) break;
@@ -92,9 +106,15 @@ export async function planBundleMerges(
 			current = step;
 		}
 		if (run.length < 2) continue;
-		const anchorHash = run[0]?.from as string;
-		const anchorGeneration = generations.get(anchorHash);
-		if (anchorGeneration === undefined) continue; // 段首那一点不在这堆包里（报不出区间，不碰）
+		const first = run[0] as (typeof refs)[number];
+		const anchorHash = first.from as string;
+		/**
+		 * 段首那一代的号：链条上那一点报过的（一份完整副本 / 别处的落点），
+		 * 或者**这一环自己记的**（头部 `baseGeneration`）—— 起点那份完整副本被删掉时，
+		 * 就只剩后者了（用户报的：「可能是因为我把 39 代完整包删了」——正是这个原因）。
+		 */
+		const anchorGeneration = generations.get(anchorHash) ?? first.baseGeneration;
+		if (anchorGeneration === null || anchorGeneration === undefined) continue;
 		const last = run[run.length - 1] as (typeof refs)[number];
 		const plan: MergePlan = {
 			anchorHash,
@@ -110,14 +130,26 @@ export async function planBundleMerges(
 	}
 	plans.push(...longest.values());
 	plans.sort((a, b) => a.anchorGeneration - b.anchorGeneration);
-	return { plans, forks };
+	return { plans, forks: forkPoints.size };
+}
+
+/** 合并要用到的东西：**只有包目录、日志、状态文件** —— 拼装不读仓库，也不碰本机的世代与基准 */
+export interface MergeOptions {
+	outDir: string;
+	log: Logger;
+	stateFile: string;
+	/** 包名里那段仓库名（拿不到时用段首那份包记着的） */
+	vaultName?: string;
+	/** 每打进包里一个文件报一次（数字含义与导出完全一样：已经打包了几个 / 一共几个） */
+	onProgress?: BundleWriteProgress;
 }
 
 /** 合并一段的结果：合并后那份包、挪进回收站的那几份、以及没挪动的 */
 export interface MergeOutcome {
-	/** 合并后的包（已经有一份一模一样的时，这里给的是那一份的文件名） */
+	/** 合并后的包（完整路径） */
 	file: string;
-	reason?: string;
+	/** 同一环已经有一份时用它，不再重复写（包内容一模一样） */
+	reused: boolean;
 	trashed: string[];
 	/** 挪不动的（回收站里已经有同名的之类），如实报出来 */
 	failed: { name: string; error: string }[];
@@ -129,32 +161,199 @@ export interface MergeOutcome {
  * 顺序是硬的：**先把合并后的包写出来、确认落地，才去挪那几份小的** ——
  * 写失败就什么都不动（那几份包是"目前唯一的改动备份"）。
  */
-export async function mergeBundleGroup(options: ExportOptions, plan: MergePlan): Promise<MergeOutcome> {
-	const outcome = await exportBundle({
-		...options,
-		mode: 'changes',
-		outDir: options.outDir,
-		baseFingerprint: plan.anchorHash,
-		toFingerprint: plan.targetHash,
-		logNote: `合并了相邻的 ${plan.links.length} 份更新包（${plan.anchorGeneration} → ${plan.targetGeneration} 代）`,
-	});
-	/**
-	 * 写不出来有两种情况，都别当成失败：
-	 * - **已经有一份一模一样**（同一环重导过）：那就用它，照样把那几份小的挪走；
-	 * - 没有内容可导（理论上不该发生：那几份包里明明有改动）—— 如实说，不动任何包。
-	 */
-	let file = outcome.file;
-	if (!file) {
-		file = await findRing(options.outDir, plan.anchorHash, plan.targetHash);
-		if (!file) throw new Error(outcome.reason ?? '合并后的包没能写出来，这次什么都没动');
+export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): Promise<MergeOutcome> {
+	const dir = bundleDirForMode(options.outDir, 'changes');
+	const links: { name: string; file: string; header: BundleHeader; payloadOffset: number }[] = [];
+	for (const name of plan.links) {
+		const file = path.join(dir, name);
+		try {
+			const info = await readBundleInfo(file);
+			links.push({ name, file, header: info.header, payloadOffset: info.payloadOffset });
+		} catch (error) {
+			throw new Error(`合并要用的「${name}」现在读不出头部了（${describe(error)}）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
+		}
 	}
-	const trashed = await trashBundles(options.outDir, plan.links.map(name => path.join(bundleDirForMode(options.outDir, 'changes'), name)));
+	const first = links[0];
+	const last = links[links.length - 1];
+	if (!first || !last) throw new Error('这一段里没有可合并的包');
+	// 复核算计划时看到的那一串环现在还是不是首尾相接（包目录可能刚被动过：删了 / 挪了 / 又导了一份）
+	for (let index = 0; index < links.length; index += 1) {
+		const link = links[index] as (typeof links)[number];
+		const expected = index === 0 ? plan.anchorHash : (links[index - 1] as (typeof links)[number]).header.targetBaselineHash;
+		if (link.header.mode !== 'changes' || (link.header.baselineHash ?? null) !== expected) {
+			throw new Error(`合并要用的这几环现在接不上了（「${link.name}」的起点对不上）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
+		}
+	}
+	if ((last.header.targetBaselineHash ?? null) !== plan.targetHash) {
+		throw new Error(`合并要送到的那一点变了（「${last.name}」的落点对不上）—— 重新打开这个窗口再看一遍`);
+	}
+
+	/**
+	 * 每个路径**最后一次**被提到的样子（后面的环覆盖前面的），
+	 * 以及**第一次**被提及时记的 `base` —— 那就是段首那一点的版本，接收方在起点上手里正是它。
+	 */
+	type Mention = { kind: 'entry'; entry: BundleEntry; link: number } | { kind: 'deleted'; item: BundleDeletedEntry; link: number };
+	const finalMention = new Map<string, Mention>();
+	const headBase = new Map<string, { size?: number; mtime?: number; hash?: string }>();
+	/** 中间版本：这一路上它经历过的那些版（被吞掉的环落出来的那一版），给"跳过几个包"的接收方认 */
+	const history = new Map<string, { size: number; mtime: number }[]>();
+	const pushHistory = (rel: string, record: { size: number; mtime: number }) => {
+		const list = history.get(rel) ?? [];
+		if (!list.some(item => item.size === record.size && item.mtime === record.mtime)) list.push({ ...record });
+		history.set(rel, list);
+	};
+	const recordBase = (rel: string, base: { size?: number; mtime?: number; hash?: string }) => {
+		if (!headBase.has(rel)) headBase.set(rel, base);
+	};
+	for (let index = 0; index < links.length; index += 1) {
+		const header = (links[index] as (typeof links)[number]).header;
+		for (const entry of header.entries ?? []) {
+			recordBase(entry.path, {
+				...(entry.baseSize !== undefined ? { size: entry.baseSize } : {}),
+				...(entry.baseMtime !== undefined ? { mtime: entry.baseMtime } : {}),
+				...(entry.baseHash ? { hash: entry.baseHash } : {}),
+			});
+			// 这一环落地的那一版，就是"后面某一环的 base"——只有当它不是最后一版时才算中间版本
+			pushHistory(entry.path, entry);
+			for (const item of entry.history ?? []) pushHistory(entry.path, item);
+			finalMention.set(entry.path, { kind: 'entry', entry, link: index });
+		}
+		for (const item of header.deleted ?? []) {
+			recordBase(item.path, {
+				...(item.baseSize !== undefined ? { size: item.baseSize } : {}),
+				...(item.baseMtime !== undefined ? { mtime: item.baseMtime } : {}),
+				...(item.baseHash ? { hash: item.baseHash } : {}),
+			});
+			finalMention.set(item.path, { kind: 'deleted', item, link: index });
+		}
+	}
+
+	/** 组装要写进新包的条目：内容一律从"最后一次提到它的那一环"的负载里取（拼装，不读仓库） */
+	const sources: BundleSource[] = [];
+	const deleted: BundleDeletedEntry[] = [];
+	for (const rel of [...finalMention.keys()].sort()) {
+		const mention = finalMention.get(rel) as Mention;
+		const base = headBase.get(rel) ?? {};
+		const baseFields = {
+			...(base.size !== undefined ? { baseSize: base.size } : {}),
+			...(base.mtime !== undefined ? { baseMtime: base.mtime } : {}),
+			...(base.hash ? { baseHash: base.hash } : {}),
+		};
+		if (mention.kind === 'deleted') {
+			deleted.push({ path: rel, ...baseFields });
+			continue;
+		}
+		const link = links[mention.link] as (typeof links)[number];
+		/** 中间版本：留到**这一版之前**的那些（最后那一版就是条目本身，不算历史） */
+		const carried = (history.get(rel) ?? []).filter(
+			item => !(item.size === mention.entry.size && item.mtime === mention.entry.mtime),
+		);
+		sources.push({
+			path: rel,
+			abs: '',
+			from: { file: link.file, offset: link.payloadOffset + mention.entry.offset },
+			size: mention.entry.size,
+			mtime: mention.entry.mtime,
+			...(mention.entry.hash ? { hash: mention.entry.hash } : {}),
+			...baseFields,
+			...(carried.length > 0 ? { history: carried } : {}),
+		});
+	}
+
+	const state = await loadState(options.stateFile);
+	const baseGeneration = first.header.baseGeneration ?? plan.anchorGeneration;
+	const targetGeneration = last.header.targetGeneration;
+	const stateId = last.header.stateId ?? null;
+	const vault = first.header.vault || options.vaultName || 'vault';
+	/** 这一路经过的那几个中间点（不含起点与落点）：站在它们上面的机器照样收得下 */
+	const viaHashes = links
+		.slice(0, -1)
+		.map(link => link.header.targetBaselineHash)
+		.filter((hash): hash is string => typeof hash === 'string' && hash.length > 0);
+
+	/** 同一环已经有一份了（以前合过 / 手工导过）：直接用那一份，不再重复写 */
+	const existing = await findRing(options.outDir, plan.anchorHash, plan.targetHash);
+	let file = existing;
+	let reused = existing !== null;
+	if (existing) {
+		options.log.debug(`合并：第 ${baseGeneration} → ${targetGeneration} 代的那一环已经有一份了（${path.basename(existing)}），直接用它的`);
+	}
+	if (!file) {
+		const bundleId = randomUUID();
+		const name = `${safeName(vault)}-更新-${baseGeneration}代到${targetGeneration}代`
+			+ `-状态${stateId?.id ?? '未记'}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`;
+		file = path.join(dir, name);
+		await writeBundle(
+			file,
+			{
+				format: BUNDLE_FORMAT,
+				version: BUNDLE_VERSION,
+				bundleId,
+				parentBundleId: first.header.bundleId,
+				created: Date.now(),
+				mode: 'changes',
+				vault,
+				lineage: first.header.lineage,
+				source: copyRef(state),
+				baseGeneration,
+				targetGeneration,
+				...(first.header.baselineHash ? { baselineHash: first.header.baselineHash } : {}),
+				...(plan.targetHash ? { targetBaselineHash: plan.targetHash } : {}),
+				...(viaHashes.length > 0 ? { viaHashes } : {}),
+				...(stateId ? { stateId } : {}),
+				deleted,
+				emptyDirs: [...(last.header.emptyDirs ?? [])].sort(),
+			},
+			sources,
+			(written, total, writtenPath) => options.onProgress?.(written, total, writtenPath),
+		);
+		// 记一笔（更新记录里那句话就是"合并了相邻的 N 份更新包"）：本机什么都不推进，只换了个包
+		const logEntry = {
+			at: Date.now(),
+			direction: 'export' as const,
+			mode: 'changes' as const,
+			bundleId,
+			file: path.basename(file),
+			base: baseGeneration,
+			target: targetGeneration,
+			entries: sources.length,
+			deleted: deleted.length,
+			checkpoint: true,
+			note: `合并了相邻的 ${links.length} 份更新包（${baseGeneration} → ${targetGeneration} 代）`,
+			...(stateId?.id ? { stateId: stateId.id } : {}),
+		};
+		appendBundleLog(state, logEntry);
+		reused = false;
+	}
+	/**
+	 * 本机正好站在**段末那一点**上时：那一份的"见证包"（原来那一环）马上要被挪走，
+	 * 界面上「← 本机现在的基准」那一行会找不到主人 —— 改指合并后的这一份。
+	 * 它落到的是同一点（`fullHash` 没变），只是换了个包名。
+	 */
+	if (state.bundle && plan.targetHash && state.bundle.fullHash === plan.targetHash) {
+		state.bundle.fullFile = path.basename(file);
+	}
+	await saveState(options.stateFile, state);
+
+	// 新的那份已经落地，这才把那几份小的挪进回收站（不是真删：万一还有机器站在中间某个点上，捞回来就能补上）
+	const trashed = await trashBundles(
+		options.outDir,
+		plan.links.map(name => path.join(dir, name)),
+	);
 	return {
 		file,
-		reason: outcome.reason,
+		reused,
 		trashed: trashed.moved,
 		failed: trashed.failed.map(item => ({ name: path.basename(item.path), error: item.error })),
 	};
+}
+
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function safeName(name: string): string {
+	return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'vault';
 }
 
 /** 目录里有没有一份"从 a 到 b"的更新包（同一环重导过时用它）；给的是**完整路径**（与导出那条路一致） */

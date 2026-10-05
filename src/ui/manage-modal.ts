@@ -134,14 +134,10 @@ export class BundleManagerModal extends Modal {
 			for (const plan of plans) {
 				try {
 					const outcome = await mergeBundleGroup({
-						settings: this.plugin.settings,
-						log: this.plugin.log,
-						vaultRoot: this.plugin.vaultRoot(),
-						vaultName: this.plugin.vaultName(),
-						stateFile: this.plugin.stateFile(),
-						mode: 'changes',
 						outDir: this.effectiveDir(),
-						configDir: this.plugin.configDir(),
+						log: this.plugin.log,
+						stateFile: this.plugin.stateFile(),
+						vaultName: this.plugin.vaultName(),
 						onProgress: (count, total, file) => this.plugin.reportProgress({ done: count, total, path: file, label: '导出中' }),
 					}, plan);
 					done.push(`${plan.anchorGeneration} → ${plan.targetGeneration} 代（${plan.links.length} 份并成 1 份）`);
@@ -235,8 +231,7 @@ class ConfirmMergeModal extends Modal {
 		}
 		contentEl.createEl('p', {
 			text: '**原来那几份会挪进回收站**（不是真删，捞得回来）。'
-				+ '站在中间那几个点上的机器**照样收得下合并后的这一份**：包头部记着它一路经过哪几个点，'
-				+ '应用它就直接落到段末那一点。',
+				+ '站在中间那几个点上的机器**照样收得下合并后的这一份**：应用它会算一遍落点，正好落到段末那一点。',
 			cls: 'locally-save-hint',
 		});
 
