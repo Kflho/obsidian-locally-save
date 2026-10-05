@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
 import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
+import type { BundleMode } from './paths';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { excludePatterns } from '../sync/runner';
@@ -13,6 +14,7 @@ import type { Inventory, FileRecord } from '../sync/types';
 import { formatStamp } from '../utils/format';
 import type { Logger } from '../utils/log';
 import { toNative, dirnameRel } from '../utils/paths';
+import { yieldIfDue, yieldToUi } from '../utils/async';
 import type { PluginSettings } from '../settings/model';
 
 /**
@@ -50,12 +52,19 @@ export interface ExportOptions {
 	 */
 	inventory?: Inventory;
 	/**
-	 * 一次导出多个包时，把**先导出来的那些**填进来（"先更新包、后完整包"的调用方用）。
+	 * 一次导出多个包时，把**先导出来的那些**填进来。
 	 *
-	 * 完整包会清掉被它取代的旧更新包；不排除同一次刚导出的那个的话，
-	 * 用户明明两个都勾了，最后只剩完整包一个。
+	 * 完整包会清掉被它取代的旧更新包；万一哪个调用方反过来先导了更新包，
+	 * 不把它排除掉的话，用户明明两个都勾了、最后却只剩完整包一个。
+	 * 现在两条调用链都按 `plannedExportModes` 先导完整包，所以这是一道保险。
 	 */
 	keepPaths?: string[];
+	/**
+	 * 进度回调：`done / total` ＝ **已经打进包里的文件数 / 总文件数**，从 0 数到总数。
+	 *
+	 * 内部还有一步"算指纹"（给接收方做三方合并用），但那跟用户没关系、不占数字：
+	 * 用户看到的就该是"这些文件打包了多少个"。
+	 */
 	onProgress?: (done: number, total: number, file: string) => void;
 }
 
@@ -85,6 +94,26 @@ export interface ExportOutcome {
 /** 文件名里不能有的字符换成下划线（仓库名可能含 : / 之类） */
 function safeName(name: string): string {
 	return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'vault';
+}
+
+/**
+ * 一次要导两种时**先导哪个**：**先完整副本、后更新包**。
+ *
+ * 顺序曾经是反的（先更新、后完整），那样会演出一幕很怪的戏：先按老基准算出一个更新包
+ * ——顺手把上一个更新包当成"被它取代的旧包"清掉——再导完整副本。用户看到的
+ * 是"我那个老包没了，然后又生成了一个一模一样的"。
+ *
+ * 而完整副本一写完，它自己就是最新的基准：这时更新包按它算**必然是空的**。
+ * 写一个谁都用不上的空包（接收方应用它什么也不会发生，还让人以为漏了什么），
+ * 不如不写、并说清楚为什么。要"一个小文件传出去"就单独勾更新包，别同时勾完整副本。
+ *
+ * 两条调用链（手动导出弹窗 / 同步后的自动留包）都走这个函数，免得哪天又各写各的。
+ */
+export function plannedExportModes(want: { changes: boolean; full: boolean }): BundleMode[] {
+	const modes: BundleMode[] = [];
+	if (want.full) modes.push('full');
+	if (want.changes) modes.push('changes');
+	return modes;
 }
 
 export async function exportBundle(options: ExportOptions): Promise<ExportOutcome> {
@@ -165,11 +194,19 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	}
 
 	const sources: BundleSource[] = [];
-	let done = 0;
+	/** 进度的分母：**要打进包里的文件数**；分子是"已经打进去几个"，从 0 数到它 */
+	const progressTotal = picked.length;
+	// 开跑先报一次 0，并**强制让一帧**：数字得真的从 0 开始显示。
+	// DOM 写进去要等浏览器拿到渲染机会才画得出来，不让这一帧就会被后面的循环挤掉。
+	options.onProgress?.(0, progressTotal, picked[0] ?? '');
+	await yieldToUi();
+	let lastYieldAt = Date.now();
 	for (const file of picked) {
 		const record = inventory.files.get(file);
 		if (!record) continue;
-		options.onProgress?.(done++, picked.length, file);
+		// 这一步（算指纹）不报进度：数字只认"打进包里几个文件"，见 writeBundle 那边的回调。
+		// 循环本身是纯 CPU 的（命中缓存时一个 I/O 都没有），按时间让一帧，界面别僵住。
+		lastYieldAt = await yieldIfDue(lastYieldAt);
 
 		const hash = await fingerprint(options.vaultRoot, state, file, record, settings.rememberFingerprints);
 		// base：上次导出时的版本（按顺序应用的人正好停在这儿）
@@ -236,6 +273,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			emptyDirs,
 		},
 		sources,
+		// 每打包完一个文件，数字 +1（0 → 文件数，就这么个数）
+		(written, _total, writtenPath) => options.onProgress?.(written, progressTotal, writtenPath),
 	);
 
 	// 包写成功了才推进世代与基准

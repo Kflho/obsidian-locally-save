@@ -5,9 +5,10 @@
  * 让用户配好的快捷键失效，所以这里钉死。
  */
 import type { PluginManifest } from "obsidian";
-import { App, Notice } from "obsidian";
+import { App, Modal, Notice } from "obsidian";
 import LocallySavePlugin from "../src/main";
-import { ApplyBundleModal } from "../src/ui/bundle-modal";
+import { ApplyBundleModal, ExportBundleModal } from "../src/ui/bundle-modal";
+import { BundleManagerModal } from "../src/ui/manage-modal";
 
 /** 替身 Notice 记下的消息（真实类型里没有 messages，这里显式取一次） */
 const noticeLog = (Notice as unknown as { messages: string[] }).messages;
@@ -71,6 +72,7 @@ check("命令 ID 是稳定接口", stub.commands.map(c => c.id), [
 	'download-from-copy',
 	'export-bundle',
 	'apply-bundle',
+	'manage-bundles',
 	'toggle-enabled',
 ]);
 check("每条命令都有名字", stub.commands.filter(c => !c.name).length, 0);
@@ -170,8 +172,24 @@ plugin.statusBar.showProgress({ done: 2, total: 100, path: 'b.md' });
 check('接得太近的两次进度只写一次 DOM', barEl.text === firstTick, true);
 plugin.statusBar.showProgress({ done: 100, total: 100, path: 'z.md' });
 check('最后那一次一定要写（否则进度永远停在 1/100）', barEl.text, '同步中 100/100');
+plugin.statusBar.showProgress({ done: 100, total: 100, path: 'z.md', label: '导出中' });
+check('动词由调用方给：导出时不该写着"同步中"', barEl.text, '导出中 100/100');
 plugin.statusBar.showProgress(null);
-checkTrue('收工后回到结果文案', barEl.text !== '同步中 100/100', barEl.text);
+checkTrue('收工后回到结果文案', barEl.text !== '导出中 100/100', barEl.text);
+
+// 2f. 三个同步包弹窗都开一遍：包列表是共用组件，谁的那套 DOM 写坏了都要当场炸出来
+// （还没配「目标文件夹」时列表只显示一句提示，不会碰磁盘）
+const modalInstances = (Modal as unknown as { instances: { opened: boolean }[] }).instances;
+const openedBefore = modalInstances.length;
+new ExportBundleModal(new App(), plugin).open();
+new BundleManagerModal(new App(), plugin).open();
+new ApplyBundleModal(new App(), plugin, 'D:\\传输\\某台机器-full-20261004-153000-abc123.lsave').open();
+check('导出 / 管理 / 导入弹窗都能打开', modalInstances.length - openedBefore, 3);
+check(
+	'弹窗都是"打开"状态（onOpen 真的跑到底了）',
+	modalInstances.slice(openedBefore).every(item => item.opened),
+	true,
+);
 
 // 3. 没设置目标文件夹时，报错要说得像人话（而不是抛个栈）
 let message = '';

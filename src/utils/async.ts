@@ -24,3 +24,21 @@ export function yieldToUi(): Promise<void> {
 
 /** 长循环里每处理多少项让一次步 */
 export const YIELD_EVERY = 25;
+
+/** 纯 CPU 的循环里，隔多久让一帧（见 yieldIfDue） */
+export const YIELD_INTERVAL_MS = 50;
+
+/**
+ * 时间切片：距上次让帧够久了就让一次，返回新的"上次让帧时间"。
+ *
+ * 与 `YIELD_EVERY` 那套"每 N 项让一步"的分工：那套适合每项都要做 I/O 的循环；
+ * **纯 CPU 的循环不能按项数让**（一万项可能只要几毫秒，按项让纯属白等），
+ * 只能看表 —— 每过 `YIELD_INTERVAL_MS` 让一帧，界面才跟得上。
+ *
+ * 用法：`last = await yieldIfDue(last)`，`last` 由每个循环自己带着（互不干扰）。
+ */
+export async function yieldIfDue(lastAt: number, now = Date.now()): Promise<number> {
+	if (now - lastAt < YIELD_INTERVAL_MS) return lastAt;
+	await yieldToUi();
+	return Date.now();
+}

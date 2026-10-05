@@ -9,13 +9,23 @@ import os from 'node:os';
 import path from 'node:path';
 import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan } from '../src/bundle/apply';
-import { exportBundle } from '../src/bundle/export';
+import { exportBundle, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
+import {
+	bundleTrashRoot,
+	emptyBundleTrash,
+	groupBundles,
+	listBundles,
+	readBundleTrash,
+	trashBundles,
+} from '../src/bundle/manage';
+import type { ManagedBundle } from '../src/bundle/manage';
 import { advanceWarnThreshold, parseSizeLimit, shouldOfferReset, warnThreshold } from '../src/bundle/size-warn';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
+import { scanTree } from '../src/sync/disk';
 import { loadState, saveState } from '../src/sync/state';
 import { createLogger } from '../src/utils/log';
 
@@ -895,6 +905,180 @@ const aaC5 = await exportBundle({
 });
 check('关掉开关 → 不清理', aaC5.superseded, []);
 check('于是 changes 里有两个', fs.readdirSync(changesDir).length, 2);
+
+// 28. 一次导两种的顺序：**先完整副本、后更新包**
+// 老顺序（先更新、后完整）会演出一幕很怪的戏：先把老更新包当"被取代的"清掉、
+// 再生成一个内容一模一样的更新包，最后完整包又把新的那个取代一遍（用户报过）
+check('两个都勾：先完整副本、后更新包', plannedExportModes({ changes: true, full: true }), ['full', 'changes']);
+check('只勾更新包', plannedExportModes({ changes: true, full: false }), ['changes']);
+check('只勾完整副本', plannedExportModes({ changes: false, full: true }), ['full']);
+check('都没勾：一个都不导', plannedExportModes({ changes: false, full: false }), []);
+
+// 29. 按新顺序走一遍"两个一起导"：更新包必然是空的 → 不生成文件
+const OUT3 = path.join(ROOT, 'transfer3');
+const FF = path.join(ROOT, 'machineFF');
+const STATE_FF = path.join(ROOT, 'state-ff.json');
+fs.mkdirSync(OUT3, { recursive: true });
+fs.mkdirSync(FF, { recursive: true });
+write(FF, 'a.md', 'A1');
+await exportBundle({ ...exportOptions(FF, STATE_FF), outDir: OUT3 });
+write(FF, 'b.md', 'B1');
+const ffChanges = await exportBundle({ ...exportOptions(FF, STATE_FF, 'changes'), outDir: OUT3 });
+checkTrue('先导出一个有内容的更新包', ffChanges.file !== null, ffChanges.reason ?? '');
+
+const ffFull2 = await exportBundle({ ...exportOptions(FF, STATE_FF), outDir: OUT3 });
+check('完整副本取代了刚才那个更新包', ffFull2.superseded, [path.basename(ffChanges.file as string)]);
+const ffEmpty = await exportBundle({ ...exportOptions(FF, STATE_FF, 'changes'), outDir: OUT3 });
+check('紧接着的更新包是空的：不生成文件', ffEmpty.file, null);
+checkTrue(
+	'理由说得清（自上次完整副本以来没有任何变化）',
+	(ffEmpty.reason ?? '').includes('没有任何变化'),
+	ffEmpty.reason ?? '',
+);
+check('changes 目录里一个包都不剩（旧的被取代，空包没写）', fs.readdirSync(path.join(OUT3, 'changes')), []);
+check('完整副本留着（还原点）', fs.existsSync(ffFull2.file as string), true);
+
+// 30. 进度就是**打包了多少个文件**：从 0 数到文件数，多一个含义都不许有
+const ticks: { done: number; total: number; path: string }[] = [];
+const OUT4 = path.join(ROOT, 'transfer4');
+const PG = path.join(ROOT, 'machinePG');
+const STATE_PG = path.join(ROOT, 'state-pg.json');
+fs.mkdirSync(OUT4, { recursive: true });
+fs.mkdirSync(PG, { recursive: true });
+write(PG, 'a.md', 'A');
+write(PG, 'b.md', 'BB');
+write(PG, 'c.md', 'CCC');
+await exportBundle({
+	...exportOptions(PG, STATE_PG),
+	outDir: OUT4,
+	onProgress: (done, total, file) => ticks.push({ done, total, path: file }),
+});
+check('分母就是文件数', [...new Set(ticks.map(tick => tick.total))], [3]);
+check('从 0 数起、一个文件一格、数到文件数为止', ticks.map(tick => tick.done), [0, 1, 2, 3]);
+check('每一格对应一个真的打进包里的文件', ticks.slice(1).map(tick => tick.path), ['a.md', 'b.md', 'c.md']);
+
+// 容器层也报一次：搬完一个文件报一个，供上面那半段进度用
+const writeTicks: number[] = [];
+const tickSource = path.join(ROOT, 'tick-source.md');
+fs.writeFileSync(tickSource, 'TICK');
+await writeBundle(
+	path.join(OUT4, 'ticks.lsave'),
+	{
+		format: BUNDLE_FORMAT,
+		version: BUNDLE_VERSION,
+		bundleId: '00000000-0000-4000-8000-0000000000ff',
+		parentBundleId: null,
+		created: Date.now(),
+		mode: 'full',
+		vault: '进度仓库',
+		lineage: 'tick-lineage',
+		source: { copyId: 'tick-copy', generation: 0 },
+		baseGeneration: null,
+		targetGeneration: 1,
+		deleted: [],
+		emptyDirs: [],
+	},
+	[
+		{ path: 'one.md', abs: tickSource, size: 4, mtime: Date.now() },
+		{ path: 'two.md', abs: tickSource, size: 4, mtime: Date.now() },
+	],
+	(done, total) => writeTicks.push(done * 100 + total),
+);
+check('写包时每个文件报一次（done×100 + total）', writeTicks, [102, 202]);
+fs.rmSync(path.join(OUT4, 'ticks.lsave'), { force: true });
+
+// 31. 包管理：列出来 → 删除＝挪进回收站 → 清空回收站才是真删
+const listed = await listBundles(OUT3);
+check('完整包都列出来了', listed.length, 2);
+check('类型是读头部认出来的（不是猜文件名）', [...new Set(listed.map(item => item.mode))], ['full']);
+check(
+	'每个包都带文件名 / 大小 / 时间',
+	listed.every(item => item.name.endsWith('.lsave') && item.size > 0 && item.mtime > 0),
+	true,
+);
+
+// 读不出头部的（不是我们的包 / 传坏了）也要列出来 —— 看得见才删得掉
+const bogus = path.join(OUT3, 'changes', 'not-a-bundle.lsave');
+fs.writeFileSync(bogus, 'nope');
+const bogusItem = (await listBundles(OUT3)).find(item => item.name === 'not-a-bundle.lsave');
+check('读不出头部的也列出来', bogusItem?.mode, null);
+checkTrue('并且带上原因', (bogusItem?.error ?? '').includes('同步包'), bogusItem?.error ?? '');
+fs.rmSync(bogus);
+
+const trashedSize = listed.find(item => item.file === ffFull2.file)?.size ?? 0;
+const removed = await trashBundles(OUT3, [ffFull2.file as string]);
+check('删除＝挪走一个', removed.moved, [path.basename(ffFull2.file as string)]);
+check('原处已经没有它了', fs.existsSync(ffFull2.file as string), false);
+const inTrash = await scanTree(bundleTrashRoot(OUT3), { exclude: [] });
+check(
+	'回收站里躺着一个包（时间戳/文件名）',
+	[...inTrash.files.keys()].map(rel => rel.split('/').pop()),
+	[path.basename(ffFull2.file as string)],
+);
+check('回收站数得出来', await readBundleTrash(OUT3), { count: 1, bytes: trashedSize });
+
+await emptyBundleTrash(OUT3);
+check('清空之后回收站是空的', await readBundleTrash(OUT3), { count: 0, bytes: 0 });
+check('回收站目录本身也没了', fs.existsSync(bundleTrashRoot(OUT3)), false);
+check('别的包没被牵连', (await listBundles(OUT3)).length, 1);
+
+// 32. 回收站放哪儿：**跟 bundles 平级**，绝不在 bundles 里面再套一层 .lsave
+// （默认布局下 base 本身就是 `.lsave/bundles`，塞进去会变成 `.lsave/bundles/.lsave/bundles-trash`：两层 .lsave，用户报过）
+const defaultBase = path.join(ROOT, 'vault-copy', '.lsave', 'bundles');
+const siblingTrash = path.join(ROOT, 'vault-copy', '.lsave', 'bundles-trash');
+check('默认布局：回收站是 bundles 的邻居', bundleTrashRoot(defaultBase), siblingTrash);
+check(
+	'自定义文件夹（那儿没有 .lsave）：在它下面建一个',
+	bundleTrashRoot(path.join(ROOT, 'transfer9')),
+	path.join(ROOT, 'transfer9', '.lsave', 'bundles-trash'),
+);
+check(
+	'包文件夹直接指到 .lsave：就放在它里面',
+	bundleTrashRoot(path.join(ROOT, 'vault-copy', '.lsave')),
+	siblingTrash,
+);
+check('没配同步包文件夹 → 空串', bundleTrashRoot(''), '');
+
+// 按默认布局真的删一个包：文件落在 .lsave/bundles-trash 下，bundles 里面干干净净
+const DL = path.join(ROOT, 'machineDL');
+const STATE_DL = path.join(ROOT, 'state-dl.json');
+const DL_BASE = path.join(ROOT, 'vault-copy', '.lsave', 'bundles');
+fs.mkdirSync(DL, { recursive: true });
+write(DL, 'a.md', 'DL');
+const dlFull = await exportBundle({ ...exportOptions(DL, STATE_DL), outDir: DL_BASE });
+const dlRemoved = await trashBundles(DL_BASE, [dlFull.file as string]);
+check('落脚点是 bundles 的邻居', dlRemoved.target.startsWith(siblingTrash), true);
+check('bundles 里面没有多出一层 .lsave', fs.existsSync(path.join(DL_BASE, '.lsave')), false);
+check('回收站里数得到它', (await readBundleTrash(DL_BASE)).count, 1);
+
+// 早期版本塞在 bundles 里面的那个回收站也要认：不然界面报"空的"、包却还躺在硬盘上
+const legacyTrash = path.join(DL_BASE, '.lsave', 'bundles-trash', '20260101-000000');
+fs.mkdirSync(legacyTrash, { recursive: true });
+fs.writeFileSync(path.join(legacyTrash, 'old.lsave'), 'OLD');
+check('老位置的回收站也算数', (await readBundleTrash(DL_BASE)).count, 2);
+await emptyBundleTrash(DL_BASE);
+check('清空会把两处一起清掉', [await readBundleTrash(DL_BASE), fs.existsSync(path.join(DL_BASE, '.lsave'))], [{ count: 0, bytes: 0 }, false]);
+
+// 33. 列表分组：同一类排一起、组内**从新到老**（界面上就是这么一屏一屏看的）
+const fakeBundle = (name: string, mode: 'full' | 'changes' | null, mtime: number): ManagedBundle =>
+	({ file: name, name, dir: '', mode, header: null, size: 1, mtime });
+const grouped = groupBundles([
+	fakeBundle('f-old', 'full', 100),
+	fakeBundle('c-mid', 'changes', 200),
+	fakeBundle('weird', null, 150),
+	fakeBundle('c-new', 'changes', 300),
+	fakeBundle('f-new', 'full', 250),
+]);
+check(
+	'组顺序：更新包 → 完整副本 → 类型未知',
+	grouped.map(group => group.title),
+	['更新包', '完整副本', '类型未知（读不出头部）'],
+);
+check(
+	'每组里面都是从新到老（输入顺序打乱也一样）',
+	grouped.map(group => group.items.map(item => item.name)),
+	[['c-new', 'c-mid'], ['f-new', 'f-old'], ['weird']],
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

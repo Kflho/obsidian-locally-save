@@ -34,6 +34,9 @@ export class SyncStatusBar {
 	 * **节流**：引擎是"每个文件报一次进度"，一万个文件就是一万次 `setText` ——
 	 * 光是这些 DOM 写入就够让界面发顿（用户报的"卡界面"里有它一份）。
 	 * 所以 100 毫秒内的重复更新直接丢掉，收工那一次（null）一定会写。
+	 *
+	 * 动词由调用方给（同步中 / 导出中 / 应用中）：同一个数字在不同的活里
+	 * 意思不一样，别让用户在导出时看到"同步中"。
 	 */
 	showProgress(progress: SyncProgress | null): void {
 		if (!progress) {
@@ -41,7 +44,7 @@ export class SyncStatusBar {
 			this.render();
 			return;
 		}
-		const text = `同步中 ${progress.done}/${progress.total}`;
+		const text = `${progress.label ?? '同步中'} ${progress.done}/${progress.total}`;
 		if (text === this.lastProgressText) return;
 		const now = Date.now();
 		if (progress.done < progress.total && now - this.lastProgressAt < PROGRESS_THROTTLE_MS) return;

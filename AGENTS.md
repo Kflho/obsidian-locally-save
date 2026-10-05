@@ -41,8 +41,35 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   用户会以为同步记录丢了（这是报过的 bug，别再犯）。
 - **同步包默认放在副本的 `.lsave/bundles` 下**：`.lsave` 在扫描副本时是**整个跳过**的，
   包才不会被当成"副本新增文件"同步回仓库。完整包与更新包分 `full` / `changes` 两个子目录
-  （`src/bundle/paths.ts`）。两个自动留包的开关**各自独立**，导出顺序必须是
-  **先更新包、后完整包** —— 完整包会把"上次导出的样子"更新成当前仓库，反过来更新包就没内容可装了。
+  （`src/bundle/paths.ts`）。两个自动留包的开关**各自独立**，导出顺序由
+  `plannedExportModes()`（`bundle/export.ts`）一处说了算，两条调用链（导出弹窗 / 同步后自动留包）
+  都用它：**先完整副本、后更新包**。完整副本一写完，它自己就是最新基准 → 更新包按它算**必然是空的**，
+  这时**不写空包**，只提示一句（"更新包没有生成：刚导出的完整副本已经是当前仓库的完整样子"）。
+  旧顺序（先更新、后完整）演的是另一幕：先按老基准算出更新包（顺手把上一个更新包清掉）、
+  再导完整副本 —— 用户看到的是"我那个包没了，然后又生出来一个一模一样的"（报过的）。
+  要"一个小文件传出去"就只勾更新包，别同时勾完整副本。
+- **导出进度就是"打包了多少个文件"**：`done / total` ＝ **已经写进包里的文件数 / 总文件数**，
+  从 0 数到总数，多一个含义都不许有。`writeBundle` 每搬完一个文件回调一次；开跑先报一次 0，
+  并 `await yieldToUi()` **强制让一帧**（DOM 写进去得等浏览器拿到渲染机会，不然第一帧会被
+  后面的循环挤掉，用户看到的第一个数就不是 0 了）。
+  **别把内部步骤编进数字**：算指纹是给接收方做三方合并用的，跟用户没关系 —— 曾经拆成
+  "算指纹一半、写包一半"（total ＝ 文件数 × 2）还配上阶段字样，被用户骂画蛇添足。
+  那一步现在不报进度（它慢，数字就停在 0，这是老实的）；纯 CPU 的长循环仍按**时间**让帧
+  （`utils/async.ts` 的 `yieldIfDue`，不是按项数的 `YIELD_EVERY` —— 一万项可能只要几毫秒），
+  否则界面会僵住。状态栏那句动词由 `SyncProgress.label` 给（同步中 / 导出中 / 应用中）。
+- **删除同步包 ＝ 挪进回收站**（`bundle/manage.ts` 的 `trashBundles`）：落脚点是
+  `bundleTrashRoot()` 算出来的**离包最近的那个 `.lsave` 里的 `bundles-trash/<时间戳>/`** ——
+  默认布局是 `<目标文件夹>/.lsave/bundles-trash`，**跟 `bundles` 平级**。
+  不许塞进 `bundles` 里面：那会变成 `.lsave/bundles/.lsave/bundles-trash`，两层 `.lsave` 套着
+  （用户报过）；老位置仍然会被 `readBundleTrash` / `emptyBundleTrash` 认（`legacyTrashRoot`），
+  否则用户之前删掉的包会"人间蒸发"。用 `.lsave` 这个名字是因为它整个不参与扫描，
+  包文件夹就算设在副本里也不会被同步回仓库。
+  **只有「清空回收站」是真删**，走 `disk.ts` 的 `removeDirRecursive`（rm -rf 语义，
+  只准传插件自己算出来的回收站路径）；别处删东西仍然一律走 `removeEmptyDir`（rmdir，非空必然失败）。
+  列表 / 删除 / 回收站都在 `bundle/manage.ts`（不 import obsidian，测试直接跑临时目录），
+  界面是 `ui/bundle-list.ts` 那一套列表 —— 导出弹窗、导入弹窗、管理弹窗**共用**，
+  别让"这边能删、那边不能"；**回收站那一行三处都要有**，而且放在列表**上面**
+  （放下面会被"最多 40vh 的滚动列表"顶出视野，用户翻不到就会问"删掉的包去哪了"）。
 - **应用同步包的"强硬程度"有三档**（`ApplyStrictness`：`normal` / `bundle-wins` / `mirror`）：
   - `normal` 走 `planSync` 三方比对（借"仅下载"方向 + `directionDecidesConflict: false`）；
   - **强制两档不走三方比对**，直接两侧比 —— 因为"只有本地改了、包里没改"时三方比对会判成
@@ -105,8 +132,9 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   留着只是占地，还会让人以为"包越攒越多、是不是漏应用了什么"（用户报过）。
   **只在写包成功、状态落盘之后**才动手（旧包是"目前唯一的改动备份"）；
   完整包（还原点）、别的血脉的包、读不出头部的一律不碰；
-  同一次导出里先导出来的那个要用 `keepPaths` 排掉（两个都勾时：先更新包、后完整包，
-  不然完整包那一步会把刚写的更新包当成"被取代的旧包"删掉）。
+  `keepPaths` 用来排掉"同一次里先导出来的那个包"（现在顺序是先完整、后更新，
+  它也够不着 changes 目录，所以只是一道保险：哪天有调用方反过来先导更新包，
+  完整包那一步不至于把它当成"被取代的旧包"删掉）。
   开关是设置里的 `pruneSupersededBundles`。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
   上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
@@ -122,8 +150,9 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
 src/
   main.ts          入口：生命周期与装配（实现 SyncHost）
   sync/            同步引擎（diff/exclude 是纯逻辑，disk 是唯一碰 fs 的）
-  bundle/          .lsave 容器、导出、应用
-  ui/              预览窗口、同步包界面、状态栏、命令动作
+  bundle/          .lsave 容器、导出、应用、包管理（manage.ts：列表 / 回收站）
+  ui/              预览窗口、同步包界面（bundle-modal / bundle-list / manage-modal）、
+                   状态栏、命令动作
   settings/        设置模型 + 字段表 + 面板
 test/              测试（exclude / diff / sync / bundle / settings / commands）
 ```
@@ -131,7 +160,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 命令与设置是稳定接口
 
 - **命令 ID 不许改名**（用户快捷键认它）：`sync-now`、`sync-preview`、`upload-to-copy`、
-  `download-from-copy`、`export-bundle`、`apply-bundle`、`toggle-enabled`。
+  `download-from-copy`、`export-bundle`、`apply-bundle`、`manage-bundles`、`toggle-enabled`。
 - **设置字段名不许改名**（用户 `data.json` 里存着它），改名前要写迁移。
 - `test/commands.test.ts` 会把命令 ID 列表钉死；`test/settings.test.ts` 守住
   字段表完整性。
@@ -139,7 +168,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 556 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 599 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```
