@@ -292,7 +292,7 @@ export function planSync(
 	// 里面有文件的目录不归目录规则管：那里的东西由文件规则自己决定
 	const filledLocal = dirsContainingFiles(local);
 	const filledRemote = dirsContainingFiles(remote);
-	// 已经在往某侧写文件的目录会被顺带建出来（copyFilePreservingMtime 里有 ensureDir），
+	// 已经在往某侧写文件的目录会被顺带建出来（写文件前都会 ensureDir），
 	// 不必再单独立一条 —— 否则界面上会把同一个目录报两遍
 	const implied: Record<'local' | 'remote', Set<string>> = { local: new Set(), remote: new Set() };
 	for (const action of actions) {

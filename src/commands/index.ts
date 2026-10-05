@@ -1,36 +1,58 @@
 import { Notice } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { applyBundleAction, bundleLogAction, exportBundleAction, manageBundlesAction, previewSync, syncNow } from '../ui/actions';
+import {
+	applyBundleAction,
+	bundleLogAction,
+	exportBundleAction,
+	exportBundlesNow,
+	manageBundlesAction,
+	previewBundleExport,
+} from '../ui/actions';
 
 /**
  * 命令注册。
  *
  * **命令 ID 一旦发布就是稳定接口**，改名会让用户的快捷键失效 —— 别改。
- * 一条命令一个动作，实现放 `ui/actions.ts`，这里只做接线。
+ * 所以 0.8.0 砍掉「同步到本地副本」通道时：
+ * - `sync-now` / `sync-preview` 这两个 ID **留着，改指留包**（立即留一次 / 先预览会装什么），
+ *   快捷键照旧能用，做的正好是最接近的那件事；
+ * - `upload-to-copy` / `download-from-copy` 也留一版，只弹一句指路通知 ——
+ *   直接删掉的话，用户的快捷键会静默失效，他只会觉得"插件坏了"。
  */
 export function registerCommands(plugin: LocallySavePlugin): void {
 	plugin.addCommand({
 		id: 'sync-now',
-		name: '立即同步',
-		callback: () => { void syncNow(plugin); },
+		name: '立即留包',
+		callback: () => { void exportBundlesNow(plugin); },
 	});
 
 	plugin.addCommand({
 		id: 'sync-preview',
-		name: '预览同步（不执行）',
-		callback: () => { void previewSync(plugin); },
+		name: '预览：这次会留什么包',
+		callback: () => { void previewBundleExport(plugin); },
 	});
 
+	// 下面两条是被砍掉的副本通道留下的 ID：留着弹指路通知，下一版再删
 	plugin.addCommand({
 		id: 'upload-to-copy',
-		name: '仅上传到本地副本',
-		callback: () => { void syncNow(plugin, { direction: 'upload' }, '上传'); },
+		name: '上传到本地副本（通道已移除）',
+		callback: () => {
+			new Notice(
+				'「同步到本地副本」通道已移除：把改动带走请用「导出同步包…」（导一个更新包拷到另一台机器）',
+				9000,
+			);
+		},
 	});
 
 	plugin.addCommand({
 		id: 'download-from-copy',
-		name: '仅从本地副本拉取',
-		callback: () => { void syncNow(plugin, { direction: 'download' }, '拉取'); },
+		name: '从本地副本拉取（通道已移除）',
+		callback: () => {
+			new Notice(
+				'「同步到本地副本」通道已移除：从别处拿内容请用「打开同步包并应用…」（选一个 .lsave 应用）',
+				9000,
+			);
+		},
 	});
 
 	plugin.addCommand({

@@ -19,7 +19,7 @@ import { openFolderInExplorer } from './reveal';
  */
 export class BundleManagerModal extends Modal {
 	private plugin: LocallySavePlugin;
-	/** 用户自己填的值（可能为空 ＝ 用默认） */
+	/** 弹窗里那个输入框的值（默认就是设置里的包目录，允许临时换一个看看） */
 	private dir: string;
 	private defaultDir: string;
 	private list: BundleListView | null = null;
@@ -28,12 +28,12 @@ export class BundleManagerModal extends Modal {
 		super(app);
 		this.plugin = plugin;
 		this.dir = plugin.settings.bundleDir.trim();
-		this.defaultDir = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
+		this.defaultDir = bundleBaseDir(plugin.settings);
 	}
 
-	/** 此刻实际要去找的根目录：填了用填的，留空就跟着目标文件夹走 */
+	/** 此刻实际要去找的根目录 */
 	private effectiveDir(): string {
-		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir }, this.plugin.settings.targetDir);
+		return bundleBaseDir({ ...this.plugin.settings, bundleDir: this.dir });
 	}
 
 	onOpen(): void {
@@ -49,9 +49,9 @@ export class BundleManagerModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('留空＝跟着目标文件夹走（灰字就是那个位置）')
+			.setDesc('默认用设置里那个「同步包文件夹」；在这里改只影响这个窗口，不会动设置')
 			.addText(text => text
-				.setPlaceholder(this.defaultDir || '先填设置里的「目标文件夹」，或在这里指定一个路径')
+				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
 				.onChange(value => {
 					this.dir = value.trim();

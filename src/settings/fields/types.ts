@@ -14,7 +14,7 @@ import type { PluginSettings } from '../model';
 /**
  * 输入框的灰底提示。
  *
- * 允许传函数是因为**默认值可能依赖别的设置**（例如"同步包文件夹留空就跟着目标文件夹走"）——
+ * 允许传函数是因为**默认值可能依赖别的设置**（例如"灰字里带上当前的仓库路径"这类）——
  * 这种提示要能跟着变。直接给字符串时就是普通提示。
  */
 export type PlaceholderSpec<T = PluginSettings> = string | ((settings: T) => string);

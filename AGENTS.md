@@ -1,7 +1,11 @@
 # Locally Save —— 本仓库约定（改代码前先读）
 
 Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认分支 `main`）：
-把仓库同步到本地文件夹副本，并把改动/整份副本打包成单个 `.lsave` 文件来回搬。
+把仓库打包成单个 `.lsave` 文件来回搬 —— **完整副本**当基准与还原点，**更新包**装自上次完整副本以来的累积改动。
+
+**0.8.0 砍掉了「同步到本地副本」整条通道。** 共用目录（网盘 / NAS / U 盘）那种"一直自动同步"的用法
+交给 Remotely Save + WebDAV / 坚果云这类走云的方案，本插件只做**不联网的单文件搬运**。
+理由、实测与取舍见 `docs/本地副本同步-分析与优化.md`；怎么砍的见 `docs/砍掉副本通道-实施计划.md`。
 
 骨架来自**官方空白模板**（obsidian-sample-plugin）与 **js_02（note-tidy）**。
 
@@ -16,38 +20,90 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
    加测试文件要登记到 `test/run-tests.mjs` 的 `entryPoints`。
 4. **发版脚本**：`version-bump.mjs` 同步 `manifest.json` 与 `versions.json`。
 
+## 只有一条通道（0.8.0 的硬决定，别把第二条请回来）
+
+- **包是唯一的搬运格式**：完整副本（基准 + 还原点）+ 更新包（累积改动）。
+  不要再引入「文件夹副本 / 远程端 / 上传下载 / 同步方向 / 双写」那套概念 ——
+  那正是 0.8.0 删掉的东西：两条通道各自实现一遍"基准 / 冲突 / 回收 / 删除传播"，
+  分叉出的行为差异（副本通道只看 mtime、没有状态编号、不认多写入者）已经交过一次学费。
+- **命令 ID 一个都没改**（用户快捷键认它），但语义换了：
+  - `sync-now` → 「立即留包」＝ 按两个自动留包开关立即留一次；
+  - `sync-preview` → 「预览：这次会留什么包」＝ 打开导出预览（只读不写）；
+  - `upload-to-copy` / `download-from-copy` **暂时还注册着**，只弹一句指路通知
+    （"通道已移除，请用「导出同步包…」/「打开同步包并应用…」"）—— 直接删掉的话，
+    用户的快捷键会静默失效，他只会觉得插件坏了。**这两个 ID 下一版再删**。
+- **删设置项是可以的**，但要守两条：**语义不能悄悄变**、**别把该留的能力删掉**。
+  0.8.0 删了 `targetDir` 与 `syncDirection`，迁移规则写在 `settingsFrom` 里：
+  老 `data.json` 只有 `targetDir`、没填过 `bundleDir` → `bundleDir` 迁到
+  `<旧 targetDir>/.lsave/bundles`（包还在原处，用户不必重新找）。
+- **`bundleDir` 是必填项**：以前留空会跟着"目标文件夹"走，现在没有那个兜底了。
+  留空时导出 / 应用按钮是灰的并提示去填 —— 包放哪儿必须由用户说了算，
+  插件不该替他藏一个默认值（他填过才知道去哪儿找包、才会记得拷走）。
+- 三个自动触发的**字段名不变**（`syncOnStartup` / `autoSyncInterval` / `syncAfterSaveDelay`），
+  语义改成"自动留包的时机"；两个「自动留包」开关都关着时，触发了什么都不做、不弹错。
+
 ## 本插件自己的硬约束
 
-- **引擎不许 import obsidian**：`src/sync/` 与 `src/bundle/` 通过 `SyncHost` 接口拿
-  「仓库路径 / 状态文件 / 配置目录 / 进度回调」，所以能在测试里拿临时目录直接跑。
-  `disk.ts` 是**唯一**碰 `node:fs` 的地方（fs 操作都收在这里）。
-- **先算后做**：改文件之前一律先出计划（`planSync` / `planBundleApply`），
-  预览与"打开包"都只读不写。执行阶段逐条 catch，一条失败不影响其它条。
+- **引擎不许 import obsidian**：`src/sync/` 与 `src/bundle/` 里没有任何 `from 'obsidian'`。
+  仓库路径 / 状态文件 / 配置目录 / 日志 / 进度回调都由调用方传进去（见 `bundle/export.ts` 的
+  `ExportOptions`），所以测试能拿临时目录直接跑。碰 `node:fs` 的只有三处：
+  `sync/disk.ts`（扫描 / 删除 / 回收 / 哈希，是同步侧的收口处）、`bundle/format.ts`（读写容器）、
+  `bundle/apply.ts`（落盘与挪文件）。
+- **先算后做**：`planBundleApply()` / `planSync()` 只读不写，用户看过报告才 `executeBundlePlan()`。
+  「打开包」这一步可以随便点，不会碰文件。导出也一样：`planBundleExport()` 只算。
 - **删除必须过 base 检查**，没有例外：本地改过的东西不删，宁可留着。
+- **`src/sync/diff.ts` 是应用包的三方比对引擎**（`planSync` + `sameRecord` + `dirsContainingFiles`）：
+  `bundle/apply.ts` 的 `normal` 档借"仅下载"方向 + `directionDecidesConflict: false` 走它。
+  **副本通道没了不等于它能删** —— 它是包应用的底座，`test/diff.test.ts` 的整套矩阵就是给它守的。
 - **移动不能当成"删 + 加"**：会两边各留一份。识别条件是「新路径确实是新出现的 +
   旧路径在基准里 + 对侧那份自基准以来没动过 + 大小与修改时间完全一致」，
-  四条缺一不可（`src/sync/diff.ts` 的 `detectMoves`）。
-- **复制后必须对齐 mtime**（`copyFilePreservingMtime`）：不对齐的话每轮都误判成改过，反复重传。
-- **mtime 有 2 秒容差**（FAT/exFAT）。写测试时要注意：**同一秒内改同样长度的文件，
-  引擎会认为没变过**，测试里要把修改时间拉开。
-- **配置目录名不能写死**：用户可能改过，运行时用 `Vault#configDir`（`SyncHost.configDir()`）；
-  默认排除规则里的 `.obsidian/` 只是兜底。
+  四条缺一不可（`diff.ts` 的 `detectMoves`）。
+- **mtime 有 2 秒容差**（FAT/exFAT）。判据是"大小 + 修改时间"，**导出挑成员与应用比对都用它**：
+  写测试时要注意，**同一秒内改同样长度**的文件会被当成没动过（换内容长度，或把时间拉开）。
 - **`.lsave` 容器**：头部先写、偏移量提前算好（不回写，回写最容易断电写坏）；
   尾部布局是 `[标记][JSON][长度]`，读的时候先看文件末尾 4 字节 —— 写读顺序必须一致。
 - **文件名要带包 ID 前几位**：时间戳只到秒，同秒连导两个包会互相覆盖。
-- **上次同步的结果必须落盘**：存在 `sync-state.json` 的 `lastSync`（结构化数据，
-  由 `recordFromOutcome` 写入、`statusBarText`/`describeRecord` 负责显示），
-  启动时 `restoreLastSync()` 读回来。以前只存内存，重启后状态栏变回"尚未同步"——
-  用户会以为同步记录丢了（这是报过的 bug，别再犯）。
-- **同步包默认放在副本的 `.lsave/bundles` 下**：`.lsave` 在扫描副本时是**整个跳过**的，
-  包才不会被当成"副本新增文件"同步回仓库。完整包与更新包分 `full` / `changes` 两个子目录
-  （`src/bundle/paths.ts`）。两个自动留包的开关**各自独立**，导出顺序由
-  `plannedExportModes()`（`bundle/export.ts`）一处说了算，两条调用链（导出弹窗 / 同步后自动留包）
-  都用它：**先完整副本、后更新包**。完整副本一写完，它自己就是最新基准 → 更新包按它算**必然是空的**，
-  这时**不写空包**，只提示一句（"更新包没有生成：刚导出的完整副本已经是当前仓库的完整样子"）。
-  旧顺序（先更新、后完整）演的是另一幕：先按老基准算出更新包（顺手把上一个更新包清掉）、
-  再导完整副本 —— 用户看到的是"我那个包没了，然后又生出来一个一模一样的"（报过的）。
-  要"一个小文件传出去"就只勾更新包，别同时勾完整副本。
+- **留包顺序一处说了算**（`plannedExportModes()`，`bundle/export.ts`）：**先完整副本、后更新包**。
+  两条调用链（导出弹窗 / 自动留包）都走它。完整副本一写完，它自己就是最新基准 →
+  更新包按它算**必然是空的**，这时**不写空包**，只提示一句
+  （"更新包是空的：刚留的完整副本已含全部内容"）。旧顺序（先更新、后完整）演的是另一幕：
+  先按老基准算出更新包（顺手把上一个更新包清掉）、再导完整副本 ——
+  用户看到的是"我那个包没了，然后又生出来一个一模一样的"（报过的）。
+- **导出预览与真正导出共用一套挑选逻辑**（`export.ts` 的 `prepareBundle` → `planBundleExport`）：
+  预览说一套、实际导另一套是明令禁止的。预览**只算不写**；算不出来（最典型：更新包还没有基准）
+  时**不抛错**，把原因放进 `problem` 字段，界面照常打开并说明。
+- **自动留包不依赖任何别的通道**：`ui/actions.ts` 的 `exportBundlesNow()` 是所有入口的交汇点
+  （命令 `sync-now`、左侧栏第一个图标、启动 / 定时 / 保存后三种触发）。
+  锁是插件上的 `plugin.bundleBusy`（`main.tick()` 也看它，免得一轮跑很久时每 30 秒敲门一次），
+  跑完把 `plugin.lastBundleAt` 往后推。三处刻意省：整库**只扫一次**、两个包共用清单、
+  **自上次留包以来没有任何变化时一个包都不写**（完整包一写就是整库重写）。
+  没有变化、没有基准、两个开关都没开，都要**如实说一句**，不能静默。
+  自动触发加 `{ quiet: true }`：没有变化这种正常结果只写状态栏与日志，不弹通知。
+- **自动应用收到的包**（`bundle/incoming.ts` + `autoApplyIncoming` 设置，默认关）：这是"接收端
+  不用手点"的那一步，`main.tick()` 每 30 秒调一次 `checkIncomingBundles()`。安全边界是硬的，改它之前先读这段：
+  - **只自动应用"不会动到本地已有东西"的更新包** —— 判据是 `apply.ts` 的 `isDestructivePlan()`
+    （要删文件 / 删空文件夹 / 覆盖本地改动 / 会产生冲突副本，四者任一即算），
+    它与应用对话框的确认框**共用同一个函数**，别各写一份；
+  - **完整副本从来不自动应用**（可能删掉本机独有的文件），只提示一句；
+  - **每次只看最新那一个**：更新包是累积的、完整包是完整清单 —— 更新的包已经包含旧的，
+    所以比它旧、还没处理的记成 `superseded` 就走。同一个血脉的旧包其实在导出时就被
+    `removeSupersededChanges` 清掉了，这条规矩主要挡"不同血脉 / 同代的两个包同时躺在文件夹里"；
+  - 跳过：头部读不出（不是我们的包 / 传坏了）、我导出或应用过的（`bundleLog`）、
+    源头就是我这台机器（`header.source.copyId === state.copyId`，日志被裁掉也认得出来）、
+    以及 `state.incoming` 里记过的 —— **每个包只处理一次**，不然每 30 秒弹一遍；
+  - 处理结论一律落盘（`state.incoming`，只留最近 `INCOMING_LIMIT` 笔；写之前**重新读一遍状态**，
+    别把 apply 刚写的东西盖掉）；记不下只是"下次再提示一遍"，不该让已经成功的应用看起来失败；
+  - **一拍里的顺序**：先收包、后留包；刚应用过东西的那一拍**不再留包** ——
+    那等于立刻生成"回礼包"，两边容易来回搬运（回传走的是欠账式那一套）。
+- **UI 上别撞社区的规矩**（社区插件评审会照着这些报警告，`npm run lint` 也会）：
+  - 不用已废弃的 API 换一个按钮颜色：`setDestructive()` 要 Obsidian 1.13+，而我们的
+    `minAppVersion` 是 1.7.0 —— **不为一个颜色抬最低版本**，用 `ui/modal-layout.ts` 的
+    `markDestructive()`（有就上红样式，没有就当普通按钮），别去调废弃的 `setWarning()`；
+  - 别在代码里写死 `.obsidian`：配置目录一律走 `Vault#configDir`（`host.configDir()`），
+    连设置面板里的**示例文案**也别拿它当例子（评审会当成硬编码路径报出来）；
+  - 定时器用 `window.setTimeout` / `window.clearTimeout`（弹窗窗口里也能对上号）；
+  - README 顶部必须留一份**英文概览**：评审检查 "README 有没有英文说明"，而且要把
+    "读写仓库外的文件 / 唯一的 shell 调用（注册表关联）/ 剪贴板只写不读" 说清楚。
 - **导出进度就是"打包了多少个文件"**：`done / total` ＝ **已经写进包里的文件数 / 总文件数**，
   从 0 数到总数，多一个含义都不许有。`writeBundle` 每搬完一个文件回调一次；开跑先报一次 0，
   并 `await yieldToUi()` **强制让一帧**（DOM 写进去得等浏览器拿到渲染机会，不然第一帧会被
@@ -56,14 +112,13 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   "算指纹一半、写包一半"（total ＝ 文件数 × 2）还配上阶段字样，被用户骂画蛇添足。
   那一步现在不报进度（它慢，数字就停在 0，这是老实的）；纯 CPU 的长循环仍按**时间**让帧
   （`utils/async.ts` 的 `yieldIfDue`，不是按项数的 `YIELD_EVERY` —— 一万项可能只要几毫秒），
-  否则界面会僵住。状态栏那句动词由 `SyncProgress.label` 给（同步中 / 导出中 / 应用中）。
+  否则界面会僵住。状态栏那句动词由 `SyncProgress.label` 给（导出中 / 应用中）。
 - **删除同步包 ＝ 挪进回收站**（`bundle/manage.ts` 的 `trashBundles`）：落脚点是
   `bundleTrashRoot()` 算出来的**离包最近的那个 `.lsave` 里的 `bundles-trash/<时间戳>/`** ——
-  默认布局是 `<目标文件夹>/.lsave/bundles-trash`，**跟 `bundles` 平级**。
-  不许塞进 `bundles` 里面：那会变成 `.lsave/bundles/.lsave/bundles-trash`，两层 `.lsave` 套着
-  （用户报过）；老位置仍然会被 `readBundleTrash` / `emptyBundleTrash` 认（`legacyTrashRoot`），
-  否则用户之前删掉的包会"人间蒸发"。用 `.lsave` 这个名字是因为它整个不参与扫描，
-  包文件夹就算设在副本里也不会被同步回仓库。
+  用户在设置里填的包目录是 `<某目录>` 时，就是 `<某目录>/.lsave/bundles-trash`，
+  **跟 bundles 平级**。不许塞进 `bundles` 里面：那会变成 `.lsave/bundles/.lsave/bundles-trash`，
+  两层 `.lsave` 套着（用户报过）；老位置仍然会被 `readBundleTrash` / `emptyBundleTrash` 认
+  （`legacyTrashRoot`），否则用户之前删掉的包会"人间蒸发"。
   **真删只有两条路**：「**彻底删除**」（行内按钮，`manage.ts` 的 `deleteBundles` → `removeFile`，
   一次一个包，单独确认）与「清空回收站」（`disk.ts` 的 `removeDirRecursive`，rm -rf 语义，
   只准传插件自己算出来的回收站路径）；别的删除一律是"挪进回收站"。
@@ -91,34 +146,27 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
     ＝"对方删过它"，在更新包里＝"什么也不代表"，两套选项本来就该不一样（用户要求）。
   - 引擎层仍然兜底：把 `bundle-wins` / `mirror` 传给更新包会 clamp 成 `normal`
     （`strictnessDowngraded` 标出来）。这条不能只靠界面（用户可能先选方式、再换包）。
-- **应用有模块级串行锁**（`bundle/apply.ts` 里的 `applying`）：同步那边有 plugin 层锁，应用这边以前没有，
-  两个对话框一起点会互相踩着写同一批文件。
-- **目录（含空文件夹）要建，也要删 —— 但删必须过基准检查**：`scanTree` 除了文件还要收 `dirs`；
-  `planSync` 出 `folders`（对面没有、基准里也没有 → 建；按 `allowsUpload/allowsDownload` 过滤）与
-  `removedFolders`（对面没有、**基准里有** → 那一侧把它删了 → 跟着删；还要看「同步删除」开关）。
-  基准是 `TargetState.dirs`（`rebuildDirs` 只记**两边都有**的目录，与文件同一条规矩），
-  老状态文件没有这一项 → 升级后第一轮谁都不删。
-  **目录的删除只能走 `removeEmptyDir`（`rmdir`）**：非空必然失败，所以清单漏看了文件
-  （被排除规则挡住的那种）也只会"没删掉"。里面有文件的目录一律不归目录规则管（`dirsContainingFiles`），
-  交给文件规则；被文件删除腾空的目录由 `pruneEmptyDirsDetailed` 顺手收拾。
+- **应用有模块级串行锁**（`bundle/apply.ts` 里的 `applying`）：两个对话框一起点会互相踩着写同一批文件。
+  （留包那边的锁在 `plugin.bundleBusy`，见上。）
+- **目录（含空文件夹）要建，也要删 —— 但删必须过基准检查**：包里的目录集 = `header.emptyDirs`
+  ＋ 条目的上级目录（`dirsInBundle`）；`mirror` 删掉本地所有"包里没有"的空目录（它的承诺就是完全一致）、
+  `bundle-wins` / `normal` 只删 `state.bundle.dirs` 里记过的（＝对方删过它，`normal` 还要看开关）。
+  应用 / 导出后 `state.bundle.dirs` 只记**两边都见过**的目录。目录位置杵着同名文件时**报失败不硬来**。
   **删除清单必须"深的排前面"**（`byDepthDesc`）：父子都要删时先删父目录会被"非空"挡住，
   一轮只清掉最深的一层 —— 用户看到的就是"应用一次删不干净、每次多删几个"（报过的 bug）。
+  **目录的删除只能走 `removeEmptyDir`（`rmdir`）**：非空必然失败，所以清单漏看了文件
+  （被排除规则挡住的那种）也只会"没删掉"。
   **计划里的空目录还要按磁盘复核**（`pickRemovableEmptyDirs`）：扫描清单看不见被排除规则挡住的东西
   （`*.lsave`、`desktop.ini`…），`rmdir` 却会失败；复核时**从深到浅累计**，一个目录算"能删"
   要么本来就空、要么里面的东西全是这次要删的子目录。复核不掉的**如实报出来**
-  （`SyncOutcome.keptFolders` / `ApplyReport.foldersKept`，通知里也写一句原因），
-  并把它记进目录基准 —— 否则下一轮会把它当"新目录"重新建到对面去（用户明明删过它）。
-  已经要写文件的目录会被 `copyFilePreservingMtime` 里的 `ensureDir` 顺带建出来，
-  所以 `folders` 要跳过这些（`receivingSide()` + `implied`），否则界面上会重复报数。
-  同步包那头：包里的目录集 = `header.emptyDirs` ＋ 条目的上级目录（`dirsInBundle`）；
-  `mirror` 删掉本地所有"包里没有"的空目录（它的承诺就是完全一致）、
-  `bundle-wins` / `normal` 只删 `state.bundle.dirs` 里记过的（＝对方删过它，`normal` 还要看开关）。
-  应用/导出后 `state.bundle.dirs` 只记**两边都见过**的目录。目录位置杵着同名文件时**报失败不硬来**。
+  （`ApplyReport.foldersKept`，通知里也写一句原因），并把它记进目录基准 ——
+  否则下一轮会把它当"新目录"重新建到对面去（用户明明删过它）。
+  已经要写文件的目录会被 `ensureDir` 顺带建出来，所以 `folders` 要跳过这些
+  （`receivingSide()` + `implied`），否则界面上会重复报数。
   **「删父目录」与「建新子目录」不许同时发生**（`removableDirs`）：对面把 `A` 删了、而你这边刚在 `A`
   里加了 `A/B`（不在基准里）时，父目录必须留着 —— 一个目录能删，除「基准里有 ＋ 底下没文件」之外，
   还得**底下的每个子目录也都能删**。否则一轮里「删 A」和「把 A/B 建过去」打架，用户看到的是
-  「第一次删了又建了一部分、第二次才彻底同步成功」（报过的 bug）。判断按**深的在前**递归做：
-  子目录的结论先算好，父目录再引用。
+  「第一次删了又建了一部分、第二次才彻底同步成功」（报过的 bug）。判断按**深的在前**递归做。
   报告里**文件与文件夹都要报**（包里几个、本地几个、一致几个、要建几个、要删几个、留着几个）——
   只报文件的话，用户永远不知道目录这边差多少。
 - **目录 / 文件冲突**（本地同路径是文件夹、包里是文件）：`normal` 档报成明确失败、**不动那个文件夹**；
@@ -126,9 +174,8 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
 - **上一次应用的结果必须落盘**：`state.bundle.files` 只记**两边都见过、且这次真的写成了一致**的路径 ——
   绝不能写成"当前仓库的完整清单"（那会把我独有的文件也记进基准，下次应用就被当成"对方删过它"删掉，这是报过的 bug）。
 - **冲突输的那一份必须挪进回收目录的「冲突」文件夹**（`disk.ts` 的 `CONFLICT_TRASH_DIR`，
-  本地侧 `.trash/locally-save/冲突/时间戳/`、副本侧 `.lsave/trash/冲突/时间戳/`），
-  **不要留在原地** —— 留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份、越滚越多。
-  两条通道（副本同步 / 应用同步包）都要守这条。
+  本地侧 `.trash/locally-save/冲突/时间戳/`），**不要留在原地** ——
+  留在仓库里的冲突副本会跟着下一个包传到对面去，两边各滚一份、越滚越多。
 - **更新包只按它点名的删除清单删文件**（`header.deleted`）：**"没提到"不等于"被删了"** ——
   更新包只装自完整副本以来变过的文件，其余文件在包里根本不出现；照三方比对的结果翻译
   `delete-local` 的话，接收方每个没被提到的文件都会被判成"对方删过它"（1 万文件的仓库 +
@@ -145,8 +192,7 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **只在写包成功、状态落盘之后**才动手（旧包是"目前唯一的改动备份"）；
   完整包（还原点）、别的血脉的包、读不出头部的一律不碰；
   `keepPaths` 用来排掉"同一次里先导出来的那个包"（现在顺序是先完整、后更新，
-  它也够不着 changes 目录，所以只是一道保险：哪天有调用方反过来先导更新包，
-  完整包那一步不至于把它当成"被取代的旧包"删掉）。
+  它也够不着 changes 目录，所以只是一道保险）。
   **没删掉的必须如实报出来**（`SupersededReport.kept` → `ExportOutcome.keptChanges` →
   弹窗里那句话）：是别的血脉、还是世代不比新包小。悄悄留着会被当成"清理开关没生效"，
   或者更糟 —— 当成偶发 bug（用户报过："同一个操作第一遍没清、第二遍清掉了"）。
@@ -156,7 +202,7 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   （`bundle/apply.ts` 里是 `Math.max`）。它记的是"这份副本见过这条血脉的哪一段"，
   不是"我此刻的内容像哪一代"。拨回去的后果就是上面那条：`removeSupersededChanges` 判
   "新包取代了旧包"靠的是「世代**严格更小**」，世代一倒退，同一个"导出完整包 + 更新包"的动作
-  会第一遍清不掉、第二遍才清（用户报成偶发 bug，`test/bundle.test.ts` 第 36 组钉住了）。
+  会第一遍清不掉、第二遍才清（用户报成偶发 bug，`test/bundle.test.ts` 钉住了）。
 - **基准指纹（`bundle/baseline.ts`）＝两台机器互相发包时的「共同祖先令牌」**：
   完整包的指纹由**它自己的清单**算出来（接收方也能重算，不用信任头部那个字段，旧包也照用）；
   更新包带上「我基于的那份完整副本的指纹」（它手里只有变过的那部分，算不出来）。
@@ -171,7 +217,7 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   收下对方的之后确实得把自己这半也发回去；但**一应用就自动导一个包**会互相套娃：
   对方收到那份又生成一份、再传回来，两边无限来回（用户报的"无限套娃"）。
   所以只**记一笔账**（时间、包名、文件/仓库、改动数/删除数），通知、应用报告、更新记录里
-  都如实说"你这边还有 N 个改动没发出去"，等用户下次导出更新包（手动，或"同步后自动留改动包"）
+  都如实说"你这边还有 N 个改动没发出去"，等用户下次导出更新包（手动，或自动留包）
   时**自然一起带上** —— 累积语义下那一个包里两半都在，对方应用时已经一致的部分会走"✓ 已经有了"。
   任何一次成功导出都把账清掉（`exportBundle` 一处），别让界面一直挂着一条过期的欠账。
   应用报告里的 `report.pendingChanges / pendingDeletes`（`planBundleApply` 里算）＝
@@ -191,6 +237,9 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **行里的指纹要截断成 `HASH_KEEP`（16 位）**再喂进哈希 —— 缓存里存的是 16 位、现算的是 64 位，
   不统一就会"同一个仓库算两次得到两个编号"（踩过：应用完整副本之后两边对不上）。
   这一步**不报进度**（进度只认"打进包里几个文件"），但它会读盘（冷缓存），所以按时间让帧。
+- **状态栏那句话只有一个真相来源**：`bundleLog` 的最后一条（`describeLastActivity`）。
+  启动时 `main.ts` 的 `restoreLastActivity()` 从状态文件读回来 —— 以前那句只活在内存里，
+  一重启就变回"尚未留包"（0.8.0 之前是"尚未同步"），用户会以为记录丢了。
 - **应用完整副本时，新基准只能从「这个包自己的清单」里建**（`apply.ts` 的 `freshAnchor`，
   只收"真的写成了一致"的条目）：**绝不能拿"我原来的基准"当底**（以前是 `{...baseline}`）——
   我独有的、包里根本没有的文件会漏进基准，之后我一导更新包，它们就被当成"我删掉了它们"
@@ -201,20 +250,16 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   应用时的一个兜底勾选 —— 包里点名要删的一律留着，先不动。对方基准不对时用它扛一下，
   而不是赌一把把本地文件删掉（删了虽然进回收目录，但用户根本不该被迫做这个决定）。
 - **同步包更新记录（像 git log）**：`state.bundleLog`（`BundleLogEntry`，只留最近
-  `BUNDLE_LOG_LIMIT = 100` 条，别把状态文件撑大 —— 它每次同步都要读写）＋
-  `bundle/log.ts` 的 `appendBundleLog / describeLogEntry / describeBundlePosition`。
-  `exportBundle` 与 `executeBundlePlan` 在**成功之后、saveState 之前**追加一条
-  （方向、类型、世代 base→target、文件数/删除数、包名、来自哪个仓库）；
+  `BUNDLE_LOG_LIMIT = 100` 条，别把状态文件撑大 —— 它每次读写都要过一遍）＋
+  `bundle/log.ts` 的 `appendBundleLog / describeLogEntry / describeBundlePosition /
+  describeLastActivity`。`exportBundle` 与 `executeBundlePlan` 在**成功之后、saveState 之前**
+  追加一条（方向、类型、世代 base→target、文件数/删除数、包名、来自哪个仓库）；
   `state.bundle.fullFile` 记"我这份基准是哪份包"，界面上才说得清"我站在哪儿"。
   界面是 `ui/log-modal.ts`（命令 `bundle-log`，管理弹窗里也有个「更新记录…」按钮）。
-  为什么要有：状态文件只记"现在什么样"，用户看不出"从哪份完整副本开始、中间收发过什么"
-  （用户提的："类似 git 的更新记录功能，比较直观"）。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
   上限是设置 `bundleSizeWarnLimit`，取值只能来自 `SIZE_LIMIT_OPTIONS`
-  （`''`＝默认 200MB / 100MB / 500MB / 1GB / `'0'`＝不提醒）—— 以前是自由文本，
-  要认 `200MB`/`500KB`/`1GB`/不带单位/留空/0 六种写法，纯属给自己找事；解析仍在
-  `size-warn.ts`（纯函数，测试钉死），界面只管选。到线弹窗，三个选项：**重新导出完整副本** /
-  **打开更新包文件夹** / **跳过这次导出**。
+  （`''`＝默认 200MB / 100MB / 500MB / 1GB / `'0'`＝不提醒）。到线弹窗，三个选项：
+  **重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
   顺序上建议"先把更新包传过去应用、再换基准"（增量传得快），所以弹窗必须写清**换基准会清掉旧更新包**。
   「跳过」把**提醒线**记进 `state.bundle.warnedThreshold`，并按原上限整数倍往上抬
   （200 → 400 → 600…，不是按百分比）；换过基准则清零 —— 这样不会每轮同步都弹。
@@ -224,38 +269,47 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
 
 ```
 src/
-  main.ts          入口：生命周期与装配（实现 SyncHost）
-  sync/            同步引擎（diff/exclude 是纯逻辑，disk 是唯一碰 fs 的）
-  bundle/          .lsave 容器、导出、应用、包管理（manage.ts：列表 / 回收站）
-  ui/              预览窗口、同步包界面（bundle-modal / bundle-list / manage-modal）、
-                   状态栏、命令动作
+  main.ts          入口：生命周期与装配（仓库路径 / 状态文件 / 配置目录 / 进度回调）
+  sync/            sync 侧的公共件：diff（三方比对，包应用在用）/ disk（唯一扫盘的地方）/
+                   exclude（排除规则纯逻辑）/ vault（回收目录名 + 排除清单合成）/
+                   state（状态文件）/ hash-cache / state-id（状态编号）
+  bundle/          .lsave 容器（format）、导出（export）、应用（apply）、
+                   包管理（manage：列表 / 回收站）、基准指纹（baseline）、更新记录（log）、
+                   大小提醒（size-warn）、路径（paths）
+  ui/              导出弹窗与导出预览（bundle-modal / export-preview-modal）、
+                   应用弹窗、包列表（bundle-list）、管理 / 更新记录弹窗、
+                   动作层（actions：留包 / 预览 / 导出 / 应用）、状态栏、命令动作
   settings/        设置模型 + 字段表 + 面板
-test/              测试（exclude / diff / sync / bundle / settings / commands）
+test/              测试（manifest / exclude / diff / bundle / auto-export / auto-apply /
+                   drop / protocol / settings / commands）
 ```
 
 ## 命令与设置是稳定接口
 
 - **命令 ID 不许改名**（用户快捷键认它）：`sync-now`、`sync-preview`、`upload-to-copy`、
   `download-from-copy`、`export-bundle`、`apply-bundle`、`manage-bundles`、`bundle-log`、
-  `toggle-enabled`。
+  `toggle-enabled`。后两个"副本"命令现在是**过渡占位**（只弹指路通知），下一版删。
 - **设置字段名不许改名**（用户 `data.json` 里存着它），改名前要写迁移。
-  **删设置项是可以的**（0.7.0 一口气删了 6 项：`startupNotice` / `greeting` /
-  `showLastSyncInStatusBar` / `bundleWindowMaximize` / `rememberFingerprints` /
-  `pruneSupersededBundles`），但要守两条：**语义不能悄悄变**（老 `syncAfterSave: false`
-  必须迁移成 `syncAfterSaveDelay: 0`，否则用户升级后突然开始自动写盘），
-  以及**别把该留的能力删掉**（`skipDeletions` 那种"一次一勾"的对话框选项不占设置位，
-  删它等于把用户从"对方基准不对"的坑里唯一的抓手拿走）。
-  删掉的字段留在旧 `data.json` 里不读即可，`settingsFrom` 不会把它们带进内存。
-- `test/commands.test.ts` 会把命令 ID 列表钉死；`test/settings.test.ts` 守住
-  字段表完整性。
+  0.8.0 删了 `targetDir` / `syncDirection`（副本通道），0.7.0 一口气删了 6 项
+  （`startupNotice` / `greeting` / `showLastSyncInStatusBar` / `bundleWindowMaximize` /
+  `rememberFingerprints` / `pruneSupersededBundles`）—— 删掉的字段留在旧 `data.json` 里
+  不读即可，`settingsFrom` 不会把它们带进内存。**`test/settings.test.ts` 会核对
+  字段表不多不少**，加 / 删字段必须同时改它。
+- 现在的设置分四页：「通用」「同步包」「自动留包」「界面与交互」。
+  「同步包」页里的分组：包放在哪 · 自动留包 · 应用同步包时的默认处理 · 手动导出 ·
+  管理 · 应用同步包 · 用 Obsidian 直接打开。
 
 ## 改代码的流程
 
 ```bash
-npm test        # 706 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 663 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
-npm run lint    # eslint（obsidianmd 插件规则）
+npm run lint    # eslint（obsidianmd 插件规则）—— 0 error 才算过
 ```
+
+`test/auto-export.test.ts` 与 `test/auto-apply.test.ts` 是两条链路的端到端
+（插件装配 + 真实临时目录）：前者管"留包"，后者管"收包 → 安全边界 → 自动应用"，
+改动自动留包 / 自动应用 / 状态栏 / 通知文案时要一起看它们。
 
 发版：改 `manifest.json` 的版本 → `npm version x.y.z` → push `main` → 在 `main` 上打同名 tag
 （tag 不带 `v` 前缀；CI 会校验 tag 与 manifest 版本一致并跑测试）。
@@ -280,5 +334,9 @@ CI 直接红（本机却全绿）。发版流程里的 `npm test` 就是这道�
 
 ## 还没做的事
 
-- [ ] 移动端：目前 `isDesktopOnly: true`（同步到仓库外必须用 fs）
+- [ ] `upload-to-copy` / `download-from-copy` 两条过渡命令的删除（下一版）。
+- [ ] 移动端：目前 `isDesktopOnly: true`（读写仓库之外的文件必须用 fs）
 - [ ] 大仓库的性能：扫描是元数据遍历，几百 MB 没问题；几万文件时值得再做增量扫描
+- [ ] 自动应用目前**每 30 秒轮询一次**（跟着 `tick()` 走）。真要"秒级响应"得上 `fs.watch`，
+  但那要处理一堆平台差异（网盘同步目录的写入是分块的，容易看到半个文件）；
+  包目录里本来就允许出现"还没传完的包"，所以轮询 + 头部校验这套更稳
