@@ -8,6 +8,7 @@ import {
 } from '../model';
 import type { PluginSettings } from '../model';
 import { anchorOptions, listFullAnchorsSync, LATEST_STATE } from '../../bundle/anchor';
+import { listPointRefsSync } from '../../bundle/points';
 import { bundleBaseDir } from '../../bundle/paths';
 import { loadStateSync } from '../../sync/state';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
@@ -219,23 +220,27 @@ function hasBundleDir(settings: PluginSettings): boolean {
 }
 
 /**
- * 「从哪个状态 / 到哪个状态」的选项：**本地有几份完整包就有几个状态**，外加「最新」。
+ * 「从哪个状态 / 到哪个状态」的选项：**完整副本 ＋ 链条上的每一个点**（每份更新包
+ * 落出的那一点，见 `bundle/points.ts`），外加「最新」。
  *
  * 设置面板是同步渲染的，所以这里用的是同步那套读法（`listFullAnchorsSync` /
- * `loadStateSync`）—— 只看包目录与状态文件，量都很小。
+ * `listPointRefsSync` / `loadStateSync`）—— 只读包头部，很便宜。
  * 读不出来（没填包目录、状态文件还没建）也要给出一张表：至少留着「最新」那一项，
  * 否则下拉框会空着，用户以为这个设置坏了。
  */
 function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
 	const fallback = end === 'from'
-		? { [LATEST_STATE]: '最新那份完整副本' }
+		? { [LATEST_STATE]: '我站的这个基准点' }
 		: { [LATEST_STATE]: '最新（当前仓库，现在这一刻）' };
 	/** 现在存着的值（一个基准指纹）：那一份要是找不到了，也得把它列出来（否则下拉框会显示成别的项） */
 	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
 	try {
 		const base = bundleBaseDir(plugin.settings);
 		const state = loadStateSync(plugin.stateFile());
-		const anchors = listFullAnchorsSync(base, state.lineage);
+		const anchors = [
+			...listFullAnchorsSync(base, state.lineage),
+			...listPointRefsSync(base, state.lineage),
+		];
 		const options = anchorOptions(anchors, end, {
 			generation: state.bundle?.fullGeneration ?? null,
 			hash: state.bundle?.fullHash ?? null,
@@ -243,7 +248,7 @@ function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<str
 		});
 		const wanted = coerceAnchorFingerprint(current);
 		if (wanted !== '' && !(wanted in options)) {
-			options[wanted] = `基准 ${wanted}（这个目录里找不到那一份完整副本）`;
+			options[wanted] = `基准 ${wanted}（这个目录里找不到这一个状态）`;
 		}
 		return options;
 	} catch {

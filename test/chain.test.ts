@@ -15,7 +15,9 @@ import { executeBundlePlan, planBundleApply } from '../src/bundle/apply';
 import type { ApplyOptions } from '../src/bundle/apply';
 import { planChain, runChain } from '../src/bundle/chain';
 import { exportBundle } from '../src/bundle/export';
+import type { ExportOutcome } from '../src/bundle/export';
 import type { ExportOptions } from '../src/bundle/export';
+import { listPointRefsSync, materializePointSync } from '../src/bundle/points';
 import { readBundleInfo } from '../src/bundle/format';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import type { PluginSettings } from '../src/settings/model';
@@ -162,6 +164,103 @@ checkTrue('（前置）本机这一点确实不在 OUT 那条链上', lonePoint 
 const planLone = await planChain(applyOptions(LONE, STATE_LONE, full.file as string), OUT);
 check('接不上：没有步骤', planLone.steps.length, 0);
 checkTrue('接不上：说清本机这一点不在链上', (planLone.problem ?? '').includes(lonePoint), String(planLone.problem));
+
+// 5. **从链条上的任意一点导出**：两个下拉列的是「完整副本 ＋ 链条上的每一个点」，
+//    起点 / 终点都可以是中间点。终点是中间点时，内容要**沿链条逐文件取** ——
+//    改过的在那一环的包里，没动过的还在起点那份包里（见 `bundle/points.ts`）
+const CP_A = path.join(ROOT, 'chain-a');
+const CP_B = path.join(ROOT, 'chain-b');
+const CP_C = path.join(ROOT, 'chain-c');
+const STATE_CP_A = path.join(ROOT, 'state-chain-a.json');
+const STATE_CP_B = path.join(ROOT, 'state-chain-b.json');
+const STATE_CP_C = path.join(ROOT, 'state-chain-c.json');
+const OUT_CP = path.join(ROOT, 'transfer-chain');
+for (const dir of [CP_A, CP_B, CP_C, OUT_CP]) fs.mkdirSync(dir, { recursive: true });
+
+const T_CP = Date.now() - 1_200_000;
+const cpExport = (mode: 'full' | 'changes', extra: Record<string, string> = {}): Promise<ExportOutcome> =>
+	exportBundle({
+		settings: settings(), log, vaultRoot: CP_A, vaultName: '我的笔记',
+		stateFile: STATE_CP_A, mode, outDir: OUT_CP, ...extra,
+	});
+write(CP_A, 'a.md', 'A1', T_CP);
+write(CP_A, 'b.md', 'B1', T_CP);
+const cpFull = await cpExport('full');
+checkTrue('（前置）链条机器的完整包导出成功', cpFull.file !== null, cpFull.reason ?? '（没给原因）');
+write(CP_A, 'a.md', 'A2 改过', T_CP + 60_000);
+const cpLink1 = await cpExport('changes');
+write(CP_A, 'b.md', 'B2 也改过', T_CP + 120_000);
+const cpLink2 = await cpExport('changes');
+
+const lineage = (await readBundleInfo(cpFull.file as string)).header.lineage;
+const p0 = (await readBundleInfo(cpFull.file as string)).header.baselineHash as string;
+const p1 = (await readBundleInfo(cpLink1.file as string)).header.targetBaselineHash as string;
+const p2 = (await readBundleInfo(cpLink2.file as string)).header.targetBaselineHash as string;
+
+const refs = listPointRefsSync(OUT_CP, lineage);
+check('链条上的三个点都列得出来（完整包 + 两环）', refs.map(ref => ref.hash).sort(), [p0, p1, p2].sort());
+check('世代也跟着写出来', refs.map(ref => ref.generation).sort(), [1, 2, 3]);
+
+const pointP1 = materializePointSync(OUT_CP, lineage, p1);
+check(
+	'P1 的清单沿链条算得出来：a 是改过的那版、b 还是老样子',
+	[pointP1?.files['a.md']?.size, pointP1?.files['b.md']?.size],
+	[Buffer.byteLength('A2 改过'), Buffer.byteLength('B1')],
+);
+const pointP2 = materializePointSync(OUT_CP, lineage, p2);
+check(
+	'P2 的清单：两个都改了',
+	[pointP2?.files['a.md']?.size, pointP2?.files['b.md']?.size],
+	[Buffer.byteLength('A2 改过'), Buffer.byteLength('B2 也改过')],
+);
+check('找不到的点就返回 null（不猜）', materializePointSync(OUT_CP, lineage, 'ffffffffffffffff'), null);
+
+// B 站在 P1、C 站在 P0
+for (const [root, stateFile, file] of [
+	[CP_B, STATE_CP_B, cpFull.file as string],
+	[CP_B, STATE_CP_B, cpLink1.file as string],
+	[CP_C, STATE_CP_C, cpFull.file as string],
+] as const) {
+	await executeBundlePlan(await planBundleApply(applyOptions(root, stateFile, file)), applyOptions(root, stateFile, file));
+}
+check('（前置）B 站在 P1 上', (await loadState(STATE_CP_B)).bundle?.fullHash, p1);
+check('（前置）C 站在 P0 上', (await loadState(STATE_CP_C)).bundle?.fullHash, p0);
+
+// ① 「从 P1 导到 P2」：这一份跟链条上那一环（L2 就是 P1 → P2）**内容一模一样**
+//    → 不重复生成，直接说清"已经有一份了"（省得文件夹里躺着两份同样的东西）
+const cpOne = await cpExport('changes', { baseFingerprint: p1, toFingerprint: p2 });
+check('从 P1 到 P2 已经有一份 → 不重复生成', cpOne.file, null);
+checkTrue('并说清是哪一份', (cpOne.reason ?? '').includes(path.basename(cpLink2.file as string)), cpOne.reason ?? '');
+const cpOneApply = applyOptions(CP_B, STATE_CP_B, cpLink2.file as string);
+check('B 收得下链条上那一环（起点正是它站的 P1）', (await planBundleApply(cpOneApply)).report.baselineMatch, 'match');
+await executeBundlePlan(await planBundleApply(cpOneApply), cpOneApply);
+check('B 应用完落到 P2', (await loadState(STATE_CP_B)).bundle?.fullHash, p2);
+check('B 的内容就是 P2 那一刻的', [read(CP_B, 'a.md'), read(CP_B, 'b.md')], ['A2 改过', 'B2 也改过']);
+
+// ② 「从 P0 导到 P2」：链条上**没有**这样一份包（L1 是 P0→P1、L2 是 P1→P2）
+//    → 现导一份，内容沿链条逐文件取：a 的字节在第一环的负载里、b 的在第二环的负载里
+const cpTwo = await cpExport('changes', { baseFingerprint: p0, toFingerprint: p2 });
+checkTrue('从 P0 到 P2 现导一份', cpTwo.file !== null, cpTwo.reason ?? '');
+const cpTwoHeader = (await readBundleInfo(cpTwo.file as string)).header;
+check('起点 P0、终点 P2', [cpTwoHeader.baselineHash, cpTwoHeader.targetBaselineHash], [p0, p2]);
+check('终点世代也对上', cpTwoHeader.targetGeneration, 3);
+check('它把两环的改动都装进来了', cpTwoHeader.entries.map(entry => entry.path).sort(), ['a.md', 'b.md']);
+check('导差量包不推进本机（A 还站在 P2）', (await loadState(STATE_CP_A)).bundle?.fullHash, p2);
+
+const cpTwoApply = applyOptions(CP_C, STATE_CP_C, cpTwo.file as string);
+const cpTwoResult = await executeBundlePlan(await planBundleApply(cpTwoApply), cpTwoApply);
+check('C 应用完落到 P2', (await loadState(STATE_CP_C)).bundle?.fullHash, p2);
+check(
+	'C 拿到的是 P2 那一刻的字节（两份包的负载各出一半）',
+	[read(CP_C, 'a.md'), read(CP_C, 'b.md')],
+	['A2 改过', 'B2 也改过'],
+);
+check('状态编号一致', cpTwoResult.stateIdCompare, 'match');
+check(
+	'两台机器最后站在同一点上',
+	(await loadState(STATE_CP_B)).bundle?.fullHash,
+	(await loadState(STATE_CP_C)).bundle?.fullHash,
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

@@ -4,6 +4,7 @@ import { listBundles } from './manage';
 import { BUNDLE_EXT, readBundleInfoSync } from './format';
 import type { BundleHeader } from './format';
 import { bundleDirsToScan } from './paths';
+import type { ChainPoint } from './points';
 import { listFilesSync } from '../sync/disk';
 import type { StateIdInfo } from '../sync/state';
 import type { FileRecord } from '../sync/types';
@@ -53,6 +54,45 @@ export interface BundleAnchor {
 	stateId: StateIdInfo | null;
 	/** 包文件的修改时间：同一代有好几份时按它挑最新的那份 */
 	mtime: number;
+	/**
+	 * 每个文件的字节在哪儿（包文件 + 负载内偏移）。
+	 *
+	 * **只有"链条上的点"才带它**（见 `points.ts`）：那种点没有自己的包文件，
+	 * 内容散在链条上好几份包里（改过的在那一环的包里，没动过的还在起点那份包里）。
+	 * 完整副本不带它 —— 那种情况直接读 `file` 的负载、按条目 offset 取就行。
+	 */
+	sources?: Map<string, { file: string; offset: number; size: number; mtime: number; hash?: string }>;
+}
+
+/**
+ * 报错 / 下拉框只需要点儿的"身份"这几样 —— 清单是重活，等真要用了再去取
+ * （`BundleAnchor` 与 `points.ts` 的 `PointRef` 都满足它）。
+ */
+export interface AnchorRef {
+	generation: number;
+	hash: string | null;
+	stateId: StateIdInfo | null;
+	name: string;
+}
+
+/**
+ * **链条上的一个点**（`points.ts` 算出来的）→ 一个能当"状态"用的锚点。
+ *
+ * 它可能是一份更新包落出的点：清单与 `sources` 都是沿链条叠加出来的，
+ * 所以导"到这一点为止"的差量包时，内容能逐文件从正确的包里取。
+ */
+export function anchorOfPoint(point: ChainPoint): BundleAnchor {
+	return {
+		generation: point.generation,
+		hash: point.hash,
+		files: point.files,
+		emptyDirs: point.emptyDirs,
+		name: point.name,
+		file: point.file,
+		stateId: point.stateId,
+		mtime: point.mtime,
+		sources: point.sources,
+	};
 }
 
 /** 一份完整包 → 一个状态（不是完整包就返回 null） */
@@ -159,7 +199,7 @@ export async function findFullAnchor(
  * 但它认不出"我们是不是从同一份完整副本分出来的" —— 那件事只有**基准指纹**说了算。
  * 所以标签里两个都在：先报第几代（人读的），再报指纹 / 状态编号（机器对得上的）。
  */
-export function describeAnchor(anchor: BundleAnchor, end: 'from' | 'to' = 'from'): string {
+export function describeAnchor(anchor: AnchorRef, end: 'from' | 'to' = 'from'): string {
 	const id = end === 'from'
 		? `基准 ${anchor.hash ?? '未记（旧版包）'}`
 		: `状态 ${anchor.stateId?.id ?? '未记（旧版包）'}`;
@@ -186,11 +226,14 @@ export interface LatestInfo {
  * 同一份东西（指纹相同）只留一个选项。
  *
  * 「最新」在两端意思不一样，所以文案分开写：
- * - `from`：最新 ＝ **我最新那份完整副本**（默认；对方多半就站在它上面）；
+ * - `from`：最新 ＝ **我站的这个基准点**（默认；对方多半就站在它上面，链条也是从它往外长）；
  * - `to`：最新 ＝ **当前仓库**（现在这一刻，含你刚改的东西）—— 这也是默认。
+ *
+ * 选项里除了完整副本，还有**链条上的点**（每份更新包落出的那一点，见 `points.ts`）：
+ * 用户完全可能想"从对方站的某个中间点导到另一个点"。
  */
 export function anchorOptions(
-	anchors: BundleAnchor[],
+	anchors: AnchorRef[],
 	end: 'from' | 'to',
 	latest: LatestInfo,
 ): Record<string, string> {
@@ -198,8 +241,8 @@ export function anchorOptions(
 	if (end === 'from') {
 		const detail = latest.generation !== null
 			? `第 ${latest.generation} 代${latest.hash ? ` · 基准 ${latest.hash}` : ''}`
-			: '还没立过基准';
-		options[LATEST_STATE] = `最新那份完整副本（${detail}）`;
+			: '还没站上过基准点';
+		options[LATEST_STATE] = `我站的这个基准点（${detail}）`;
 	} else {
 		options[LATEST_STATE] = '最新（当前仓库，现在这一刻）';
 	}
@@ -217,7 +260,7 @@ export function anchorOptions(
  * 报错 / 界面提示里把"现在有哪些状态"列出来：`第 36 代 · 基准 7a22d790…（包名）`。
  * 照这一串去对方「更新记录」里找同一个指纹，就知道该选哪一个。
  */
-export function describeAnchorList(anchors: BundleAnchor[]): string {
+export function describeAnchorList(anchors: AnchorRef[]): string {
 	if (anchors.length === 0) return '这个文件夹里一份同血脉的完整副本都没有';
 	return `现在找得到的状态是：${anchors
 		.map(anchor => `${describeAnchor(anchor, 'from')}（${anchor.name}）`)

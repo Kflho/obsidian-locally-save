@@ -8,7 +8,8 @@ import type { StateIdInfo } from '../sync/state';
 import { describeStateId } from '../bundle/log';
 import { exportBundle, plannedExportModes } from '../bundle/export';
 import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
-import type { BundleAnchor, LatestInfo } from '../bundle/anchor';
+import type { AnchorRef, LatestInfo } from '../bundle/anchor';
+import { listPointRefsSync } from '../bundle/points';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
 import { loadStateSync } from '../sync/state';
@@ -82,11 +83,15 @@ export class ExportBundleModal extends Modal {
 	 * 真的选了找不到的状态，导出时引擎会明确报错并列出"现在有哪些"。
 	 */
 	private fillStateOptions(): void {
-		let anchors: BundleAnchor[] = [];
+		let anchors: AnchorRef[] = [];
 		let latest: LatestInfo = { generation: null, hash: null, file: null };
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
-			anchors = listFullAnchorsSync(this.effectiveDir(), state.lineage);
+			// 完整副本 ＋ **链条上的点**（每份更新包落出的那一点）：都能当起点 / 终点
+			anchors = [
+				...listFullAnchorsSync(this.effectiveDir(), state.lineage),
+				...listPointRefsSync(this.effectiveDir(), state.lineage),
+			];
 			latest = {
 				generation: state.bundle?.fullGeneration ?? null,
 				hash: state.bundle?.fullHash ?? null,
@@ -104,7 +109,7 @@ export class ExportBundleModal extends Modal {
 			// 选中的那份包已经不在目录里了：照样列出来并标一下 ——
 			// 悄悄跳回「最新」的话，用户会以为选的还是那一份
 			if (value !== '' && !(value in options)) {
-				dropdown.addOption(value, `基准 ${value}（这个目录里找不到那一份完整副本）`);
+				dropdown.addOption(value, `基准 ${value}（这个目录里找不到这一个状态）`);
 			}
 			dropdown.setValue(value);
 		};
@@ -123,13 +128,16 @@ export class ExportBundleModal extends Modal {
 		}
 	}
 
-	/** 选中的那一份状态（从本地完整包里找），找不到就是 null */
-	private pickedAnchor(fingerprint: string): BundleAnchor | null {
+	/** 选中的那一个状态（完整副本或链条上的点），找不到就是 null —— 只用来显示第几代 */
+	private pickedAnchor(fingerprint: string): AnchorRef | null {
 		if (fingerprint === '') return null;
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
-			return listFullAnchorsSync(this.effectiveDir(), state.lineage)
-				.find(anchor => anchor.hash === fingerprint) ?? null;
+			const refs: AnchorRef[] = [
+				...listFullAnchorsSync(this.effectiveDir(), state.lineage),
+				...listPointRefsSync(this.effectiveDir(), state.lineage),
+			];
+			return refs.find(anchor => anchor.hash === fingerprint) ?? null;
 		} catch {
 			return null;
 		}
@@ -140,7 +148,7 @@ export class ExportBundleModal extends Modal {
 		if (!this.wantChanges) return '';
 		const from = this.pickedAnchor(this.fromState);
 		const fromText = this.fromState === ''
-			? '最新那份完整副本'
+			? '我站的这个基准点'
 			: `第 ${from?.generation ?? '?'} 代（${this.fromState}）`;
 		const to = this.pickedAnchor(this.toState);
 		const toText = this.toState === ''
@@ -148,7 +156,7 @@ export class ExportBundleModal extends Modal {
 			: `第 ${to?.generation ?? '?'} 代`;
 		const note = this.toState !== ''
 			? '内容到那一份为止'
-			: (this.fromState !== '' ? '只对站在这一份基准上的机器是确定的' : '');
+			: (this.fromState !== '' ? '只对站在这一个基准点上的机器是确定的' : '');
 		return `本次：${fromText} → ${toText}${note ? `（${note}）` : ''}`;
 	}
 
