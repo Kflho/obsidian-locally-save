@@ -243,18 +243,24 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   世代号是每台机器各数各的节奏号（两边各自 +1 会碰号），按代选会选错那一份
   （用户实测：给"32 → 36"的包选了第 32 代当起点，对方回「基准对不上」——
   它报的指纹其实是最新那份的，说明它早就站在新基准上了）。**本地有几份完整包就有几个状态**，
-  选项由 `bundle/anchor.ts` 在渲染那一刻扫包目录算出来（`listFullAnchorsSync` + `loadStateSync`：
+  选项在渲染那一刻扫包目录算出来（`listFullAnchorsSync` + **`listPointRefsSync`** + `loadStateSync`：
   设置面板是同步渲染的，等不了 await；`readBundleInfoSync` 是唯一那份实现的同步版，
-  异步那个只是外壳）。`anchorOptions()` 的键＝指纹（同一份只列一次），标签＝
-  `第 N 代 · 基准 xxxx`（起点）/ `第 N 代 · 状态 xxxx`（终点）。两条硬规矩：
+  异步那个只是外壳）。**选项里除了完整副本，还有链条上的每一个点**（`bundle/points.ts`：
+  每份更新包落出的那一点，清单与内容都沿链条叠加算出来 —— 那些点没有自己的包文件）。
+  `anchorOptions()` 的键＝指纹（同一份只列一次），标签＝
+  `第 N 代 · 基准 xxxx`（起点）/ `第 N 代 · 状态 xxxx`（终点）。终点是链条上的点时，
+  内容逐文件从 `sources` 里取（改过的在那一环的负载里、没动过的还在起点那份包里）；
+  两端跟链条上某一环完全一样时**不重复生成**（`findExistingCheckpoint` 会认出它）。两条硬规矩：
   - **指定的那一份找不到就报错**（`describeAnchorList` 列出现在有哪些），
     **绝不悄悄换一份** —— 包头部的 `baseGeneration` / `baselineHash` 决定接收方怎么比对，
     偷偷换一份等于骗它。预览（`planBundleExport`）照旧**不抛错**，把原因塞进 `problem`。
-  - **起点与终点的语义不一样**：起点＝对方手里那份完整副本，条目与删除项的 `base` 必须取
+  - **起点与终点的语义不一样**：起点＝对方手里那一点，条目与删除项的 `base` 必须取
     **那份清单里的版本**（`baseFrom: 'anchor'`）—— 拿"我上次导出的样子"当 base，
-    会把对方正常的旧版本误判成"它也改过"，满屏冲突副本；终点＝送到那份完整包**记着的那一刻**，
-    内容**从那份包的负载里读**（`BundleSource.from`，不是当前仓库），
-    `emptyDirs` / `stateId` 也用它的。
+    会把对方正常的旧版本误判成"它也改过"，满屏冲突副本；终点＝送到**那一点记着的那一刻**，
+    内容**从包里读**（`BundleSource.from`，不是当前仓库）——
+    完整副本的字节在它自己的负载里（`payloadOffset + entry.offset`），
+    链条上的点则由 `points.ts` 的 `sources` 逐文件指出"去哪个包的哪一段取"；
+    `emptyDirs` / `stateId` 也用终点的。
 - **差量包（终点是一份完整副本）导的时候本机什么都不推进**：内容不是你现在的仓库，
   所以 `state.generation` / `state.bundle`（含 `fullFiles`、`history`、`dirs`）/ `state.stateId`
   全都不动，`pendingReturn` 也不结清（你那半的最新改动它没带上）。日志那一条要标
@@ -383,6 +389,7 @@ src/
                    包管理（manage：列表 / 回收站）、基准指纹（baseline）、
                    状态 / 基准点的选择（anchor：本地那几份完整包 ↔ 更新包的起点终点）、
                    接链（chain：认链 / 判能不能接 / 按顺序接）、
+                   链条上的点（points：清单与内容沿链条叠加，给"从哪个状态到哪个状态"用）、
                    自动收包（incoming：挑包 / 安全边界 / 按链条顺序接）、
                    更新记录（log）、路径（paths）
   ui/              导出弹窗与导出预览（bundle-modal / export-preview-modal）、
@@ -415,7 +422,7 @@ test/              测试（manifest / exclude / diff / bundle / chain / auto-ex
 ## 改代码的流程
 
 ```bash
-npm test        # 797 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 819 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）—— 0 error 才算过
 ```

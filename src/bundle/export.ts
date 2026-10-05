@@ -1,12 +1,13 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
-import type { BundleDeletedEntry, BundleEntry, BundleHeader, BundleInfo, BundleSource } from './format';
+import type { BundleDeletedEntry, BundleHeader, BundleInfo, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
 import { baselineOfBundle, listingHashOfFiles } from './baseline';
-import { describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
+import { anchorOfPoint, describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
 import type { BundleAnchor } from './anchor';
+import { listPointRefsSync, materializePointSync } from './points';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
@@ -312,11 +313,16 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 	const found = pickAnchor(anchors, requested);
 	if (found) return found;
 
+	// 链条上的点（某份更新包落出的那一点）：清单沿链条叠加算出来
+	const point = materializePointSync(options.outDir, state.lineage, requested);
+	if (point) return anchorOfPoint(point);
+
+	const refs = listPointRefsSync(options.outDir, state.lineage);
 	throw new Error(
-		`「更新包从哪个状态开始」选的是基准 ${requested}，但在 ${options.outDir} 里没有这一份完整副本。`
-		+ `${describeAnchorList(anchors)}。`
-		+ '先把那份完整副本拷进 full 目录（或从回收站捞回来），'
-		+ '或者把设置里「从哪个状态开始」改回「最新那份完整副本」',
+		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一个状态。`
+		+ `${describeAnchorList([...anchors, ...refs])}。`
+		+ '先把那份包拷进来（或从回收站捞回来），'
+		+ '或者把设置里「从哪个状态开始」改回「我站的这个基准点」',
 	);
 }
 
@@ -332,10 +338,16 @@ async function resolveTarget(options: ExportOptions, state: PluginState): Promis
 	const anchors = await listFullAnchors(options.outDir, state.lineage);
 	const found = pickAnchor(anchors, requested);
 	if (found) return found;
+
+	// 链条上的点：内容散在链条上好几份包里，`sources` 会告诉导出那条路每个文件去哪取
+	const point = materializePointSync(options.outDir, state.lineage, requested);
+	if (point) return anchorOfPoint(point);
+
+	const refs = listPointRefsSync(options.outDir, state.lineage);
 	throw new Error(
-		`「更新包到哪个状态为止」选的是基准 ${requested}，但在 ${options.outDir} 里没有这一份完整副本。`
-		+ `${describeAnchorList(anchors)}。`
-		+ '先把那份完整副本拷进 full 目录（或从回收站捞回来），'
+		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一个状态。`
+		+ `${describeAnchorList([...anchors, ...refs])}。`
+		+ '先把那份包拷进来（或从回收站捞回来），'
 		+ '或者把设置里「到哪个状态为止」改回「最新（当前仓库）」',
 	);
 }
@@ -606,14 +618,30 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	}
 
 	/**
-	 * 差量包（终点是一份完整副本）：每个文件的内容**从那份包的负载里取**。
-	 * 读一次它的头部与尾部拿到负载起点，再按条目的 offset 逐段搬。
+	 * 差量包（终点不是"最新"）：每个文件的内容**取终点那一刻的**，不是当前仓库的。
+	 *
+	 * 两个来源：
+	 * - 终点是**链条上的一个点**（`points.ts` 算出来的）：`sources` 已经逐文件算好
+	 *   "去哪份包的哪一段取" —— 改过的在那一环的包里，没动过的还在起点那份包里；
+	 * - 终点是一份**完整副本**：读一次它的头部拿到负载起点，再按条目的 offset 取。
 	 */
 	let checkpointInfo: BundleInfo | null = null;
-	let checkpointEntries: Map<string, BundleEntry> | null = null;
+	const checkpointSources = new Map<string, { file: string; offset: number; size: number; mtime: number; hash?: string }>();
 	if (checkpoint && target) {
-		checkpointInfo = await readBundleInfo(target.file);
-		checkpointEntries = new Map(checkpointInfo.header.entries.map(entry => [entry.path, entry]));
+		if (target.sources) {
+			for (const [file, where] of target.sources) checkpointSources.set(file, where);
+		} else {
+			checkpointInfo = await readBundleInfo(target.file);
+			for (const entry of checkpointInfo.header.entries) {
+				checkpointSources.set(entry.path, {
+					file: target.file,
+					offset: checkpointInfo.payloadOffset + entry.offset,
+					size: entry.size,
+					mtime: entry.mtime,
+					...(entry.hash ? { hash: entry.hash } : {}),
+				});
+			}
+		}
 	}
 
 	// ------------------------------------------------------ 组装源文件清单
@@ -650,16 +678,16 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		};
 
 		if (checkpoint) {
-			const entry = checkpointEntries?.get(file);
-			if (!entry || !checkpointInfo) continue;
+			const where = checkpointSources.get(file);
+			if (!where) continue;
 			sources.push({
 				path: file,
 				// 内容不从仓库读：a→b 的包里装的是 **b 那一刻**的字节
 				abs: '',
-				from: { file: target?.file ?? '', offset: checkpointInfo.payloadOffset + entry.offset },
-				size: entry.size,
-				mtime: entry.mtime,
-				...(entry.hash ? { hash: entry.hash } : {}),
+				from: { file: where.file, offset: where.offset },
+				size: where.size,
+				mtime: where.mtime,
+				...(where.hash ? { hash: where.hash } : {}),
 				...baseFields,
 			});
 			continue;
