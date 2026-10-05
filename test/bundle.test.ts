@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
+import { baselineOfBundle, listingHash } from '../src/bundle/baseline';
 import { exportBundle, plannedExportModes } from '../src/bundle/export';
 import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
@@ -1287,6 +1288,104 @@ check(
 	'理由分成两种：血脉 / 世代',
 	[...new Set(kdFull.keptChanges.map(item => item.why))].sort(),
 	['不是同一条血脉（多半是另一台机器导的）', '记的世代不比这次的新（导出过更晚的包）'].sort(),
+);
+
+// 38. 两台机器互相发更新包：应用后把"本机这半"导出来发回去，两边才收敛
+// （用户问的："数据各半，有没有必要接收之后同步一下本地的更新包"）
+const RMA = path.join(ROOT, 'machineRMA');
+const RMB = path.join(ROOT, 'machineRMB');
+const STATE_RMA = path.join(ROOT, 'state-rma.json');
+const STATE_RMB = path.join(ROOT, 'state-rmb.json');
+const OUTRA = path.join(ROOT, 'transferRA');
+fs.mkdirSync(RMA, { recursive: true });
+fs.mkdirSync(RMB, { recursive: true });
+fs.mkdirSync(OUTRA, { recursive: true });
+
+write(RMA, 'x.md', 'X1', T0);
+write(RMA, 'y.md', 'Y1', T0);
+const raFull = await exportBundle({ ...exportOptions(RMA, STATE_RMA), outDir: OUTRA });
+const rmbFullOptions = applyOptions(RMB, STATE_RMB, raFull.file as string);
+await executeBundlePlan(await planBundleApply(rmbFullOptions), rmbFullOptions);
+
+// 两边各改各的：A 改 x，B 改 y 并新建 z（这就是"各半"）
+write(RMA, 'x.md', 'X2', T0 + 10_000);
+write(RMB, 'y.md', 'Y2', T0 + 10_000);
+write(RMB, 'z.md', 'Z1', T0 + 10_000);
+const raChanges = await exportBundle({ ...exportOptions(RMA, STATE_RMA, 'changes'), outDir: OUTRA });
+
+// B 应用之前，报告就该告诉它"我这半还有两处对方没有的改动"
+const rmbPlan = await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges.file as string));
+check(
+	'报告里先把"我这半还剩多少"摊开',
+	[rmbPlan.report.pendingChanges, rmbPlan.report.pendingDeletes],
+	[2, 0],
+);
+await executeBundlePlan(rmbPlan, applyOptions(RMB, STATE_RMB, raChanges.file as string));
+check('B 拿到了 A 的 x', read(RMB, 'x.md'), 'X2');
+check('B 自己的 y / z 没被动', [read(RMB, 'y.md'), read(RMB, 'z.md')], ['Y2', 'Z1']);
+
+// B 导"回礼包"（界面上就是勾着「应用后顺便导一个更新包」时自动做的那一步）
+const rmbReturn = await exportBundle({ ...exportOptions(RMB, STATE_RMB, 'changes'), outDir: OUTRA });
+checkTrue('回礼包导出来了', rmbReturn.file !== null, rmbReturn.reason ?? '');
+
+// A 应用回礼包：x 与自己那份一样（跳过），拿到 B 的 y 与 z
+const rmaBackOptions = applyOptions(RMA, STATE_RMA, rmbReturn.file as string);
+await executeBundlePlan(await planBundleApply(rmaBackOptions), rmaBackOptions);
+check('A 拿到 B 的 y 与 z', [read(RMA, 'y.md'), read(RMA, 'z.md')], ['Y2', 'Z1']);
+check('A 的 x 没被自己那份覆盖（内容一样，跳过）', read(RMA, 'x.md'), 'X2');
+check('两边收敛', [read(RMA, 'x.md'), read(RMA, 'y.md'), read(RMA, 'z.md')], ['X2', 'Y2', 'Z1']);
+check(
+	'两边站在同一份基准上（指纹一致）',
+	(await loadState(STATE_RMA)).bundle?.fullHash,
+	(await loadState(STATE_RMB)).bundle?.fullHash,
+);
+
+// 39. 基准指纹：判断"是不是接着同一份完整副本"（世代号不够用 —— 两边各自 +1 会碰号）
+const hashA = listingHash([{ path: 'a.md', size: 1, mtime: 1000 }, { path: 'b.md', size: 2, mtime: 2000 }]);
+const hashB = listingHash([{ path: 'b.md', size: 2, mtime: 2000 }, { path: 'a.md', size: 1, mtime: 1000 }]);
+check('同样的清单（顺序不同）→ 同一个指纹', hashA, hashB);
+checkTrue(
+	'内容变了（大小/时间任一）→ 指纹就变',
+	hashA !== listingHash([{ path: 'a.md', size: 9, mtime: 1000 }, { path: 'b.md', size: 2, mtime: 2000 }])
+		&& hashA !== listingHash([{ path: 'a.md', size: 1, mtime: 1001 }, { path: 'b.md', size: 2, mtime: 2000 }]),
+	'指纹没跟着内容变',
+);
+check('少一个文件也是另一份基准', hashA !== listingHash([{ path: 'a.md', size: 1, mtime: 1000 }]), true);
+
+// 应用完整包之后，我这边记下的基准令牌 ＝ 包自己那份清单的指纹
+const bState = await loadState(STATE_RMB);
+const raFullHeader = (await readBundleInfo(raFull.file as string)).header;
+check('令牌就是那份完整包自己的指纹', bState.bundle?.fullHash, baselineOfBundle(raFullHeader));
+
+// B 导的回礼包说的是同一份基准；A 应用它 → 判成"基准一致"
+const returnHeader = (await readBundleInfo(rmbReturn.file as string)).header;
+check('更新包带着"我基于哪份基准"', returnHeader.baselineHash, bState.bundle?.fullHash);
+check(
+	'A 应用它：基准判定为一致（接着同一份完整副本）',
+	(await planBundleApply(applyOptions(RMA, STATE_RMA, rmbReturn.file as string))).report.baselineMatch,
+	'match',
+);
+
+// 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上 → 明确判成"对不上"
+write(RMA, 'x.md', 'X3', T0 + 20_000);
+const raFull2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA), outDir: OUTRA });
+// 换完基准再改一笔：紧接着完整包导的更新包必然是空的（那条语义有专门用例）
+write(RMA, 'x.md', 'X4', T0 + 30_000);
+const raChanges2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA, 'changes'), outDir: OUTRA });
+checkTrue('换基准之后的更新包有内容', raChanges2.file !== null, raChanges2.reason ?? '');
+const rmbMismatch = await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string));
+check('A 换基准之后 B 仍能收下更新包（不拒绝服务）', rmbMismatch.report.baselineMatch, 'mismatch');
+check(
+	'两个指纹都报出来，便于对账',
+	[typeof rmbMismatch.report.myBaseline, typeof rmbMismatch.report.bundleBaseline],
+	['string', 'string'],
+);
+const rmbAlignOptions = applyOptions(RMB, STATE_RMB, raFull2.file as string);
+await executeBundlePlan(await planBundleApply(rmbAlignOptions), rmbAlignOptions);
+check(
+	'应用新的完整副本 → 基准又对上了（这就是"对齐"那一步）',
+	(await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string))).report.baselineMatch,
+	'match',
 );
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);

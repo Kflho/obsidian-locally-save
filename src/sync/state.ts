@@ -59,6 +59,14 @@ export interface BundleBaseline {
 	 */
 	fullGeneration: number | null;
 	/**
+	 * 我这份**基准的指纹**（`bundle/baseline.ts`）—— 两台机器互相发更新包时的"共同祖先令牌"。
+	 *
+	 * 导出一份完整副本、或应用了别人的完整副本之后写入；之后自己导的更新包都带上它，
+	 * 接收方一比就知道两边是不是接着同一份基准（世代号不够用：两边各自 +1 会碰号、
+	 * 内容对不上时也看不出来）。null ＝ 旧状态文件（升级上来的）或还没立过基准。
+	 */
+	fullHash: string | null;
+	/**
 	 * 自上次完整包以来，每个文件经历过的版本（不含最新那一版）。
 	 *
 	 * 接收方靠它认出"我手里这份是你以前发过的中间版本，不是我自己改的"，
@@ -159,6 +167,8 @@ export async function loadState(absPath: string): Promise<PluginState> {
 				files: raw.bundle.files ?? {},
 				fullFiles: raw.bundle.fullFiles ?? null,
 				fullGeneration: raw.bundle.fullGeneration ?? null,
+				// 老状态文件没有这一项（升级上来的）：判成"说不清"，界面会说明只能逐文件合并
+				fullHash: raw.bundle.fullHash ?? null,
 				history: raw.bundle.history ?? {},
 				dirs: raw.bundle.dirs ?? [],
 				warnedThreshold: typeof raw.bundle.warnedThreshold === 'number'

@@ -170,10 +170,17 @@ export class BundleListView {
 				+ `${item.header ? '' : ' is-unknown'}`,
 		});
 		row.setAttribute('title', item.error ? `读不出包头部：${item.error}` : item.file);
-		// 类型由分组标题说了，行里不再重复标一遍
+		// 类型由分组标题说了，行里不再重复标一遍；世代要写出来 ——
+		// 两台机器的 full/ 目录各有一堆包时，靠它才看得出谁跟谁是同一份基准
 		row.createSpan({ text: item.name, cls: 'locally-save-file' });
+		const generation = item.header
+			? (item.header.mode === 'full'
+				? `第 ${item.header.targetGeneration} 代`
+				: `基于第 ${item.header.baseGeneration ?? '?'} 代`)
+			: '';
 		row.createSpan({
 			text: `${formatBytes(item.size)} · ${formatTime(item.mtime)}`
+				+ `${generation ? ` · ${generation}` : ''}`
 				+ (item.header ? '' : '（读不出头部，可能不是我们的包）'),
 			cls: 'locally-save-reason',
 		});

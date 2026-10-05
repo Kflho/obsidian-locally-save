@@ -11,6 +11,7 @@ import type { BundleMode } from '../bundle/paths';
 import { readBundleInfo } from '../bundle/format';
 import type { DropdownComponent, TextComponent } from 'obsidian';
 import { removeFromTarget } from '../sync/runner';
+import { loadState } from '../sync/state';
 import { describeRecord, recordFromOutcome } from '../sync/summary';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
@@ -41,9 +42,12 @@ export class ExportBundleModal extends Modal {
 	/** 底下那份"已有的同步包"列表：导出完不用另开窗口就能顺手清一清 */
 	private list: BundleListView | null = null;
 
-	constructor(app: App, plugin: LocallySavePlugin) {
+	constructor(app: App, plugin: LocallySavePlugin, options: { wantChanges?: boolean; wantFull?: boolean } = {}) {
 		super(app);
 		this.plugin = plugin;
+		// 允许调用方预置勾选（比如"基准对不上 → 导一份完整副本发过去"那条路）
+		if (options.wantChanges !== undefined) this.wantChanges = options.wantChanges;
+		if (options.wantFull !== undefined) this.wantFull = options.wantFull;
 		// 只显示"用户自己填的"；留空就是留空，别把默认值预先填进去 ——
 		// 那样用户一删就变成"没填路径"，还得自己猜默认在哪儿
 		this.outDir = plugin.settings.bundleDir.trim();
@@ -273,6 +277,13 @@ export class ApplyBundleModal extends Modal {
 	private keepBackup: boolean;
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
+	/**
+	 * 应用完顺手把"本机这半"也导成一个更新包。
+	 *
+	 * 两台机器互相发更新包时，每台只握着改动的一半：收下对方的之后，自己这半得导出来
+	 * 发回去，对方才补得齐。默认开着 —— 用户问过"数据各半，会不会缺"，这就是那个闭环。
+	 */
+	private exportAfterApply = true;
 	private pathInput: TextComponent | null = null;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
@@ -390,6 +401,20 @@ export class ApplyBundleModal extends Modal {
 				.setValue(this.alsoSyncCopy)
 				.setDisabled(!target)
 				.onChange(value => { this.alsoSyncCopy = value; }));
+
+		// 应用完把"本机这半"也打成一个包：两台机器互相发更新包时，每台只握着改动的一半，
+		// 收下对方的之后得把自己这半导出来发回去，对方才补得齐（用户问过：数据各半会不会缺）
+		const exportDir = bundleBaseDir(this.plugin.settings, this.plugin.settings.targetDir);
+		new Setting(contentEl)
+			.setName('应用后顺便导一个更新包')
+			.setDesc(exportDir
+				? `应用完把本机的改动导成一个更新包（放进「${exportDir}」）—— 你把它发回给对方，`
+					+ '他那边才拿得到你这边的改动。更新包是累积的，所以这份里也包含刚应用的那些（对方应用时会自动跳过）'
+				: '还没法确定同步包文件夹，这一项用不上（设置 → 本地同步 → 同步包文件夹 / 目标文件夹）')
+			.addToggle(toggle => toggle
+				.setValue(this.exportAfterApply)
+				.setDisabled(!exportDir)
+				.onChange(value => { this.exportAfterApply = value; }));
 
 		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -629,6 +654,47 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
+		// 基准：两台机器互相发包时，"是不是接着同一份完整副本"决定了这次应用确不确定。
+		// 以前只看世代号（两边各自 +1、会碰号），根本判断不了 —— 现在靠包里的基准指纹。
+		const baseGen = plan.info.header.baseGeneration;
+		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 代`;
+		if (report.bundle.mode !== 'full') {
+			if (report.baselineMatch === 'match') {
+				this.reportEl.createEl('p', {
+					text: `基准：✓ 跟这个包**同一份完整副本**（${baseGenText}）—— 它就是你手上那份基准往后累积的改动，接着应用是确定的。`,
+					cls: 'locally-save-hint',
+				});
+			} else if (report.baselineMatch === 'mismatch') {
+				this.reportEl.createEl('p', {
+					text: `⚠ 基准对不上：这个包基于「${report.bundleBaseline}」那份完整副本，`
+						+ `你这边的基准是「${report.myBaseline}」。这次会**逐文件合并**（能安全写的照写、`
+						+ '两边都改过的按规则处理），不会丢东西，但"接着同一份基准"这件事不成立。'
+						+ '要变成确定的：两边**互导一次完整副本** —— 让对方导一份给你应用，'
+						+ '或者你导一份发过去（下面那个按钮就是干这个的）。',
+					cls: 'locally-save-warn',
+				});
+				const align = this.reportEl.createEl('button', {
+					text: '导出一份完整副本发过去…',
+					cls: 'locally-save-mini',
+				});
+				align.addEventListener('click', () => {
+					new ExportBundleModal(this.app, this.plugin, { wantChanges: false, wantFull: true }).open();
+				});
+			} else {
+				this.reportEl.createEl('p', {
+					text: '基准：说不清（这个包是**旧版本**导的、没记基准指纹；或者你这台机器还没应用过完整副本）'
+						+ ' —— 这次只能逐文件合并。想确定下来：先应用一份完整副本，之后的更新包就都对得上了。',
+					cls: 'locally-save-hint',
+				});
+			}
+		} else {
+			this.reportEl.createEl('p', {
+				text: `基准：应用之后，你这台机器就以这份完整副本为基准（第 ${plan.info.header.targetGeneration} 代）`
+					+ '，之后互相发的更新包都会带着它的指纹对账。',
+				cls: 'locally-save-hint',
+			});
+		}
+
 		// 同步程度：接收方最关心的一个数（文件与文件夹分开说，别只报文件）
 		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
@@ -655,6 +721,14 @@ export class ApplyBundleModal extends Modal {
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹（包里有的目录，本地还没有）`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹（包里没有它们）`);
 		if (report.foldersKept > 0) line(`留着 ${report.foldersKept} 个本地文件夹：清单里看着是空的，磁盘上还有东西（多半是被排除规则挡住的文件，只删真空的）`);
+
+		// 两台机器互相发包时，每台只握着改动的一半 —— 应用前就把"我这半还剩多少"摊开，
+		// 顺便说清怎么把它送回去（不然用户只能对着两边都"各半"的文件夹猜有没有缺）
+		if (report.pendingChanges !== null && (report.pendingChanges > 0 || (report.pendingDeletes ?? 0) > 0)) {
+			line(`你这边还有 ${report.pendingChanges} 个改动`
+				+ `${(report.pendingDeletes ?? 0) > 0 ? `、${report.pendingDeletes} 个删除` : ''}`
+				+ '是对方没有的 —— 双向同步的话，勾上下面的「应用后顺便导一个更新包」，把它发回给对方');
+		}
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
@@ -766,6 +840,10 @@ export class ApplyBundleModal extends Modal {
 			const copyNote = await this.syncCopyIfWanted(plan);
 			if (copyNote) parts.push(copyNote);
 
+			// "回礼"：把本机这半导成一个更新包，用户拿去发给对方 —— 两边各半才算补齐
+			const returnNote = await this.exportReturnBundle();
+			if (returnNote) parts.push(returnNote);
+
 			new Notice(`同步包已应用：${parts.join('、')}`, 9000);
 			this.close();
 		} catch (error) {
@@ -774,6 +852,48 @@ export class ApplyBundleModal extends Modal {
 			this.reportEl.setText(`应用失败：${message}`);
 			new Notice(`应用同步包失败：${message}`, 8000);
 			this.plugin.log.error('应用同步包失败', error);
+		}
+	}
+
+	/**
+	 * 应用完把"本机这半"也打成更新包（回礼包）。
+	 *
+	 * 为什么默认要做：两台机器互相发更新包时，**每台只握着改动的一半** ——
+	 * 收下对方的之后，自己这边的改动得导出来发回去，对方才补得齐
+	 * （用户问过："数据各半，会不会缺"）。
+	 *
+	 * 包里会包含"自上次完整副本以来"的全部改动（累积语义），所以刚应用的那些也在里面；
+	 * 对方应用时会发现那些跟自己一模一样，直接跳过 ✓。
+	 *
+	 * 失败不该让"包已经应用成功"看起来失败 —— 只回一句说明。
+	 */
+	private async exportReturnBundle(): Promise<string> {
+		if (!this.exportAfterApply) return '';
+		const outDir = bundleBaseDir(this.plugin.settings, this.plugin.settings.targetDir);
+		if (!outDir) return '';
+		try {
+			// 没有基准（这台机器还没应用过完整副本）就导不出更新包：如实说，别报成失败
+			const state = await loadState(this.plugin.stateFile());
+			if (!state.bundle?.fullFiles) return '没导回礼包（这台机器还没应用过完整副本，更新包没有基准）';
+
+			const outcome = await exportBundle({
+				settings: this.plugin.settings,
+				log: this.plugin.log,
+				vaultRoot: this.plugin.vaultRoot(),
+				vaultName: this.plugin.vaultName(),
+				stateFile: this.plugin.stateFile(),
+				mode: 'changes',
+				outDir,
+				configDir: this.plugin.configDir(),
+				onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file, label: '导出中' }),
+			});
+			this.plugin.reportProgress(null);
+			if (!outcome.file) return `没导回礼包（${outcome.reason ?? '本机没有对方缺的改动'}）`;
+			return `已顺手导出一个更新包发回去：${outcome.file}`;
+		} catch (error) {
+			this.plugin.reportProgress(null);
+			this.plugin.log.error('应用后导出更新包失败', error);
+			return `顺手导更新包失败：${describe(error)}`;
 		}
 	}
 
