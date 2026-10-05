@@ -7,6 +7,7 @@ import type { SyncOutcome, SyncRunOptions } from '../sync/runner';
 import { describeRecord, recordFromOutcome, statusBarText } from '../sync/summary';
 import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
 import { BundleManagerModal } from './manage-modal';
+import { BundleLogModal } from './log-modal';
 import { offerBaselineReset } from './reset-baseline-modal';
 import { SyncPreviewModal } from './sync-modal';
 
@@ -155,4 +156,10 @@ export function applyBundleAction(plugin: LocallySavePlugin): void {
 export function manageBundlesAction(plugin: LocallySavePlugin): void {
 	if (!plugin.isActive()) return;
 	new BundleManagerModal(plugin.app, plugin).open();
+}
+
+/** 同步包更新记录：像 git log 那样，看"从哪份完整副本开始、中间收发过什么" */
+export function bundleLogAction(plugin: LocallySavePlugin): void {
+	if (!plugin.isActive()) return;
+	new BundleLogModal(plugin.app, plugin).open();
 }

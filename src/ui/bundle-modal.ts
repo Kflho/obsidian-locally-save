@@ -21,6 +21,8 @@ import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 确认框里最多列多少个会被删的文件 */
 const MAX_ROWS = 200;
+/** 报告里"包里点名了哪些文件"最多列几条 */
+const MAX_LISTED = 50;
 
 /**
  * 导出同步包。
@@ -269,7 +271,7 @@ export class ApplyBundleModal extends Modal {
 	/**
 	 * 本次选的**应用方式**（选项见 `APPLY_CHOICES`）：
 	 * 完整副本与更新包各有一套 —— 更新包只有"包里点名的那部分"，
-	 * 所以它那套是"回退 / 两边都留 / 以我为准 / 按设置"，不会有会清空仓库的那两档。
+	 * 所以它那套是"以包为准 / 两边都留 / 以我为准 / 按设置"，不会有会清空仓库的那两档。
 	 */
 	private applyChoiceKey = 'normal';
 	/** 下拉框现在摆的是哪一套选项（按选中包的类型换） */
@@ -277,13 +279,8 @@ export class ApplyBundleModal extends Modal {
 	private keepBackup: boolean;
 	/** 应用完顺手把本地副本也同步一遍（填了目标文件夹时才有效） */
 	private alsoSyncCopy: boolean;
-	/**
-	 * 应用完顺手把"本机这半"也导成一个更新包。
-	 *
-	 * 两台机器互相发更新包时，每台只握着改动的一半：收下对方的之后，自己这半得导出来
-	 * 发回去，对方才补得齐。默认开着 —— 用户问过"数据各半，会不会缺"，这就是那个闭环。
-	 */
-	private exportAfterApply = true;
+	/** 这次不执行包里的删除（对方基准不对时的兜底） */
+	private skipDeletions = false;
 	private pathInput: TextComponent | null = null;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
 	private dropHost: HTMLElement | null = null;
@@ -362,8 +359,8 @@ export class ApplyBundleModal extends Modal {
 		// **选项按包的类型换一套**（完整副本 / 更新包能做的事本就不一样，见 APPLY_CHOICES）
 		new Setting(contentEl)
 			.setName('应用方式')
-			.setDesc('默认按设置来。想把本地改过的文件退回包里那一版，选「回退到包里那一版」；'
-				+ '对面大删大改过、想让这台机器跟包一模一样时，用完整副本那几档')
+			.setDesc('默认按设置来。想让包里点名的文件一律**以包为准**（不管包里那份是新的还是旧的），'
+				+ '选「以包为准」；对面大删大改过、想让这台机器跟包一模一样时，用完整副本那几档')
 			.addDropdown(dropdown => {
 				this.strictnessDropdown = dropdown;
 				this.strictnessSelect = dropdown.selectEl;
@@ -377,7 +374,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('覆盖 / 删掉的先进回收目录')
-			.setDesc('回退、以包为准与完全镜像会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
+			.setDesc('以包为准与完全镜像会动到本地原有的文件：开启这一项后它们会被挪进「仓库/.trash/locally-save/时间戳」，'
 				+ '仍然捞得回来。**这几档必须开着**（关掉回收 + 强制 = 不可恢复的批量删除）')
 			.addToggle(toggle => {
 				this.backupToggle = toggle;
@@ -390,6 +387,21 @@ export class ApplyBundleModal extends Modal {
 					});
 			});
 
+		// 兜底开关：对方基准不对时（比如它的状态是从别的机器拷过去的），它会把自己没有、
+		// 但基准里点名的文件报成"我删掉了它们"，于是要求删你本地明明还在的文件 ——
+		// 勾上这个就一律不删，先对齐基准再说
+		new Setting(contentEl)
+			.setName('这次不执行包里的删除')
+			.setDesc('包里点名要删的文件这次一律留着（默认照删，删掉的那份会进回收目录）。'
+				+ '对方那台机器的基准不对时用这个兜一下 —— 不然它会把"我没有、但基准里有"的文件当成自己删过，'
+				+ '要求你这边也删掉')
+			.addToggle(toggle => toggle
+				.setValue(this.skipDeletions)
+				.onChange(value => {
+					this.skipDeletions = value;
+					void this.replan();
+				}));
+
 		// 应用完顺手带上本地副本：不然后备会在应用包之后悄悄落后一截
 		const target = this.plugin.settings.targetDir.trim();
 		new Setting(contentEl)
@@ -401,20 +413,6 @@ export class ApplyBundleModal extends Modal {
 				.setValue(this.alsoSyncCopy)
 				.setDisabled(!target)
 				.onChange(value => { this.alsoSyncCopy = value; }));
-
-		// 应用完把"本机这半"也打成一个包：两台机器互相发更新包时，每台只握着改动的一半，
-		// 收下对方的之后得把自己这半导出来发回去，对方才补得齐（用户问过：数据各半会不会缺）
-		const exportDir = bundleBaseDir(this.plugin.settings, this.plugin.settings.targetDir);
-		new Setting(contentEl)
-			.setName('应用后顺便导一个更新包')
-			.setDesc(exportDir
-				? `应用完把本机的改动导成一个更新包（放进「${exportDir}」）—— 你把它发回给对方，`
-					+ '他那边才拿得到你这边的改动。更新包是累积的，所以这份里也包含刚应用的那些（对方应用时会自动跳过）'
-				: '还没法确定同步包文件夹，这一项用不上（设置 → 本地同步 → 同步包文件夹 / 目标文件夹）')
-			.addToggle(toggle => toggle
-				.setValue(this.exportAfterApply)
-				.setDisabled(!exportDir)
-				.onChange(value => { this.exportAfterApply = value; }));
 
 		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -547,6 +545,7 @@ export class ApplyBundleModal extends Modal {
 				strictness: choice.strictness,
 				conflictStrategy: choice.conflictStrategy,
 				keepBackup: this.keepBackup,
+				skipDeletions: this.skipDeletions,
 			});
 			this.plan = plan;
 			// 包的类型这会儿才知道：换成它该有的那一套选项。
@@ -622,13 +621,13 @@ export class ApplyBundleModal extends Modal {
 				this.reportEl.createEl('p', {
 					text: '⚠ 你选的「以包为准 / 完全镜像」只对**完整副本**开放，这次已自动改用「按设置」：'
 						+ '更新包里只装了变过的文件，拿它清理会把仓库里其余文件全删掉。'
-						+ '只想把包里点名的那几个文件退回包里的版本，用「回退到包里那一版」。',
+						+ '只想让包里点名的那几个文件一律以包为准，用「以包为准」。',
 					cls: 'locally-save-warn',
 				});
 			}
 			this.reportEl.createEl('p', {
 				text: '这是「更新包」：里面只装了自完整副本以来变过的文件，所以这里的几档都**只动包里点名的文件**。'
-					+ '想把自己改过的退回对方发来的那一版，选「回退到包里那一版」；'
+					+ '想让包里点名的文件一律以包为准（不管包里那份是新的还是旧的），选「以包为准」；'
 					+ '要清理包外的东西（以包为准 / 完全镜像）得让对方导一份**完整副本**。',
 				cls: 'locally-save-hint',
 			});
@@ -695,6 +694,45 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
+		// 没有可做的事就**大声说出来**：用户看到"写入 0、跳过 1"很容易以为应用失败了
+		// （报过：拿到对方发来的包、打开一看"没应用"，其实本地早就是那一版了）
+		if (plan.actions.length === 0 && plan.foldersToRemove.length === 0) {
+			this.reportEl.createEl('p', {
+				text: `✓ 这个包里的东西你这边**都已经有了**（${report.synchronized}/${report.bundle.entryCount} 个文件一致）`
+					+ ' —— 不用应用，再点「应用」也不会改动任何文件。'
+					+ '如果你在编辑器里还看到旧内容，那是编辑器没重载这个文件（磁盘上已经是包里那一版了）。',
+				cls: 'locally-save-hint',
+			});
+		}
+
+		// 包里**点名了哪些文件**：折叠着列出来。
+		// 为什么值得占这块地方：用户报过"更新里明明写了 X，却没应用" ——
+		// 一看这个列表就知道"包里压根没有那个文件"，不用去猜是应用失败还是对方没打包。
+		const entries = plan.info.header.entries;
+		const deletedNames = plan.info.header.deleted.map(item => item.path);
+		if (entries.length > 0 || deletedNames.length > 0) {
+			const details = this.reportEl.createEl('details', { cls: 'locally-save-details' });
+			const listed = Math.min(entries.length, MAX_LISTED);
+			details.createEl('summary', {
+				text: `包里点名了这 ${entries.length} 个文件`
+					+ `${deletedNames.length > 0 ? `，另有 ${deletedNames.length} 个删除` : ''}`
+					+ '（展开看清单 —— 找不到你关心的那个，就是对方没打包它）',
+			});
+			const list = details.createEl('ul', { cls: 'locally-save-facts' });
+			for (const entry of entries.slice(0, listed)) {
+				list.createEl('li', { text: `${entry.path}（${formatBytes(entry.size)}）` });
+			}
+			if (entries.length > listed) {
+				list.createEl('li', { text: `…… 其余 ${entries.length - listed} 个已省略`, cls: 'locally-save-more' });
+			}
+			for (const path of deletedNames.slice(0, MAX_LISTED)) {
+				list.createEl('li', { text: `删除：${path}`, cls: 'locally-save-warn' });
+			}
+			if (deletedNames.length > MAX_LISTED) {
+				list.createEl('li', { text: `…… 其余 ${deletedNames.length - MAX_LISTED} 个删除已省略`, cls: 'locally-save-more' });
+			}
+		}
+
 		// 同步程度：接收方最关心的一个数（文件与文件夹分开说，别只报文件）
 		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
@@ -717,6 +755,9 @@ export class ApplyBundleModal extends Modal {
 		if (report.deletes > 0) line(`删除 ${report.deletes} 个（本地未改动过的）`);
 		if (report.keptDeletes > 0) line(`包里要求删、但本地改过所以保留的：${report.keptDeletes} 个`);
 		if (report.extraDeletes > 0) line(`本地有、包里没有、且对方删过的：${report.extraDeletes} 个`);
+		if (report.deletesSkipped > 0) {
+			line(`按你的选择**跳过了 ${report.deletesSkipped} 个删除**（包里点名要删的那些这次留着）`);
+		}
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个（直接改名，不重传内容）`);
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹（包里有的目录，本地还没有）`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹（包里没有它们）`);
@@ -727,7 +768,8 @@ export class ApplyBundleModal extends Modal {
 		if (report.pendingChanges !== null && (report.pendingChanges > 0 || (report.pendingDeletes ?? 0) > 0)) {
 			line(`你这边还有 ${report.pendingChanges} 个改动`
 				+ `${(report.pendingDeletes ?? 0) > 0 ? `、${report.pendingDeletes} 个删除` : ''}`
-				+ '是对方没有的 —— 双向同步的话，勾上下面的「应用后顺便导一个更新包」，把它发回给对方');
+				+ '是对方没有的 —— 它们会随你**下次导出更新包**一起带过去（更新包是累积的），'
+				+ '所以不用急着为它单独导一个（那样两边会互相套娃）');
 		}
 
 		// 走哪条路、按什么规则处理
@@ -840,11 +882,23 @@ export class ApplyBundleModal extends Modal {
 			const copyNote = await this.syncCopyIfWanted(plan);
 			if (copyNote) parts.push(copyNote);
 
-			// "回礼"：把本机这半导成一个更新包，用户拿去发给对方 —— 两边各半才算补齐
-			const returnNote = await this.exportReturnBundle();
-			if (returnNote) parts.push(returnNote);
+			// 欠账式回传：**不立刻生成回礼包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
+			// 只在通知里提一句"你这边还有 N 个改动没发出去"，它们会随下次导出更新包一起带过去。
+			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
+			if (owed > 0) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
 
-			new Notice(`同步包已应用：${parts.join('、')}`, 9000);
+			// 什么都没写 / 没删 / 没建：说明本来就已经是包里那一版了，
+			// 别报成"写入 0、跳过 N"那样让人以为应用失败了
+			const didNothing = result.written === 0 && result.deleted === 0 && result.moved === 0
+				&& result.foldersCreated === 0 && result.foldersRemoved === 0;
+			if (didNothing && result.failed.length === 0) {
+				new Notice(
+					`同步包里的内容本来就已经在本地了（${result.skipped} 个文件一致），没有改动任何东西`,
+					8000,
+				);
+			} else {
+				new Notice(`同步包已应用：${parts.join('、')}`, 9000);
+			}
 			this.close();
 		} catch (error) {
 			this.plugin.reportProgress(null);
@@ -852,48 +906,6 @@ export class ApplyBundleModal extends Modal {
 			this.reportEl.setText(`应用失败：${message}`);
 			new Notice(`应用同步包失败：${message}`, 8000);
 			this.plugin.log.error('应用同步包失败', error);
-		}
-	}
-
-	/**
-	 * 应用完把"本机这半"也打成更新包（回礼包）。
-	 *
-	 * 为什么默认要做：两台机器互相发更新包时，**每台只握着改动的一半** ——
-	 * 收下对方的之后，自己这边的改动得导出来发回去，对方才补得齐
-	 * （用户问过："数据各半，会不会缺"）。
-	 *
-	 * 包里会包含"自上次完整副本以来"的全部改动（累积语义），所以刚应用的那些也在里面；
-	 * 对方应用时会发现那些跟自己一模一样，直接跳过 ✓。
-	 *
-	 * 失败不该让"包已经应用成功"看起来失败 —— 只回一句说明。
-	 */
-	private async exportReturnBundle(): Promise<string> {
-		if (!this.exportAfterApply) return '';
-		const outDir = bundleBaseDir(this.plugin.settings, this.plugin.settings.targetDir);
-		if (!outDir) return '';
-		try {
-			// 没有基准（这台机器还没应用过完整副本）就导不出更新包：如实说，别报成失败
-			const state = await loadState(this.plugin.stateFile());
-			if (!state.bundle?.fullFiles) return '没导回礼包（这台机器还没应用过完整副本，更新包没有基准）';
-
-			const outcome = await exportBundle({
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				vaultName: this.plugin.vaultName(),
-				stateFile: this.plugin.stateFile(),
-				mode: 'changes',
-				outDir,
-				configDir: this.plugin.configDir(),
-				onProgress: (done, total, file) => this.plugin.reportProgress({ done, total, path: file, label: '导出中' }),
-			});
-			this.plugin.reportProgress(null);
-			if (!outcome.file) return `没导回礼包（${outcome.reason ?? '本机没有对方缺的改动'}）`;
-			return `已顺手导出一个更新包发回去：${outcome.file}`;
-		} catch (error) {
-			this.plugin.reportProgress(null);
-			this.plugin.log.error('应用后导出更新包失败', error);
-			return `顺手导更新包失败：${describe(error)}`;
 		}
 	}
 

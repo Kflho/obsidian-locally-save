@@ -211,6 +211,42 @@
 	color: var(--text-faint);
 }
 
+/* 更新记录：顶部"我现在站在哪儿" + 每行一条收发记录 */
+.locally-save-log-head {
+	padding: 0.5em 0.6em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-log-time {
+	flex: 0 0 auto;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+}
+
+/* 立基准那一条（完整副本）单独标一下：它是"从哪儿开始"的分界线 */
+.locally-save-row.is-baseline {
+	background-color: var(--background-primary-alt);
+}
+
+/* 报告里"包里点名了哪些文件"那一段折叠清单 */
+.locally-save-details {
+	margin: 0.6em 0;
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-details > summary {
+	cursor: pointer;
+	color: var(--text-muted);
+}
+
+.locally-save-details .locally-save-facts {
+	max-height: 30vh;
+	overflow-y: auto;
+}
+
 /* 同步包报告区 */
 .locally-save-report h3 {
 	margin: 1em 0 0.3em;

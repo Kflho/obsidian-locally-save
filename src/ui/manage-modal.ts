@@ -4,6 +4,7 @@ import type LocallySavePlugin from '../main';
 import { bundleBaseDir } from '../bundle/paths';
 import { ApplyBundleModal } from './bundle-modal';
 import { BundleListView } from './bundle-list';
+import { BundleLogModal } from './log-modal';
 import { openFolderInExplorer } from './reveal';
 
 /**
@@ -76,6 +77,10 @@ export class BundleManagerModal extends Modal {
 		void this.list.refresh();
 
 		new Setting(contentEl)
+			.addButton(button => button
+				.setButtonText('更新记录…')
+				.setTooltip('从哪份完整副本开始、中间收发过哪些更新包')
+				.onClick(() => new BundleLogModal(this.app, this.plugin).open()))
 			.addButton(button => button
 				.setButtonText('关闭')
 				.onClick(() => this.close()));

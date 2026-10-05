@@ -67,6 +67,11 @@ export interface BundleBaseline {
 	 */
 	fullHash: string | null;
 	/**
+	 * 我这份基准对应的**包文件名**（不含目录）—— 界面上"我现在站在哪份完整副本上"要写出来，
+	 * 光有世代和指纹用户对不上号。null ＝ 旧状态文件（升级上来的）。
+	 */
+	fullFile: string | null;
+	/**
 	 * 自上次完整包以来，每个文件经历过的版本（不含最新那一版）。
 	 *
 	 * 接收方靠它认出"我手里这份是你以前发过的中间版本，不是我自己改的"，
@@ -132,6 +137,53 @@ export interface PluginState {
 	lastSync: LastSyncRecord | null;
 	/** 仓库相对路径 → 内容指纹（懒算，见 hash-cache.ts） */
 	hashes: Record<string, HashRecord>;
+	/**
+	 * **同步包更新记录**（像 git log 那样）：每次导出 / 应用同步包都追加一条。
+	 *
+	 * 为什么要有：状态文件只记"现在什么样"，用户看不出"我是从哪份完整副本开始的、
+	 * 中间收发过哪些更新包、现在离基准有多远" —— 两台机器来回搬时这些正是最想知道的。
+	 * 只留最近 `BUNDLE_LOG_LIMIT` 条（见 bundle/log.ts），别把状态文件撑大。
+	 */
+	bundleLog: BundleLogEntry[];
+	/**
+	 * **欠对方一个回传**（暂存）。
+	 *
+	 * 应用了别人的包之后，我这边可能还有"对方没有"的改动要送回去。**不能立刻生成回礼包**：
+	 * 对方收到又会生成一个，两边互相套娃、没完没了（用户报过："无限套娃"）。
+	 * 所以只记一笔账：下次**导出更新包时一起带上**（更新包本来就是"自基准累积"的，
+	 * 天然包含我这半 + 对方那半的回声），导完就清掉。没有这个账也不影响正确性，
+	 * 纯粹是让界面上说得清"我还欠一次回传"。
+	 */
+	pendingReturn: {
+		at: number;
+		/** 收到的那个包的 ID / 文件名 / 来自哪个仓库 */
+		bundleId: string;
+		file?: string;
+		vault?: string;
+		/** 我这边还有多少改动没发出去 */
+		changes: number;
+		deletes: number;
+	} | null;
+}
+
+/** 一条"收发过同步包"的记录（界面上按时间倒着列） */
+export interface BundleLogEntry {
+	at: number;
+	/** 导出（我发出去的）还是应用（我收到的） */
+	direction: 'export' | 'apply';
+	mode: 'full' | 'changes';
+	bundleId: string;
+	/** 包文件名（不含目录）：想去找那个包时用得上 */
+	file?: string;
+	/** 包来自哪个仓库（应用别人的包时才有意义） */
+	vault?: string;
+	/** 这份包以第几代的完整副本为基准（完整包是 null） */
+	base: number | null;
+	/** 应用/导出之后到达的世代 */
+	target: number;
+	/** 包里装了几个文件 / 点名删了几个 */
+	entries: number;
+	deleted: number;
 }
 
 export function emptyState(): PluginState {
@@ -146,6 +198,8 @@ export function emptyState(): PluginState {
 		bundle: null,
 		lastSync: null,
 		hashes: {},
+		bundleLog: [],
+		pendingReturn: null,
 	};
 }
 
@@ -169,6 +223,7 @@ export async function loadState(absPath: string): Promise<PluginState> {
 				fullGeneration: raw.bundle.fullGeneration ?? null,
 				// 老状态文件没有这一项（升级上来的）：判成"说不清"，界面会说明只能逐文件合并
 				fullHash: raw.bundle.fullHash ?? null,
+				fullFile: raw.bundle.fullFile ?? null,
 				history: raw.bundle.history ?? {},
 				dirs: raw.bundle.dirs ?? [],
 				warnedThreshold: typeof raw.bundle.warnedThreshold === 'number'
@@ -178,6 +233,8 @@ export async function loadState(absPath: string): Promise<PluginState> {
 			: null,
 		lastSync: raw.lastSync ?? null,
 		hashes: raw.hashes ?? {},
+		bundleLog: Array.isArray(raw.bundleLog) ? raw.bundleLog : [],
+		pendingReturn: raw.pendingReturn ?? null,
 	};
 }
 
