@@ -193,6 +193,9 @@ npm run lint    # eslint（obsidianmd 插件规则）
 
 发版：改 `manifest.json` 的版本 → `npm version x.y.z` → push `main` → 在 `main` 上打同名 tag
 （tag 不带 `v` 前缀；CI 会校验 tag 与 manifest 版本一致并跑测试）。
+`npm version` 的 **`postversion` 会顺带跑一次 `npm run build`**（＝重新打包并部署到 vault 的插件目录）：
+不然"先 build 后 bump"会让 vault 里那份 `manifest.json` 停在**旧版本号**（代码是新的、版本号是旧的），
+用户从插件目录复制到另一台机器，装出来就是旧版本（踩过：vault 里是 0.3.1、实际代码已经是 0.4.0）。
 
 ## 工具使用上的教训（别再踩）
 
