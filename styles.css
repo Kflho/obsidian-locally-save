@@ -77,6 +77,10 @@
 	flex: 0 0 auto;
 	gap: 0.3em;
 	align-items: center;
+	/* 按钮有点多（应用 / 文件夹 / 复制路径 / 挪进回收站 / 彻底删除）：
+	   窄窗口下让它们自己换行，别把文件名挤成一列 */
+	flex-wrap: wrap;
+	justify-content: flex-end;
 }
 
 /* 行内小按钮：默认的按钮样式在列表里太胖，撑得一行放不下 */

@@ -185,9 +185,9 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					name: '管理已有的包',
 					desc: '列出同步包文件夹里的所有包（完整还是更新、多大、什么时候导的），'
-						+ '选中一行可以**应用… / 打开所在文件夹 / 复制路径 / 删除**。'
-						+ '**删除只是挪进回收站**（跟 bundles 平级的 .lsave/bundles-trash/时间戳/），'
-						+ '列表上方那行的「清空回收站」才是真删',
+						+ '选中一行可以**应用… / 打开所在文件夹 / 复制路径 / 挪进回收站 / 彻底删除**。'
+						+ '「挪进回收站」只是挪走（跟 bundles 平级的 .lsave/bundles-trash/时间戳/，还能捞回来）；'
+						+ '「彻底删除」是真删，单个包就能删，不必为它清空整个回收站',
 					button: '管理同步包…',
 					run: plugin => { new BundleManagerModal(plugin.app, plugin).open(); },
 				},

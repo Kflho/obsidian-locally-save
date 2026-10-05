@@ -3,6 +3,7 @@ import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import {
 	bundleTrashRoot,
+	deleteBundles,
 	emptyBundleTrash,
 	groupBundles,
 	listBundles,
@@ -187,7 +188,10 @@ export class BundleListView {
 			this.plugin.app as unknown as { openWithDefaultApp?: (path: string) => void },
 		));
 		this.addButton(actions, '复制路径', false, () => { void copyPath(item.file); });
-		this.addButton(actions, '删除', true, () => this.confirmTrash(item));
+		// 两个删除并排：默认那个是"挪进回收站"（还能捞回来），旁边才是真删 ——
+		// 只有"挪走"的话，想单独扔掉一个没用的包就得清空整个回收站（用户提的）
+		this.addButton(actions, '挪进回收站', false, () => this.confirmTrash(item));
+		this.addButton(actions, '彻底删除', true, () => this.confirmDelete(item));
 
 		row.addEventListener('click', () => {
 			this.selected = item.file;
@@ -210,7 +214,8 @@ export class BundleListView {
 
 	/**
 	 * 删除 = **挪进回收站**，不是真删：同步包往往是"改动唯一的备份"，
-	 * 手滑一下整份改动就没了。真要腾地方由用户在回收站那一行点「清空」。
+	 * 手滑一下整份改动就没了。真要腾地方：单个包用旁边的「彻底删除」，
+	 * 或者清空整个回收站。
 	 */
 	private confirmTrash(item: ManagedBundle): void {
 		const root = bundleTrashRoot(this.options.baseDir());
@@ -220,7 +225,8 @@ export class BundleListView {
 				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）`,
 			],
 			note: `文件会挪到 ${root}/时间戳/ ，需要时还能手动捞回来；`
-				+ '想彻底删掉就在列表上面的回收站那一行点「清空回收站」。',
+				+ '确认没用了就点旁边的「彻底删除」（那个不进回收站），'
+				+ '或者在列表上面的回收站那一行点「清空回收站」。',
 			confirmText: '挪进回收站',
 			onConfirm: async () => {
 				const outcome = await trashBundles(this.options.baseDir(), [item.file]);
@@ -229,6 +235,33 @@ export class BundleListView {
 				} else {
 					// 把落脚点也报出来：用户想反悔时知道去哪儿捞
 					new Notice(`已挪进回收站：${item.name}（${outcome.target}）`, 12000);
+				}
+				this.options.onRemove?.(item.file);
+				await this.refresh();
+			},
+		}).open();
+	}
+
+	/**
+	 * **彻底删除**：直接删文件，不进回收站。
+	 *
+	 * 跟"挪进回收站"分成两个按钮是刻意的：默认那条路永远能捞回来，
+	 * 只有用户在这一步（标题、按钮文字、说明都写明"捞不回来"）再点一次才真删。
+	 */
+	private confirmDelete(item: ManagedBundle): void {
+		new ConfirmBundleModal(this.plugin.app, {
+			title: '彻底删除这个同步包？',
+			lines: [
+				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被**直接删掉，不进回收站**`,
+			],
+			note: '这一步之后就捞不回来了。只是想把它从列表里清走的话，用旁边的「挪进回收站」—— 那一步还能捞回来。',
+			confirmText: '彻底删除',
+			onConfirm: async () => {
+				const outcome = await deleteBundles([item.file]);
+				if (outcome.failed.length > 0) {
+					new Notice(`没能删掉 ${outcome.failed[0]?.path}：${outcome.failed[0]?.error}`, 9000);
+				} else {
+					new Notice(`已彻底删除：${item.name}`, 6000);
 				}
 				this.options.onRemove?.(item.file);
 				await this.refresh();
@@ -246,7 +279,7 @@ export class BundleListView {
 		if (contents.count === 0) {
 			host.createSpan({ text: '回收站：空的' });
 			host.createSpan({
-				text: '（点某个包的「删除」会把它挪到这里，还能手动捞回来）',
+				text: '（点某个包的「挪进回收站」会把它挪到这里，还能手动捞回来）',
 				cls: 'locally-save-hint',
 			});
 			return;
@@ -257,7 +290,7 @@ export class BundleListView {
 			new ConfirmBundleModal(this.plugin.app, {
 				title: '清空回收站？',
 				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被**真正删掉**`],
-				note: '这一步之后就捞不回来了。删包本身只是挪进回收站，清空才是彻底删除。',
+				note: '这一步之后就捞不回来了。只想真删某一个包的话，用那一行里的「彻底删除」；这里是把回收站整个清掉。',
 				confirmText: '彻底删除',
 				onConfirm: async () => {
 					await emptyBundleTrash(this.options.baseDir());

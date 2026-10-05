@@ -15,6 +15,7 @@ import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundl
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import {
 	bundleTrashRoot,
+	deleteBundles,
 	emptyBundleTrash,
 	groupBundles,
 	listBundles,
@@ -1044,6 +1045,17 @@ await emptyBundleTrash(OUT3);
 check('清空之后回收站是空的', await readBundleTrash(OUT3), { count: 0, bytes: 0 });
 check('回收站目录本身也没了', fs.existsSync(bundleTrashRoot(OUT3)), false);
 check('别的包没被牵连', (await listBundles(OUT3)).length, 1);
+
+// 31b. 「彻底删除」：不进回收站，直接没了（跟「挪进回收站」并排的两个按钮）
+const doomed = (await listBundles(OUT3))[0];
+checkTrue('删之前还剩一个包', doomed !== undefined, '列表是空的');
+const deleted = await deleteBundles([doomed?.file as string]);
+check('报告删掉了它', deleted.deleted, [doomed?.name]);
+check('没有失败', deleted.failed, []);
+check('文件真的没了', fs.existsSync(doomed?.file as string), false);
+check('回收站里也不该多东西（不是挪走，是删掉）', await readBundleTrash(OUT3), { count: 0, bytes: 0 });
+check('列表空了', (await listBundles(OUT3)).length, 0);
+check('删一个本来就不在的：算成功，不报错（可能刚被别的操作挪走）', await deleteBundles(['Z:\\definitely\\missing.lsave']), { deleted: ['missing.lsave'], failed: [] });
 
 // 32. 回收站放哪儿：**跟 bundles 平级**，绝不在 bundles 里面再套一层 .lsave
 // （默认布局下 base 本身就是 `.lsave/bundles`，塞进去会变成 `.lsave/bundles/.lsave/bundles-trash`：两层 .lsave，用户报过）

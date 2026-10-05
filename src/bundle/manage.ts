@@ -3,7 +3,7 @@ import { BUNDLE_EXT, readBundleInfo } from './format';
 import type { BundleHeader } from './format';
 import { BUNDLE_ROOT_DIR, bundleDirsToScan } from './paths';
 import type { BundleMode } from './paths';
-import { listFiles, moveToTrash, removeDirRecursive, removeEmptyDir, scanTree } from '../sync/disk';
+import { listFiles, moveToTrash, removeDirRecursive, removeEmptyDir, removeFile, scanTree } from '../sync/disk';
 import { formatStamp } from '../utils/format';
 import { toNative } from '../utils/paths';
 
@@ -204,4 +204,32 @@ export async function emptyBundleTrash(baseDir: string): Promise<void> {
 	// 里面但凡还有别的东西就删不动，不会误伤。
 	const legacy = legacyTrashRoot(baseDir);
 	if (legacy) await removeEmptyDir(path.dirname(legacy));
+}
+
+export interface DeleteOutcome {
+	deleted: string[];
+	failed: { path: string; error: string }[];
+}
+
+/**
+ * **彻底删除**这些包（不进回收站）。
+ *
+ * 为什么除了"挪进回收站"还要有它：同步包往往是"改动唯一的备份"，所以默认那条路是先挪走、
+ * 还能捞回来；但某一个包你确认没用了、又不想为它把整个回收站清空时，就该能单独真删
+ * （用户提的：只有"挪进回收站"不方便）。
+ *
+ * 界面上必须**单独确认一次**，措辞也别跟"挪进回收站"混 —— 这一步之后真的捞不回来。
+ */
+export async function deleteBundles(files: string[]): Promise<DeleteOutcome> {
+	const outcome: DeleteOutcome = { deleted: [], failed: [] };
+	for (const file of files) {
+		try {
+			await removeFile(file); // 文件本来就不在也算成功（可能刚被别的操作挪走）
+			outcome.deleted.push(path.basename(file));
+		} catch (error) {
+			outcome.failed.push({ path: file, error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+	outcome.deleted.sort();
+	return outcome;
 }
