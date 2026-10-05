@@ -813,7 +813,15 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 认祖归宗 + 世代对齐
 	const state = await loadState(options.stateFile);
 	state.lineage = plan.info.header.lineage;
-	state.generation = plan.info.header.targetGeneration;
+	/**
+	 * 世代**只增不减**：应用一个更老的包时，绝不能把它拨回去。
+	 *
+	 * 它记的是"这份副本见过这条血脉的哪一段"，不是"我此刻的内容像哪一代"。
+	 * 拨回去的后果很实：`removeSupersededChanges` 判"新包取代了旧包"靠的是
+	 * 「世代**严格更小**」—— 世代一倒退，同一个"导出完整包 + 更新包"的动作就会
+	 * **第一遍清不掉老的更新包、第二遍才清掉**（用户报成"偶发 bug"，测试钉住了）。
+	 */
+	state.generation = Math.max(state.generation, plan.info.header.targetGeneration);
 	state.lastBundleId = plan.info.header.bundleId;
 
 	// 基准的正确含义是**"两边上次达成一致的样子"**，所以只能记两边都见过的东西：

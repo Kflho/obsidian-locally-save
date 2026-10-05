@@ -10,7 +10,7 @@ import path from 'node:path';
 import { executeBundlePlan, planBundleApply, APPLY_CHOICES, findApplyChoice } from '../src/bundle/apply';
 import type { ApplyOptions, ApplyPlan, ApplyStrictness } from '../src/bundle/apply';
 import { exportBundle, plannedExportModes } from '../src/bundle/export';
-import type { ExportOptions } from '../src/bundle/export';
+import type { ExportOptions, ExportOutcome } from '../src/bundle/export';
 import { BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, verifyBundle, writeBundle } from '../src/bundle/format';
 import { bundleBaseDir, bundleDirForMode, bundleDirsToScan } from '../src/bundle/paths';
 import {
@@ -98,26 +98,26 @@ function readConflictCopy(root: string): string | null {
 }
 
 /**
- * 在回收目录里找**某个文件**的备份（时间戳那层目录名是执行时才知道的）。
- * 比 readConflictCopy 精确：一次应用里可能挪进去好几个文件 —— 按文件名找。
+ * 在回收目录里找**某个文件**的所有备份内容（时间戳那层目录名是执行时才知道的）。
+ * 比 readConflictCopy 精确：一次应用里可能挪进去好几个文件 —— 按文件名收全。
  */
-function findBackup(root: string, rel: string): string | null {
+function findBackups(root: string, rel: string): string[] {
 	const base = path.join(root, '.trash', 'locally-save');
-	if (!fs.existsSync(base)) return null;
 	const wanted = rel.split('/').pop() as string;
-	const walk = (dir: string): string | null => {
+	const out: string[] = [];
+	const walk = (dir: string): void => {
+		if (!fs.existsSync(dir)) return;
 		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 			const next = path.join(dir, entry.name);
 			if (entry.isDirectory()) {
-				const found = walk(next);
-				if (found !== null) return found;
+				walk(next);
 				continue;
 			}
-			if (entry.name === wanted) return fs.readFileSync(next, 'utf8');
+			if (entry.name === wanted) out.push(fs.readFileSync(next, 'utf8'));
 		}
-		return null;
 	};
-	return walk(base);
+	walk(base);
+	return out;
 }
 
 const log = createLogger(() => 'silent');
@@ -1163,15 +1163,113 @@ check('回退档：更新包也能用（没被降级成"按设置"）', revertPl
 check('回退档：算出"覆盖一个本地改过的"', [revertPlan.report.forcedOverwrites, revertPlan.report.conflicts], [1, 0]);
 await executeBundlePlan(revertPlan, revertOptions);
 check('a.md 退回了包里那一版', read(ZB, 'a.md'), 'A2');
-check('我改坏的那份没丢：在回收目录里', findBackup(ZB, 'a.md'), 'B-WRONG');
+check('我改坏的那份没丢：在回收目录里', findBackups(ZB, 'a.md'), ['B-WRONG']);
 check('包里点名要删的照删（我又建回来的 c.md）', read(ZB, 'c.md'), null);
-check('它同样进了回收目录', findBackup(ZB, 'c.md'), 'C-AGAIN');
+check('它同样进了回收目录', findBackups(ZB, 'c.md').includes('C-AGAIN'), true);
 check('包里没提到的：我自己的文件一个没动', read(ZB, 'mine.md'), 'MINE');
 check('包里没提到的：b.md 也还在', read(ZB, 'b.md'), 'B1');
 
 // 对照：会清空仓库的那两档对更新包仍然降级（引擎层兜底）
 const forcedPlan = await planBundleApply(applyOptions(ZB, STATE_ZB, zChanges.file as string, { strictness: 'bundle-wins' }));
 check('「以包为准 / 完全镜像」对更新包仍然降级', forcedPlan.report.strictnessDowngraded, true);
+
+// 36. 世代回退之后再"两个一起导"，老的更新包**每次**都该被清掉
+// （用户报的场景：第一遍没清、第二遍清了 —— 因为应用一个更老的包会把世代设回那个包的世代，
+//   而清理守卫是"世代严格更小"，那一个包第一遍刚好卡在边界上）
+const RB = path.join(ROOT, 'machineRB');
+const STATE_RB = path.join(ROOT, 'state-rb.json');
+const OUTR = path.join(ROOT, 'transferR');
+fs.mkdirSync(RB, { recursive: true });
+fs.mkdirSync(OUTR, { recursive: true });
+write(RB, 'a.md', 'R1', T0);
+const rFull = await exportBundle({ ...exportOptions(RB, STATE_RB), outDir: OUTR });
+write(RB, 'b.md', 'R2', T0 + 10_000);
+const rChanges = await exportBundle({ ...exportOptions(RB, STATE_RB, 'changes'), outDir: OUTR });
+checkTrue('先有一个更新包', rChanges.file !== null, rChanges.reason ?? '');
+
+// 用户做过的事：把那个完整包又应用了一遍（更老的包 —— 世代绝不能被它拨回去）
+const rBackOptions = applyOptions(RB, STATE_RB, rFull.file as string, { strictness: 'listed-wins' });
+await executeBundlePlan(await planBundleApply(rBackOptions), rBackOptions);
+check(
+	'应用更老的包不会把世代拨回去（拨回去会让"清老包"时好时坏）',
+	(await loadState(STATE_RB)).generation,
+	rChanges.header?.targetGeneration,
+);
+
+/** 弹窗里"两个都勾"那一路：先完整副本、后更新包，先导出来的填进 keepPaths */
+const bothAtOnce = async (): Promise<ExportOutcome> => {
+	const written: string[] = [];
+	const full = await exportBundle({ ...exportOptions(RB, STATE_RB), outDir: OUTR, keepPaths: written });
+	written.push(full.file as string);
+	await exportBundle({ ...exportOptions(RB, STATE_RB, 'changes'), outDir: OUTR, keepPaths: written });
+	return full;
+};
+await bothAtOnce();
+check('第一遍：老的更新包被完整副本取代', fs.existsSync(rChanges.file as string), false);
+await bothAtOnce();
+check('第二遍也是（行为要一致）', fs.existsSync(rChanges.file as string), false);
+
+// 37. 清不掉的更新包要**说清为什么**（"没清掉"和"没什么可清"是两回事）
+const KD = path.join(ROOT, 'machineKD');
+const STATE_KD = path.join(ROOT, 'state-kd.json');
+const OUTK = path.join(ROOT, 'transferK');
+fs.mkdirSync(KD, { recursive: true });
+fs.mkdirSync(OUTK, { recursive: true });
+write(KD, 'a.md', 'KA', T0);
+await exportBundle({ ...exportOptions(KD, STATE_KD), outDir: OUTK });
+
+const foreignSource = path.join(ROOT, 'foreign.md');
+fs.writeFileSync(foreignSource, 'FOREIGN');
+const foreignStat = fs.statSync(foreignSource);
+/** 手搓一个包放进 changes/（头部字段自己给，用来模拟"别的机器导的"与"世代更大的"两种包） */
+const craftChanges = async (
+	id: string,
+	name: string,
+	overrides: Partial<Parameters<typeof writeBundle>[1]>,
+): Promise<string> => {
+	const file = path.join(OUTK, 'changes', name);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	await writeBundle(file, {
+		format: BUNDLE_FORMAT,
+		version: BUNDLE_VERSION,
+		bundleId: `00000000-0000-4000-8000-${id.padStart(12, '0')}`,
+		parentBundleId: null,
+		created: Date.now(),
+		mode: 'changes',
+		vault: '别的仓库',
+		lineage: 'other-lineage',
+		source: { copyId: 'other-copy', generation: 0 },
+		baseGeneration: 1,
+		targetGeneration: 9,
+		deleted: [],
+		emptyDirs: [],
+		...overrides,
+	}, [{ path: 'foreign.md', abs: foreignSource, size: foreignStat.size, mtime: foreignStat.mtimeMs }]);
+	return name;
+};
+
+const foreignName = await craftChanges('1', '别的机器-changes-20260101-000000-aaaaaa.lsave', {});
+const kdState = await loadState(STATE_KD);
+const futureName = await craftChanges('2', '我的笔记-changes-20990101-000000-bbbbbb.lsave', {
+	vault: '我的笔记',
+	lineage: kdState.lineage,
+	// 同血脉、但世代比这次的新（状态文件被换过 / 装过更晚的包就会出现）
+	targetGeneration: kdState.generation + 50,
+});
+
+write(KD, 'b.md', 'KB', T0 + 10_000);
+const kdFull = await exportBundle({ ...exportOptions(KD, STATE_KD), outDir: OUTK });
+check('别的血脉 / 世代更大的更新包：一个都不碰', kdFull.superseded, []);
+check(
+	'但要如实报出来（不然看着像清理开关没生效）',
+	kdFull.keptChanges.map(item => item.name).sort(),
+	[foreignName, futureName].sort(),
+);
+check(
+	'理由分成两种：血脉 / 世代',
+	[...new Set(kdFull.keptChanges.map(item => item.why))].sort(),
+	['不是同一条血脉（多半是另一台机器导的）', '记的世代不比这次的新（导出过更晚的包）'].sort(),
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

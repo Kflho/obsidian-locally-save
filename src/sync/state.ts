@@ -103,7 +103,8 @@ export interface PluginState {
 	 */
 	lineage: string;
 	/**
-	 * 世代号：每导出一个同步包 +1，应用一个包则直接跳到包里的 targetGeneration。
+	 * 世代号：每导出一个同步包 +1，应用一个包则跳到包里的 targetGeneration ——
+	 * 但**只增不减**（应用一个更老的包不会把它拨回去，见 bundle/apply.ts）。
 	 * 它不是版本号，只回答"你手上这份是不是我导出这个包时以为的那一份"。
 	 */
 	generation: number;
