@@ -216,6 +216,12 @@ export interface ApplyReport {
 	/** 这个包要送到的地方，就是我现在的基准（＝它对我没有新东西） */
 	targetIsMine: boolean;
 	/**
+	 * **本机站的这一点在这个包的路线上**（头部的 `viaHashes` 里有它）——
+	 * 合并相邻更新包之后常见：链条上只剩两端的点，而我站在被吞掉的某一个点上。
+	 * 应用它照样直接落到落点（中间那几环不必补），界面上要说清这一点，别只报"基准对不上"。
+	 */
+	viaMine: boolean;
+	/**
 	 * **导出方导完那一刻的状态编号**（包里记的，见 `sync/state-id.ts`）。
 	 * 应用完接收方算一个自己的跟它比 —— 相同就是"两边文件内容一致"。旧包没有 → null。
 	 */
@@ -409,6 +415,22 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		// 而报告里那句 `targetIsMine` 正是给用户看的"白跑一趟，让对方按我的指纹重导"。
 		// 拦在这里反而看不出这个结论，只剩一句"基准对不上"。
 		if (header.targetBaselineHash !== undefined && header.targetBaselineHash === mine) {
+			return { ok: true, kind: 'update' };
+		}
+		/**
+		 * **包覆盖了本机站的这一点 → 放行**（用户拍板的规则："覆盖对方基准点的任意更新包都是可加载的"）。
+		 *
+		 * 什么时候会出现：合并相邻更新包之后（`bundle/merge.ts`），链条上只剩两端的点，
+		 * 而对方还站在被吞掉的某一个点上（他上次收到的就是那一环）。那个点在**这个包的路线上**
+		 * 时（头部 `viaHashes`），包里装的就是"从他这一点往后所有变过的文件"：
+		 * - 路线上相邻两点之间"没变过"的文件，在他的点上与他手里的版本一致，不在包里（也不用动）；
+		 * - "变过"的都在包里，而且装的是**落点那一版** —— 写完就正好落到落点。
+		 * 所以这种情况下严格镜像照样成立，不必让他先补中间那几环。
+		 *
+		 * **兄弟不算覆盖**：同一个起点导出的两份不同落点的包，谁也不在谁的路线上（`viaHashes`
+		 * 是沿落点来路算出来的），照旧拒收。
+		 */
+		if ((header.viaHashes ?? []).includes(mine)) {
 			return { ok: true, kind: 'update' };
 		}
 		/**
@@ -906,6 +928,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		targetBaseline: header.targetBaselineHash ?? null,
 		targetIsMine: (header.targetBaselineHash ?? null) !== null
 			&& header.targetBaselineHash === state.bundle?.fullHash,
+		viaMine: (header.viaHashes ?? []).includes(state.bundle?.fullHash ?? ''),
 		peerStateId: header.stateId ?? null,
 		forced: mirrorFull || strictness !== 'normal',
 		adds,

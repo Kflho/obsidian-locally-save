@@ -1,8 +1,10 @@
-import { Modal, Setting } from 'obsidian';
+import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { bundleBaseDir } from '../bundle/paths';
 import { describeLocalChanges } from '../bundle/export';
+import { mergeBundleGroup, planBundleMerges } from '../bundle/merge';
+import type { MergePlan } from '../bundle/merge';
 import { loadState } from '../sync/state';
 import { scanTree } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
@@ -10,6 +12,7 @@ import { ApplyBundleModal } from './bundle-modal';
 import { BundleListView } from './bundle-list';
 import { BundleLogModal } from './log-modal';
 import { openFolderInExplorer } from './reveal';
+import { formatBytes } from '../utils/format';
 
 /**
  * 管理同步包：一个窗口把包文件夹里的东西全摊开 ——
@@ -98,12 +101,65 @@ export class BundleManagerModal extends Modal {
 
 		new Setting(contentEl)
 			.addButton(button => button
+				.setButtonText('合并相邻的更新包…')
+				.setTooltip('把连着的一串小环并成一份大的（链条上少几个基准点，搬起来也省事）')
+				.onClick(() => { void this.mergeAdjacent(); }))
+			.addButton(button => button
 				.setButtonText('更新记录…')
 				.setTooltip('从哪份完整副本开始、中间收发过哪些更新包')
 				.onClick(() => new BundleLogModal(this.app, this.plugin).open()))
 			.addButton(button => button
 				.setButtonText('关闭')
 				.onClick(() => this.close()));
+	}
+
+	/**
+	 * **合并相邻的更新包**：把连着的一串小环并成一份大的。
+	 *
+	 * 一进一出都是"先算后做"：先把"哪几份并成哪一份、少掉几个基准点、省多少"摊开给用户看，
+	 * 确认了才动手（`mergeBundleGroup`：先写新的、写成了才把那几份小的挪进回收站）。
+	 */
+	private async mergeAdjacent(): Promise<void> {
+		const state = await loadState(this.plugin.stateFile());
+		const { plans, forks } = await planBundleMerges(this.effectiveDir(), state.lineage);
+		if (plans.length === 0) {
+			new Notice(forks > 0
+				? '没有可以合并的：同一个点往外分了岔（有好几份不同落点的包），哪条是正路只有你清楚，插件不替你猜'
+				: '没有可以合并的：这里没有"连着两份以上、首尾相接"的更新包');
+			return;
+		}
+		new ConfirmMergeModal(this.app, plans, async () => {
+			const done: string[] = [];
+			const failed: string[] = [];
+			for (const plan of plans) {
+				try {
+					const outcome = await mergeBundleGroup({
+						settings: this.plugin.settings,
+						log: this.plugin.log,
+						vaultRoot: this.plugin.vaultRoot(),
+						vaultName: this.plugin.vaultName(),
+						stateFile: this.plugin.stateFile(),
+						mode: 'changes',
+						outDir: this.effectiveDir(),
+						configDir: this.plugin.configDir(),
+						onProgress: (count, total, file) => this.plugin.reportProgress({ done: count, total, path: file, label: '导出中' }),
+					}, plan);
+					done.push(`${plan.anchorGeneration} → ${plan.targetGeneration} 代（${plan.links.length} 份并成 1 份）`);
+					if (outcome.failed.length > 0) {
+						failed.push(`${plan.links.length} 份里有 ${outcome.failed.length} 份没能挪进回收站`);
+					}
+				} catch (error) {
+					failed.push(describe(error));
+				} finally {
+					this.plugin.reportProgress(null);
+				}
+			}
+			const parts = [...done];
+			if (failed.length > 0) parts.push(`失败：${failed.join('；')}`);
+			new Notice(`合并完成：${parts.join('、')}。原来那几份在回收站里，捞得回来`, 9000);
+			await this.list?.refresh();
+			void this.renderPosition();
+		}).open();
 	}
 
 	/**
@@ -142,4 +198,62 @@ export class BundleManagerModal extends Modal {
 
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 合并前的确认框：**把账摊开**（哪几份并成哪一份、少掉几个基准点、省多少），
+ * 并说清"原来那几份去回收站"与"站在中间点上的机器照样接得上"。
+ */
+class ConfirmMergeModal extends Modal {
+	private plans: MergePlan[];
+	private onConfirm: () => Promise<void>;
+
+	constructor(app: App, plans: MergePlan[], onConfirm: () => Promise<void>) {
+		super(app);
+		this.plans = plans;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('locally-save-modal');
+		contentEl.createEl('h2', { text: '合并相邻的更新包' });
+		contentEl.createEl('p', {
+			text: '把连着的一串小环并成一份大的：链条上少几个基准点，搬起来也省事。'
+				+ '合并后那份**起点还是段首那一点、落点还是段末那一点**，中间那几个点不再有自己的包。',
+			cls: 'locally-save-hint',
+		});
+
+		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
+		for (const plan of this.plans) {
+			facts.createEl('li', {
+				text: `第 ${plan.anchorGeneration} → ${plan.targetGeneration} 代：`
+					+ `${plan.links.length} 份并成 1 份，少掉 ${plan.middlePoints.length} 个基准点，`
+					+ `原来那几份一共 ${formatBytes(plan.bytes)}`,
+			});
+		}
+		contentEl.createEl('p', {
+			text: '**原来那几份会挪进回收站**（不是真删，捞得回来）。'
+				+ '站在中间那几个点上的机器**照样收得下合并后的这一份**：包头部记着它一路经过哪几个点，'
+				+ '应用它就直接落到段末那一点。',
+			cls: 'locally-save-hint',
+		});
+
+		new Setting(contentEl)
+			.addButton(button => button
+				.setButtonText('取消')
+				.onClick(() => this.close()))
+			.addButton(button => {
+				button.setButtonText('合并').setCta();
+				button.onClick(() => {
+					this.close();
+					void this.onConfirm();
+				});
+			});
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
 }

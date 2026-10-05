@@ -914,6 +914,15 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		+ `-${stateLabel}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
 	);
 
+	/**
+	 * **这个包一路上经过哪几个基准点**（不含起点与落点）：沿**落点的来路**往回走，
+	 * 走到起点为止 —— 合并相邻更新包时，中间那几个点就是这么被记下来的，
+	 * 站在它们上面的机器照样收得下这个包（见 `BundleHeader.viaHashes` 与 `apply.ts` 的 `checkAncestor`）。
+	 */
+	const viaHashes: string[] = target?.hash && anchor?.hash && target.hash !== anchor.hash
+		? await viaPointsOf(options.outDir, state.lineage, anchor.hash, target.hash)
+		: [];
+
 	const { header } = await writeBundle(
 		file,
 		{
@@ -939,6 +948,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			...(checkpoint
 				? (target?.hash ? { targetBaselineHash: target.hash } : {})
 				: { targetBaselineHash: freshBaseline }),
+			// **这个包一路上经过哪几个基准点**：站在中间某一点的机器也能收它（见 `BundleHeader.viaHashes`）
+			...(viaHashes.length > 0 ? { viaHashes } : {}),
 			...(stateIdInfo ? { stateId: stateIdInfo } : {}),
 			deleted,
 			emptyDirs,
@@ -1045,6 +1056,27 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		superseded,
 		keptChanges: prune.kept,
 	};
+}
+
+/**
+ * **从落点沿来路往回走，走到起点为止** —— 中间经过的那几个基准点（不含两端）。
+ *
+ * 用来填头部的 `viaHashes`：合并相邻更新包之后链条上只剩两端的点，而对方可能正站在
+ * 被吞掉的某一个点上；名单里有他，他就收得下这个包（见 `apply.ts` 的 `checkAncestor`）。
+ *
+ * 为什么必须"沿来路走"而不是"世代号夹在中间就算"：同一个起点导出的两份不同落点的包
+ * 互为**兄弟**，世代号可能正好夹在中间，但内容上谁也不覆盖谁 —— 那种必须照旧拒收。
+ */
+async function viaPointsOf(outDir: string, lineage: string, anchorHash: string, targetHash: string): Promise<string[]> {
+	const byHash = new Map(listPointRefsSync(outDir, lineage).map(ref => [ref.hash, ref]));
+	const path: string[] = [];
+	let current = byHash.get(targetHash)?.from ?? null;
+	// 走到底 / 绕回来（包被手工改坏）都停：宁可少记几个点，也不记错的
+	for (let guard = 0; current && current !== anchorHash && guard < 1000; guard++) {
+		path.push(current);
+		current = byHash.get(current)?.from ?? null;
+	}
+	return current === anchorHash ? path.reverse() : [];
 }
 
 /**
