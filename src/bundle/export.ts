@@ -606,18 +606,42 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 */
 	const frozen = checkpoint || options.frozen === true;
 	/**
-	 * **仓库自上次导出以来动过没有**（判据与"自动留包要不要写包"那条完全一样）。
-	 *
-	 * 它决定了完整副本要不要占一个**新世代号**：内容与上次打包时一模一样 →
-	 * 不推进（世代号记的是"这份内容走到哪儿了"，不是"我点了几次导出"）。
-	 *
-	 * 为什么非这样不可（用户报的"多一代"）：本机第 39 代，收到并应用了别人
-	 * 「39 → 46」的更新包之后，本机内容**就是第 46 代**、`state.generation` 也到了 46。
-	 * 这时再导一份完整副本若照旧 `+1`，它会自称"第 47 代" —— 可它装的内容一代都没往前走。
-	 * 于是本机导出的更新包变成「46 → 47」（对面看着像凭空多一代），
-	 * 而对面应用后也停在 47 上，两边的"第几代"跟内容再也对不上。
+	 * **这一刻整个仓库的状态编号**（内容指纹，见 `sync/state-id.ts`）：
+	 * 既写进包头部（接收方应用完对账用），也用来判"内容动没动"。
+	 * - **差量包**：用它送到的那份包记着的编号（它不是我现在的仓库）；
+	 * - **起点是合成的那种**（应用前存下的那一份）：照**落点**算（`landedPoint` ＝ 合成起点
+	 *   ＋ 进包的文件 − 点名的删除），那些"不在仓库里"的版本用包条目里带的指纹（`stateIdHashes`）；
+	 * - 其余：照现在的仓库算。
 	 */
-	const moved = hasLocalChanges(state, inventory);
+	const landedPoint = landedPointOf(mode, checkpoint, target, anchor, inventory, picked, deleted);
+	const stateIdInfo: StateIdInfo | null = checkpoint
+		? (target?.stateId ?? null)
+		: options.anchorOverride
+			? await computeStateId({
+				vaultRoot: options.vaultRoot,
+				state,
+				files: Object.entries(landedPoint),
+				dirs: landedDirsOf(options.anchorOverride, landedPoint),
+				...(options.stateIdHashes ? { hashes: options.stateIdHashes } : {}),
+			})
+			: await computeStateId({
+				vaultRoot: options.vaultRoot,
+				state,
+				files: inventory.files,
+				dirs: inventory.dirs,
+			});
+	/**
+	 * **仓库自上次导出以来动过没有。**
+	 *
+	 * 判据是**内容**（状态编号），不是"大小 + 修改时间"：文件被别的东西碰了一下
+	 * （网盘同步、编辑器重写、`touch`）时，大小和修改时间会变、**内容一个字都没变** ——
+	 * 用户的原话："导出完整副本本身根本不改变内容，不应该增加世代"。
+	 * 拿记录判会为这种"没变的内容"白占一个世代号，两边的号又对不上。
+	 * （状态里没有编号的旧状态文件退回按记录判，保守。）
+	 */
+	const moved = state.stateId
+		? stateIdInfo !== null && stateIdInfo.id !== state.stateId.id
+		: hasLocalChanges(state, inventory);
 	/**
 	 * **同一份内容只有一个世代号** —— 状态里那个号可能已经被旧版本撑大了，先照手里的包改回来。
 	 *
@@ -808,29 +832,6 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		: [...inventory.dirs].filter(dir => !covered.has(dir)).sort();
 
 	/**
-	 * **这一份包送到的那一个基准点**（清单）＝ 接收方应用完站到的那一点，
-	 * 也是我自己**这次导完**站到的那一点（下面是 `state.bundle` 那段）。
-	 *
-	 * 算法必须与接收方**一模一样**：起点那份清单 ＋ 这次进包的文件（用扫描到的记录）
-	 * − 这次点名的删除。**不能直接拿"当前仓库的清单"顶替** —— 2 秒容差之内的修改时间漂移
-	 * 在这边算作"没变"（于是没进包），接收方那边当然也保持原样；两边算出来的必须还是同一个点，
-	 * 否则下一个包会凭空报"基准对不上"。
-	 */
-	const landedPoint: Record<string, FileRecord> = checkpoint
-		? { ...(target?.files ?? {}) }
-		: mode === 'full'
-			? { ...Object.fromEntries(inventory.files) }
-			: (() => {
-				const point: Record<string, FileRecord> = { ...(anchor?.files ?? {}) };
-				for (const file of picked) {
-					const record = inventory.files.get(file);
-					if (record) point[file] = { size: record.size, mtime: record.mtime };
-				}
-				for (const item of deleted) delete point[item.path];
-				return point;
-			})();
-
-	/**
 	 * 这一份包的**基准指纹**（见 `bundle/baseline.ts`）—— **导出前**那一刻我站的基准点：
 	 * - 导完整包：包自己就是一份新基准，指纹由它自己的清单算出来（接收方也能重算，不信任头部）；
 	 * - 导更新包：带上"我基于的**那一个基准点**"的指纹 —— 对方**必须站在这点上**才收得下
@@ -848,36 +849,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 * 世代号做不到这件事（它只说内容走到第几版），用户提的
 	 * "需要一个编号让用户能确定当前文件状态"就是这个。
 	 *
-	 * **差量包（到某一份完整副本）例外**：它送到的是 b 那一刻，不是我现在的仓库 ——
-	 * 所以直接带上**那份包记着的状态编号**，接收方应用完一比正好是"跟对方完全一致"；
-	 * 我自己的 `state.stateId` 这一刻并没有重算（也不该拿它冒充 b）。
-	 *
-	 * 放在写包**之前**：头部要先写、偏移量提前算好（不回写）。这一步不算进度 ——
-	 * 进度只认"打进包里几个文件"；指纹基本都在缓存里（上面那个循环刚算过变过的那些），
-	 * 冷缓存时才真要读一遍仓库。
+	 * （真正算它的是函数开头那段 —— 它还要用来判"内容动没动"。这里只是说明它是什么。）
 	 */
-	const stateIdInfo: StateIdInfo | null = checkpoint
-		? (target?.stateId ?? null)
-		: options.anchorOverride
-			/**
-			 * **起点是合成的那种**（应用前存下的那一份）：这一环送到的那一点**不是我现在的仓库** ——
-			 * 被对方那份包覆盖的路径上落点用的是对方那一版，我这边还没换过去。
-			 * 所以编号照**落点**算（`landedPoint` ＝ 合成起点 ＋ 进包的文件 − 点名的删除），
-			 * 那些"不在仓库里"的版本用包条目里带的指纹（`stateIdHashes`）。
-			 */
-			? await computeStateId({
-				vaultRoot: options.vaultRoot,
-				state,
-				files: Object.entries(landedPoint),
-				dirs: landedDirsOf(options.anchorOverride, landedPoint),
-				...(options.stateIdHashes ? { hashes: options.stateIdHashes } : {}),
-			})
-			: await computeStateId({
-				vaultRoot: options.vaultRoot,
-				state,
-				files: inventory.files,
-				dirs: inventory.dirs,
-			});
 	/** 我自己的状态编号：不推进本机时不算（那不是我现在的仓库该报的数） */
 	const ownStateId = frozen ? null : stateIdInfo;
 
@@ -915,12 +888,18 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	);
 
 	/**
-	 * **这个包一路上经过哪几个基准点**（不含起点与落点）：沿**落点的来路**往回走，
-	 * 走到起点为止 —— 合并相邻更新包时，中间那几个点就是这么被记下来的，
-	 * 站在它们上面的机器照样收得下这个包（见 `BundleHeader.viaHashes` 与 `apply.ts` 的 `checkAncestor`）。
+	 * **这个包一路上经过哪几个基准点**（不含起点与落点）：站在它们上面的机器照样收得下这个包
+	 * （见 `BundleHeader.viaHashes` 与 `apply.ts` 的 `checkAncestor`）。
 	 */
-	const viaHashes: string[] = target?.hash && anchor?.hash && target.hash !== anchor.hash
-		? await viaPointsOf(options.outDir, state.lineage, anchor.hash, target.hash)
+	const viaHashes = target?.hash && anchor?.hash && target.hash !== anchor.hash
+		? await viaPointsFor(
+			options,
+			state,
+			{ hash: anchor.hash, generation: anchor.generation },
+			targetGeneration,
+			landedPoint,
+			new Set<string>([...sources.map(source => source.path), ...deleted.map(item => item.path)]),
+		)
 		: [];
 
 	const { header } = await writeBundle(
@@ -1059,24 +1038,92 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 }
 
 /**
- * **从落点沿来路往回走，走到起点为止** —— 中间经过的那几个基准点（不含两端）。
+ * **这一份包送到的那一个基准点**（清单）＝ 接收方应用完站到的那一点，也是我自己**这次导完**
+ * 站到的那一点。
  *
- * 用来填头部的 `viaHashes`：合并相邻更新包之后链条上只剩两端的点，而对方可能正站在
- * 被吞掉的某一个点上；名单里有他，他就收得下这个包（见 `apply.ts` 的 `checkAncestor`）。
- *
- * 为什么必须"沿来路走"而不是"世代号夹在中间就算"：同一个起点导出的两份不同落点的包
- * 互为**兄弟**，世代号可能正好夹在中间，但内容上谁也不覆盖谁 —— 那种必须照旧拒收。
+ * 算法必须与接收方**一模一样**：起点那份清单 ＋ 这次进包的文件（用扫描到的记录）
+ * − 这次点名的删除。**不能直接拿"当前仓库的清单"顶替** —— 2 秒容差之内的修改时间漂移
+ * 在这边算作"没变"（于是没进包），接收方那边当然也保持原样；两边算出来的必须还是同一个点，
+ * 否则下一个包会凭空报"基准对不上"。
  */
-async function viaPointsOf(outDir: string, lineage: string, anchorHash: string, targetHash: string): Promise<string[]> {
-	const byHash = new Map(listPointRefsSync(outDir, lineage).map(ref => [ref.hash, ref]));
-	const path: string[] = [];
-	let current = byHash.get(targetHash)?.from ?? null;
-	// 走到底 / 绕回来（包被手工改坏）都停：宁可少记几个点，也不记错的
-	for (let guard = 0; current && current !== anchorHash && guard < 1000; guard++) {
-		path.push(current);
-		current = byHash.get(current)?.from ?? null;
+function landedPointOf(
+	mode: BundleMode,
+	checkpoint: boolean,
+	target: BundleAnchor | null,
+	anchor: BundleAnchor | null,
+	inventory: Inventory,
+	picked: string[],
+	deleted: BundleDeletedEntry[],
+): Record<string, FileRecord> {
+	if (checkpoint) return { ...(target?.files ?? {}) };
+	if (mode === 'full') return { ...Object.fromEntries(inventory.files) };
+	const point: Record<string, FileRecord> = { ...(anchor?.files ?? {}) };
+	for (const file of picked) {
+		const record = inventory.files.get(file);
+		if (record) point[file] = { size: record.size, mtime: record.mtime };
 	}
-	return current === anchorHash ? path.reverse() : [];
+	for (const item of deleted) delete point[item.path];
+	return point;
+}
+
+/**
+ * **哪些点"在这个包的覆盖范围里"** —— 站在它们上面的机器收得下这个包（填进头部 `viaHashes`）。
+ *
+ * 判据是**内容**，不是世代号、也不只是来路（踩过：中间隔了一份完整副本之后，来路就断了 ——
+ * 用户实测"39→53，再导一份完整副本成了 54，重导 39→54 给站在 53 的机器，被拒"）：
+ *
+ * > 候选点 P 里凡是"P 与落点不一样"的路径，都必须是**这一包裹住的**路径（进包的条目或点名的删除）。
+ *
+ * 那样 P 应用完正好落成落点（不一样的那些都被包换掉了，一样的一个没动）。反过来：
+ * - **兄弟包**（同一个起点、另一条支路）过不了：它动过的路径不在这一包的名单里；
+ * - 候选只取**世代夹在起点与落点之间**的点，而且只读清单（`materializePointSync` 不读负载），
+ *   所以这一步只是几次头部叠加，不慢。
+ */
+async function viaPointsFor(
+	options: ExportOptions,
+	state: PluginState,
+	anchor: { hash: string; generation: number },
+	targetGeneration: number,
+	/** 落点清单（＝接收方应用完该有的样子） */
+	landedPoint: Record<string, FileRecord>,
+	/** 这一包裹住的路径：进包的条目 ＋ 点名的删除 */
+	covered: ReadonlySet<string>,
+): Promise<string[]> {
+	const via: string[] = [];
+	const seen = new Set<string>();
+	for (const ref of listPointRefsSync(options.outDir, state.lineage)) {
+		if (ref.hash === anchor.hash || seen.has(ref.hash)) continue;
+		seen.add(ref.hash);
+		// 先按世代筛一道（读清单不便宜）：只有夹在起点与落点之间的才可能是"路上"的点
+		if (!(ref.generation > anchor.generation && ref.generation < targetGeneration)) continue;
+		const point = materializePointSync(options.outDir, state.lineage, ref.hash);
+		if (!point) continue;
+		if (isOnTheWay(point.files, landedPoint, covered)) via.push(ref.hash);
+	}
+	return via;
+}
+
+/**
+ * **P 是不是"在这一包的覆盖范围里"**：P 与落点不一样的每一条路径，都必须是这一包裹住的。
+ *
+ * 一样的不必动；不一样的必须进包（条目）或点名删掉 —— 这样 P 应用完正好落成落点，
+ * 严格镜像的前提（"送到的状态是确定的"）才成立。
+ */
+function isOnTheWay(
+	point: Record<string, FileRecord>,
+	landed: Record<string, FileRecord>,
+	covered: ReadonlySet<string>,
+): boolean {
+	for (const [path, record] of Object.entries(point)) {
+		const atTarget = landed[path];
+		if (atTarget && sameRecord(record, atTarget, DEFAULT_MTIME_TOLERANCE_MS)) continue;
+		if (!covered.has(path)) return false;
+	}
+	for (const path of Object.keys(landed)) {
+		if (point[path]) continue; // 上面比过了
+		if (!covered.has(path)) return false;
+	}
+	return true;
 }
 
 /**

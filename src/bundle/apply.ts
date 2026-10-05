@@ -367,7 +367,7 @@ function matchesHistory(local: FileRecord, entry: BundleEntry): boolean {
 /** 共同祖先检查的结论 */
 type AncestorCheck =
 	/** 放行。`first` ＝ 本机第一份（还没有基准）／`full` ＝ 同一条血脉的新完整副本／`update` ＝ 接在同一份基准上的更新包 */
-	| { ok: true; kind: 'first' | 'full' | 'update' }
+	| { ok: true; kind: 'first' | 'full' | 'update'; viaLanding?: boolean }
 	| { ok: false; message: string };
 
 /**
@@ -432,6 +432,24 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		 */
 		if ((header.viaHashes ?? []).includes(mine)) {
 			return { ok: true, kind: 'update' };
+		}
+		/**
+		 * **算一遍"应用完我会落到哪一点"，跟包里报的落点比一比。**
+		 *
+		 * 怎么算：我站的这一点 ＋ 包里的条目 − 包里点名的删除 —— 这就是接收方应用完真正会落到的
+		 * 那一份清单（严格镜像就是这么算的，见执行阶段那个 `nextFullFiles`）。它等于包头部报的
+		 * `targetBaselineHash`，就说明**应用完正好落到对方那一点**：跟落点不一样的那些路径全在包里，
+		 * 一样的一条没动。那跟"起点严格相等"是一回事，收下它是确定的。
+		 *
+		 * 为什么光有 `viaHashes` 还不够（用户实测）：**中间隔了一份完整副本**之后，
+		 * 旧的那些环会被那份完整副本清掉（`removeSupersededChanges`：完整清单取代老环），
+		 * 于是"沿来路认点"就认不出对方站在哪 —— 而内容上他确实在路线上，算一遍就能证明。
+		 */
+		const landed: Record<string, FileRecord> = { ...(state.bundle?.fullFiles ?? {}) };
+		for (const entry of header.entries) landed[entry.path] = { size: entry.size, mtime: entry.mtime };
+		for (const item of header.deleted) delete landed[item.path];
+		if (header.targetBaselineHash !== undefined && listingHashOfFiles(landed) === header.targetBaselineHash) {
+			return { ok: true, kind: 'update', viaLanding: true };
 		}
 		/**
 		 * **链条中间断了：拒绝，并把"从哪个基准点开始"指出来。**
@@ -928,7 +946,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		targetBaseline: header.targetBaselineHash ?? null,
 		targetIsMine: (header.targetBaselineHash ?? null) !== null
 			&& header.targetBaselineHash === state.bundle?.fullHash,
-		viaMine: (header.viaHashes ?? []).includes(state.bundle?.fullHash ?? ''),
+		viaMine: ancestor.viaLanding === true || (header.viaHashes ?? []).includes(state.bundle?.fullHash ?? ''),
 		peerStateId: header.stateId ?? null,
 		forced: mirrorFull || strictness !== 'normal',
 		adds,

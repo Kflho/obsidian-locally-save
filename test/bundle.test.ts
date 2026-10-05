@@ -280,19 +280,17 @@ check(
 	['notes/a.md', 'notes/new.md'],
 );
 
-// B 站在第 2 个包的落点上 → 第四个包的起点不是它站的点 → **拒绝，不猜着合**
+// B 站在第 2 个包的落点上 → 第四个包的起点不是它站的点。
+// **但它算得出来"应用完正好落到第四份包送到的那一点"**（本机这点 ＋ 包里条目 − 点名删除
+// 等于包头报的落点）→ 放行（用户拍的板："覆盖对方基准点的任意更新包都是可加载的"）。
+// 以前这里一律拒收，判定只认"起点严格相等"，太死。
 const bPointBefore = (await loadState(STATE_B)).bundle?.fullHash as string;
-let gap = '';
-try {
-	await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
-} catch (error) {
-	gap = error instanceof Error ? error.message : String(error);
-}
-checkTrue('链条中间断了 → 拒绝合并', gap.includes('接不上'), gap || '（没拒绝）');
+const gapPlan = await planBundleApply(applyOptions(B, STATE_B, fourth.file as string));
+check('起点对不上、但算出来正好落到包里报的那一点 → 放行', gapPlan.report.viaMine, true);
 checkTrue(
-	'并说清"从哪个基准点开始导出"（把本机这一点报出来）',
-	gap.includes(bPointBefore) && gap.includes('从哪个状态'),
-	gap,
+	'放行的理由说出来（不是"起点对不上"那种拒绝）',
+	gapPlan.report.viaMine && typeof bPointBefore === 'string',
+	String(bPointBefore),
 );
 
 // 把缺的那一环补上（链条就在文件夹里）：按 third → fourth 的顺序应用
@@ -1625,27 +1623,16 @@ check('回礼包从"我导出的那一点"往外延伸（A 正站在那儿）', 
 check('导完就站到回礼包送到的那一点（头部记着它）', bAfterReturn.bundle?.fullHash, returnHeader.targetBaselineHash);
 check('这一点是我导的 → 等对方合并了才算确认', bAfterReturn.bundle?.pointConfirmed, false);
 
-// 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上
-// → 更新包**直接拒绝**（没有共同祖先就不合：基准不是同一份时，"基准里有、包里没有"
-//   会被当成"对方删过它"，一大片本机文件要没）。拒绝时要说清下一步怎么走。
+// 反过来：A 换了一份新基准（又导一次完整包），B 还停在老基准上。
+// **判定按"算一遍落点"来**：这次算出来正好等于包里报的落点 → 放行（内容上 B 确实在路线上）；
+// 算不出来才拒收（下一条用例守的就是那种）。
 write(RMA, 'x.md', 'X3', T0 + 20_000);
 const raFull2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA), outDir: OUTRA });
-// 换完基准再改一笔：紧接着完整包导的更新包必然是空的（那条语义有专门用例）
 write(RMA, 'x.md', 'X4', T0 + 30_000);
 const raChanges2 = await exportBundle({ ...exportOptions(RMA, STATE_RMA, 'changes'), outDir: OUTRA });
 checkTrue('换基准之后的更新包有内容', raChanges2.file !== null, raChanges2.reason ?? '');
-let mismatchError = '';
-try {
-	await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string));
-} catch (error) {
-	mismatchError = error instanceof Error ? error.message : String(error);
-}
-checkTrue('基准对不上的更新包被拒绝（不猜着合）', mismatchError.includes('接不上'), mismatchError || '（没拒绝）');
-checkTrue(
-	'拒绝时说清两条出路（从本机这个基准点重导 / 中间缺的包补上 / 完整副本兜底）',
-	mismatchError.includes('完整副本') && mismatchError.includes('从哪个状态') && mismatchError.includes('中间缺'),
-	mismatchError,
-);
+const rmbAlignedPlan = await planBundleApply(applyOptions(RMB, STATE_RMB, raChanges2.file as string));
+check('基准指纹对不上、但算出来正好落到包里报的那一点 → 放行', rmbAlignedPlan.report.viaMine, true);
 const rmbAlignOptions = applyOptions(RMB, STATE_RMB, raFull2.file as string);
 await executeBundlePlan(await planBundleApply(rmbAlignOptions), rmbAlignOptions);
 check(
@@ -2745,6 +2732,103 @@ const mgSiblingRejected = await planBundleApply(mgApply(MG_D, STATE_MG_D, mgSibl
 	.then(() => '收了')
 	.catch((error: unknown) => (error instanceof Error && error.message.includes('接不上') ? '接不上' : '别的错'));
 check('兄弟包不认"站在别的点上"的机器：照旧拒收', mgSiblingRejected, '接不上');
+
+// 48. 用户实测的现场：**中间隔了一份完整副本**之后，站在老点上的机器还收得下新包吗
+//
+// 他的原话："我导出更新包 39-53，但导出完整包又加版本号到 54，我重新导出 39 到 54，
+// 然后我在远程 53 应用 39 到 54 提示无法应用。"
+// 根因：完整副本是一份**新基准**（没有"来路"），只按来路算"路上经过哪些点"就算不出 53 ——
+// 现在改成按**内容**算：P 与落点不一样的路径都必须是这一包裹住的，那样 P 应用完正好落成落点。
+const VX = path.join(ROOT, 'via');
+const VX_A = path.join(VX, 'a');
+const VX_R = path.join(VX, 'remote');
+const VX_OUT = path.join(VX, 'transfer');
+const STATE_VX_A = path.join(VX, 'state-a.json');
+const STATE_VX_R = path.join(VX, 'state-remote.json');
+for (const dir of [VX_A, VX_R, VX_OUT]) fs.mkdirSync(dir, { recursive: true });
+const vxExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes', base?: string): ExportOptions =>
+	({
+		settings: settings(), log, vaultRoot: root, vaultName: '我的笔记', stateFile, mode, outDir: VX_OUT,
+		...(base ? { baseFingerprint: base } : {}),
+	});
+const vxApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+
+const vxT0 = Date.now();
+write(VX_A, 'a.md', 'A1', vxT0);
+const vxFull = await exportBundle(vxExport(VX_A, STATE_VX_A, 'full'));
+const vxAnchor = vxFull.header?.baselineHash as string; // 「第 39 代」那种老起点
+
+// ① 更新包：老起点 → 现在（相当于"39 → 53"）
+write(VX_A, 'a.md', 'A2 长一点', vxT0 + 30_000);
+const vxFirst = await exportBundle(vxExport(VX_A, STATE_VX_A, 'changes', vxAnchor));
+check('第一份更新包送到第 2 代', vxFirst.header?.targetGeneration, 2);
+// 远程站到那一点上（相当于"远程在 53"）
+await executeBundlePlan(
+	await planBundleApply(vxApply(VX_R, STATE_VX_R, vxFull.file as string)),
+	vxApply(VX_R, STATE_VX_R, vxFull.file as string),
+);
+await executeBundlePlan(
+	await planBundleApply(vxApply(VX_R, STATE_VX_R, vxFirst.file as string)),
+	vxApply(VX_R, STATE_VX_R, vxFirst.file as string),
+);
+check('远程站在第 2 代（那就是"53"）', (await loadState(STATE_VX_R)).generation, 2);
+
+// ② 中间又导了一份**完整副本**（新基准，没有来路）——这一步以前会把"路上经过谁"算丢
+write(VX_A, 'a.md', 'A3 再长一点点', vxT0 + 60_000);
+const vxFull2 = await exportBundle(vxExport(VX_A, STATE_VX_A, 'full'));
+check('完整副本把它带到第 3 代', vxFull2.header?.targetGeneration, 3);
+
+// ③ 重新导一份"老起点 → 现在"（相当于"39 → 54"）
+const vxAgain = await exportBundle(vxExport(VX_A, STATE_VX_A, 'changes', vxAnchor));
+check('新更新包送到第 3 代', vxAgain.header?.targetGeneration, 3);
+const vxAgainInfo = await readBundleInfo(vxAgain.file as string);
+// 中间那份完整副本把老的环清掉了（`removeSupersededChanges`），所以"沿来路认点"认不出第 2 代 ——
+// 放行靠的是**算一遍落点**（下面那条断言），不再依赖 viaHashes。
+check('这份包没记 via（老环已被完整副本取代）', vxAgainInfo.header.viaHashes ?? [], []);
+
+// ④ 远程应用它：**能成功**，而且正好落到落点
+const vxPlan = await planBundleApply(vxApply(VX_R, STATE_VX_R, vxAgain.file as string));
+check('报告里认出"我站的这一点在包的路线上"', vxPlan.report.viaMine, true);
+const vxResult = await executeBundlePlan(vxPlan, vxApply(VX_R, STATE_VX_R, vxAgain.file as string));
+check('远程应用成功：内容就是最新那版', read(VX_R, 'a.md'), 'A3 再长一点点');
+check('远程落到第 3 代', (await loadState(STATE_VX_R)).generation, 3);
+check('两边状态编号一致', vxResult.stateIdCompare, 'match');
+
+// 49. "内容没变就绝不加代"：文件被碰了一下（改时间不改内容）也不算变化
+//
+// 用户的原话："导出完整副本本身根本不改变内容，不应该增加世代，之前修过了，你再仔细检查下"。
+// 以前判"动没动"看的是**大小 + 修改时间**：网盘同步、编辑器重写、touch 一下都会让记录变，
+// 于是白占一个世代号（而状态编号明明一样）。现在按**内容编号**判 —— 编号不变就是不占新代。
+const TT = path.join(ROOT, 'touch');
+const TT_VAULT = path.join(TT, 'vault');
+const TT_OUT = path.join(TT, 'transfer');
+const STATE_TT = path.join(TT, 'state.json');
+for (const dir of [TT_VAULT, TT_OUT]) fs.mkdirSync(dir, { recursive: true });
+const ttExport = (mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ settings: settings(), log, vaultRoot: TT_VAULT, vaultName: '我的笔记', stateFile: STATE_TT, mode, outDir: TT_OUT });
+
+const ttT0 = Date.now();
+write(TT_VAULT, 'a.md', 'A1', ttT0);
+write(TT_VAULT, 'b.md', 'B1', ttT0);
+const ttFull = await exportBundle(ttExport('full'));
+check('第一份完整副本是第 1 代', ttFull.header?.targetGeneration, 1);
+
+// 只碰时间、内容一个字不改（模拟网盘同步 / 编辑器重写）
+fs.utimesSync(abs(TT_VAULT, 'a.md'), new Date(ttT0 + 500_000), new Date(ttT0 + 500_000));
+const ttFull2 = await exportBundle(ttExport('full'));
+check('只碰了时间（内容没变）→ **不占新世代**', ttFull2.header?.targetGeneration, 1);
+check('状态编号也没变', ttFull2.header?.stateId?.id, ttFull.header?.stateId?.id);
+
+// 更新包同理：内容没变时不许 +1
+const ttChanges = await exportBundle(ttExport('changes'));
+check('内容没变：更新包也不 +1（导不出来东西）', ttChanges.file, null);
+
+// 真改了内容才 +1
+write(TT_VAULT, 'a.md', 'A2 长一点', ttT0 + 900_000);
+const ttMoved = await exportBundle(ttExport('full'));
+check('内容真变了 → +1', ttMoved.header?.targetGeneration, 2);
+check('状态编号跟着变', ttMoved.header?.stateId?.id !== ttFull.header?.stateId?.id, true);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
