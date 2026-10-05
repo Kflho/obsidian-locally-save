@@ -154,6 +154,21 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   不是"我此刻的内容像哪一代"。拨回去的后果就是上面那条：`removeSupersededChanges` 判
   "新包取代了旧包"靠的是「世代**严格更小**」，世代一倒退，同一个"导出完整包 + 更新包"的动作
   会第一遍清不掉、第二遍才清（用户报成偶发 bug，`test/bundle.test.ts` 第 36 组钉住了）。
+- **基准指纹（`bundle/baseline.ts`）＝两台机器互相发包时的「共同祖先令牌」**：
+  完整包的指纹由**它自己的清单**算出来（接收方也能重算，不用信任头部那个字段，旧包也照用）；
+  更新包带上「我基于的那份完整副本的指纹」（它手里只有变过的那部分，算不出来）。
+  应用时 `compareBaseline()` 一比 → `match` / `mismatch` / `unknown`，报告里如实写出来；
+  `mismatch` 时界面要给**出路**（「导出一份完整副本发过去…」按钮），不是只警告。
+  `state.bundle.fullHash` 存这个令牌：导完整包＝换成新的、应用完整副本＝采纳对方那个、
+  应用更新包不动它。**光靠世代号判断不了"是不是同一份基准"**（两边各自 +1 会碰号、
+  内容对不上也看不出来），用户报过"不确定更新状态"；旧状态文件/旧包没这个字段 → `unknown`，
+  界面说明只能逐文件合并。
+- **两台机器互相发包要"回礼"**：更新包是累积语义 → 每台只握着改动的一半，
+  收下对方的之后必须把自己这半也导出来发回去（界面上是应用对话框里默认勾着的
+  「应用后顺便导一个更新包」，`bundle-modal.ts` 的 `exportReturnBundle()`）。
+  应用报告里的 `report.pendingChanges / pendingDeletes`（`planBundleApply` 里算）＝
+  "我这边对方还没有的改动"，先摊开给用户看，他才知道要回传多少；没有基准（没应用过完整副本）
+  时是 `null`，界面上不显示那行、回礼那里也会如实说明导不出来。
 - **更新包攒到上限要提醒"换基准"**（`bundle/size-warn.ts` + `ui/reset-baseline-modal.ts`）：
   上限是设置 `bundleSizeWarnLimit`（认 `200MB` / `500KB` / 1GB，不带单位按 MB；留空＝默认 200MB，
   填 0 ＝ 关掉）。到线弹窗，三个选项：**重新导出完整副本** / **打开更新包文件夹** / **跳过这次导出**。
@@ -186,7 +201,7 @@ test/              测试（exclude / diff / sync / bundle / settings / commands
 ## 改代码的流程
 
 ```bash
-npm test        # 629 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
+npm test        # 647 项检查；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 npm run build   # tsc + esbuild，顺带部署到 vault
 npm run lint    # eslint（obsidianmd 插件规则）
 ```

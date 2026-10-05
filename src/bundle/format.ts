@@ -99,6 +99,13 @@ export interface BundleHeader {
 	baseGeneration: number | null;
 	/** 应用这个包之后，接收方应该到达的世代 */
 	targetGeneration: number;
+	/**
+	 * **我这份基准的指纹**（见 `bundle/baseline.ts`）：
+	 * - 完整包：它自己这份清单的指纹（接收方应用后就把这个当成自己的基准令牌）；
+	 * - 更新包：我基于的那份完整副本的指纹 —— 接收方一比就知道"是不是接着同一份基准"。
+	 * 旧版本的包没有这个字段 → 判成"说不清"，只能逐文件合并（不静默降级，界面会说明）。
+	 */
+	baselineHash?: string;
 	entries: BundleEntry[];
 	deleted: BundleDeletedEntry[];
 	/**

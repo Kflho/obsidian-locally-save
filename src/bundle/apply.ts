@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { readBundleInfo, verifyBundle } from './format';
 import type { BundleEntry, BundleInfo } from './format';
-import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync } from '../sync/diff';
+import { baselineOfBundle, compareBaseline } from './baseline';
+import type { BaselineMatch } from './baseline';
+import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/runner';
 import { loadState, saveState } from '../sync/state';
@@ -205,6 +207,18 @@ export interface ApplyReport {
 	/** 本次用的强硬程度 */
 	strictness: ApplyStrictness;
 	/**
+	 * 基准比对的结果（见 `bundle/baseline.ts`）：
+	 * - `match`：跟这个包同一份完整副本 → 接着它往后应用是**确定的**；
+	 * - `mismatch`：两边的完整副本基准不是同一份 → 只能逐文件合并，要彻底对齐得互导一次完整副本；
+	 * - `unknown`：说不清（包是旧版本导的，或这台机器还没立过基准）。
+	 * 以前只看世代号（两边各自 +1、会碰号），所以"是不是同一份基准"根本没法确定。
+	 */
+	baselineMatch: BaselineMatch;
+	/** 我这边的基准指纹（没有就是 null） */
+	myBaseline: string | null;
+	/** 这个包说的基准指纹（旧包没有就是 null） */
+	bundleBaseline: string | null;
+	/**
 	 * 请求的强硬程度被降级了（更新包 + 以包为准/完全镜像 → 按设置）。
 	 * 界面上要说明白：不然用户以为自己选了"完全一致"，实际没生效。
 	 */
@@ -219,6 +233,19 @@ export interface ApplyReport {
 	extraDeletes: number;
 	/** 本地与包已经完全一致的条目数 */
 	synchronized: number;
+	/**
+	 * 本机这边**对方还没有**的改动有几个（文件数）。
+	 *
+	 * 两台机器互相发更新包时，每台只握着改动的一半：收下对方的之后，
+	 * 自己这半得导出来发回去，对方才补得齐（用户问过："数据各半，会不会缺"）。
+	 * 这个数就是"回礼包"里真正属于我的那部分 —— 包里刚带来的那些不算
+	 * （对方本来就有，回礼包里会有但它们只是累积语义的副产品）。
+	 *
+	 * `null` ＝ 这台机器还没有基准（没应用过完整副本），算不出来。
+	 */
+	pendingChanges: number | null;
+	/** 同上，但我这边删掉、对方还留着的（回礼包会给它们一份删除清单） */
+	pendingDeletes: number | null;
 	/** 同步程度：已一致 / 总条目（0–100） */
 	syncPercent: number;
 	/** 会认出来的移动（改名/挪目录） */
@@ -529,6 +556,33 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (localDeleted.has(action.path)) continue; // 包点名要删的
 		extraDeletes++; // 包里没点名、却要删 → "完整包里没有它"（对方删过的，或镜像时的本机独有）
 	}
+
+	// ------------------------------------------------- 我这边的"另一半"
+	//
+	// 两台机器互相发更新包时，每台只握着改动的一半：收下对方这包之后，
+	// 我这边的改动得自己导出来发回去（"回礼包"），对方才补得齐。
+	// 这里先算清楚"属于我的那部分"有多少，界面上应用前就告诉用户 ——
+	// 不然用户只能对着两边都是"各半"的文件夹猜（用户问过：数据会不会缺）。
+	const anchor = state.bundle?.fullFiles ?? null;
+	let pendingChanges = 0;
+	let pendingDeletes = 0;
+	if (anchor) {
+		for (const [file, record] of local.files) {
+			// 跟基准一模一样 → 不是改动
+			const atAnchor = anchor[file];
+			if (atAnchor && sameRecord(record, atAnchor, TOLERANCE)) continue;
+			// 包里刚带来的那一版也不算"我的"：对方本来就有
+			const entry = entriesByPath.get(file);
+			if (entry && sameRecord(record, entry, TOLERANCE)) continue;
+			pendingChanges++;
+		}
+		for (const file of Object.keys(anchor)) {
+			if (local.files.has(file)) continue;
+			// 这个删除是包里点名的（对方删的），不是我这边删的
+			if (localDeleted.has(file)) continue;
+			pendingDeletes++;
+		}
+	}
 	for (const item of header.deleted) {
 		const here = local.files.get(item.path);
 		if (!here) continue;
@@ -609,6 +663,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		keepBackup,
 		strictness,
 		strictnessDowngraded,
+		baselineMatch: compareBaseline(state.bundle?.fullHash ?? null, header),
+		myBaseline: state.bundle?.fullHash ?? null,
+		bundleBaseline: baselineOfBundle(header),
 		forced: strictness !== 'normal',
 		adds,
 		overwrites,
@@ -621,6 +678,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		extraDeletes,
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
+		pendingChanges: anchor ? pendingChanges : null,
+		pendingDeletes: anchor ? pendingDeletes : null,
 		moves,
 		// 本地还没有的目录都算"要补建"：有文件的那些会随文件写入顺带建出来，
 		// 空文件夹靠执行阶段显式建（`header.emptyDirs`）
@@ -859,6 +918,11 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		fullGeneration: isFull
 			? plan.info.header.targetGeneration
 			: (state.bundle?.fullGeneration ?? null),
+		// 基准令牌：应用了完整副本 ＝ 我这边也站到这份基准上了（旧版包没记指纹就现算一个）；
+		// 应用更新包不动它 —— 基准没变，只是往后累积了改动
+		fullHash: isFull
+			? baselineOfBundle(plan.info.header)
+			: (state.bundle?.fullHash ?? null),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
 		dirs: keepDirs,
 	};

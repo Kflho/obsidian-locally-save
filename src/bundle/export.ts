@@ -4,6 +4,7 @@ import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle 
 import type { BundleDeletedEntry, BundleHeader, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
+import { listingHashOfFiles } from './baseline';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { excludePatterns } from '../sync/runner';
@@ -264,6 +265,15 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		`${safeName(options.vaultName)}-${mode === 'full' ? 'full' : 'changes'}-${formatStamp(now)}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
 	);
 
+	/**
+	 * 这一份包的**基准指纹**（见 `bundle/baseline.ts`）：
+	 * - 导完整包 ＝ 立一份新基准 → 指纹由它自己的清单算出来（接收方也能重算，不用信任头部）；
+	 * - 导更新包 → 带上"我基于的那份完整副本"的指纹（我手里只有变过的那部分，算不出来）；
+	 *   旧状态文件没有这个令牌（升级上来的）就留空 → 对方判成"说不清"，界面会说明。
+	 */
+	const freshBaseline = mode === 'full' ? listingHashOfFiles(inventory.files) : null;
+	const baselineHash = mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null);
+
 	const { header } = await writeBundle(
 		file,
 		{
@@ -281,6 +291,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			// （也就是世代 ≥ 基准世代）就能收，不必逐个按顺序应用。
 			baseGeneration: mode === 'changes' ? (state.bundle?.fullGeneration ?? state.generation) : null,
 			targetGeneration,
+			...(baselineHash ? { baselineHash } : {}),
 			deleted,
 			emptyDirs,
 		},
@@ -297,6 +308,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		// （这正是"包会越滚越大"的节制阀，所以完整包不是可有可无的）
 		fullFiles: mode === 'full' ? Object.fromEntries(inventory.files) : anchor,
 		fullGeneration: mode === 'full' ? targetGeneration : (state.bundle?.fullGeneration ?? null),
+		// 基准令牌：导完整包 ＝ 换一份新基准（指纹换成新的）；导更新包不动它
+		fullHash: mode === 'full' ? freshBaseline : (state.bundle?.fullHash ?? null),
 		history: mode === 'full' ? {} : nextHistory,
 		// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
 		dirs: [...inventory.dirs],
