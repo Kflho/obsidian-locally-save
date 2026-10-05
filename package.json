@@ -1,6 +1,6 @@
 {
 	"name": "locally-save",
-	"version": "0.10.1",
+	"version": "0.11.0",
 	"description": "Obsidian plugin: packs the vault (or just the changes) into a single transferable .lsave file. No network calls.",
 	"main": "main.js",
 	"author": "KahoTAT",
