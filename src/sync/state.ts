@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { readJsonFile, writeJsonAtomic } from './disk';
-import type { LastSyncRecord } from './summary';
 import type { FileRecord } from './types';
 
 /**
@@ -9,31 +8,17 @@ import type { FileRecord } from './types';
  * 记四件事：
  * - **这份副本是谁**（copyId）与**第几代**（generation）—— 同步包靠它判断
  *   "你和我是不是同一条血脉"；
- * - **每个同步目标上次同步后的样子** —— 三方比对的基准，没有它就分不清
- *   "本地改了"和"副本改了"；
- * - **上次导出/应用同步包的样子** —— 「只导出改动」与漏包检测靠它；
+ * - **上次导出 / 应用同步包的样子** —— 「只导出改动」与漏包检测靠它；
  * - **内容指纹缓存** —— 降级合并时要用"内容"而不是"时间"来认文件，
- *   算过的按 size+mtime 缓存，没变过的下次直接复用。
+ *   算过的按 size+mtime 缓存，没变过的下次直接复用；
+ * - **更新记录与状态编号** —— 界面上"我站在哪、两边一不一样"靠它们。
  *
- * 状态放在插件目录而不是副本目录里：同一个副本（比如一块 U 盘）可能被两台机器用，
- * 各自的基准必须分开记，否则会互相覆盖。
+ * 0.8.0 砍掉「同步到本地副本」通道时，这里的 `targets`（每个同步目标的基准）
+ * 与 `lastSync`（上次同步干了什么）一并删掉了：那条通道是它们唯一的读者。
+ * 老状态文件里留着这两个字段不读即可（`loadState` 不会把它们带进内存）。
  */
 
 export const STATE_FILE_NAME = 'sync-state.json';
-
-export interface TargetState {
-	/** 上次同步完成的时间戳 */
-	lastSync: number;
-	/** 上次同步后两边一致的文件 */
-	files: Record<string, FileRecord>;
-	/**
-	 * 上次同步后**两边都有的目录**。
-	 *
-	 * 与文件同一个用途：判断"目录是被删了还是新出现的"。老状态文件里没有这一项，
-	 * 于是升级后的第一轮不删任何目录（等于旧行为），第二轮起删除才正常传播。
-	 */
-	dirs?: string[];
-}
 
 export interface BundleBaseline {
 	/** 上次导出同步包的时间戳 */
@@ -146,16 +131,7 @@ export interface PluginState {
 	lastBundleId: string | null;
 	/** 上一次导出的同步包 ID：下一个包会把它记成 parentBundleId */
 	lastExportedBundleId: string | null;
-	/** 同步目标路径 → 该目标的基准 */
-	targets: Record<string, TargetState>;
 	bundle: BundleBaseline | null;
-	/**
-	 * 上一次同步的结果。
-	 *
-	 * 存下来是为了**重启之后状态栏还能显示上次同步干了什么** ——
-	 * 以前这个只活在内存里，一重启就变回"尚未同步"。
-	 */
-	lastSync: LastSyncRecord | null;
 	/** 仓库相对路径 → 内容指纹（懒算，见 hash-cache.ts） */
 	hashes: Record<string, HashRecord>;
 	/**
@@ -193,6 +169,35 @@ export interface PluginState {
 	 * "下次导出 / 应用时会有"。
 	 */
 	stateId: StateIdRecord | null;
+	/**
+	 * **处理过的"收到的包"**（自动应用那条路走的账）。
+	 *
+	 * 为什么要有：不记的话，同一个包每隔 30 秒就会被重新看一眼 —— 已经应用过的还好
+	 * （`bundleLog` 里有记录），**用户看过、决定先不应用的那些**会一直弹提示。
+	 * 只留最近 `INCOMING_LIMIT` 笔，别把状态文件撑大。
+	 */
+	incoming: IncomingRecord[];
+}
+
+/** 「这个包我处理过了」的一笔记录（自动应用那条路用） */
+export interface IncomingRecord {
+	/** 包 ID */
+	id: string;
+	at: number;
+	/** 处理结论：already（本地已有）/ applied（自己应用了）/ needs-review（要人看）/ failed */
+	note: string;
+	/** 包文件名（界面上对得上号） */
+	file?: string;
+}
+
+/** `state.incoming` 最多留几笔 */
+export const INCOMING_LIMIT = 30;
+
+/** 记一笔"这个包处理过了"（自动应用那条路唯一需要写状态的地方） */
+export function rememberIncoming(state: PluginState, record: IncomingRecord): void {
+	const list = Array.isArray(state.incoming) ? state.incoming : [];
+	list.push(record);
+	state.incoming = list.slice(-INCOMING_LIMIT);
 }
 
 /** 一条"收发过同步包"的记录（界面上按时间倒着列） */
@@ -225,13 +230,12 @@ export function emptyState(): PluginState {
 		generation: 0,
 		lastBundleId: null,
 		lastExportedBundleId: null,
-		targets: {},
 		bundle: null,
-		lastSync: null,
 		hashes: {},
 		bundleLog: [],
 		pendingReturn: null,
 		stateId: null,
+		incoming: [],
 	};
 }
 
@@ -258,7 +262,6 @@ export async function loadState(absPath: string): Promise<PluginState> {
 		generation: typeof raw.generation === 'number' ? raw.generation : 0,
 		lastBundleId: raw.lastBundleId ?? null,
 		lastExportedBundleId: raw.lastExportedBundleId ?? null,
-		targets: raw.targets ?? {},
 		bundle: raw.bundle
 			? {
 				lastExport: raw.bundle.lastExport ?? 0,
@@ -275,12 +278,13 @@ export async function loadState(absPath: string): Promise<PluginState> {
 					: undefined,
 			}
 			: null,
-		lastSync: raw.lastSync ?? null,
 		hashes: raw.hashes ?? {},
 		bundleLog: Array.isArray(raw.bundleLog) ? raw.bundleLog : [],
 		pendingReturn: raw.pendingReturn ?? null,
 		// 老状态文件没有这一项 → null：界面提示"下次导出 / 应用时会算一个"
 		stateId: normalizeStateId(raw.stateId),
+		// 老状态文件没有这一项（那个年代还没有自动应用）：空表 ＝ 从头开始记
+		incoming: Array.isArray(raw.incoming) ? raw.incoming : [],
 	};
 }
 
@@ -288,32 +292,13 @@ export async function saveState(absPath: string, state: PluginState): Promise<vo
 	await writeJsonAtomic(absPath, state);
 }
 
-/** 取某个同步目标的基准（没有就返回空表＝当作第一次同步） */
-export function targetBaseline(state: PluginState, targetDir: string): Record<string, FileRecord> {
-	return state.targets[targetDir]?.files ?? {};
-}
-
-/** 取某个同步目标的目录基准（老状态文件没有这一项 → 空集＝这轮谁都不删） */
-export function targetDirs(state: PluginState, targetDir: string): Set<string> {
-	return new Set(state.targets[targetDir]?.dirs ?? []);
-}
-
-export function setTargetBaseline(
-	state: PluginState,
-	targetDir: string,
-	files: Record<string, FileRecord>,
-	time: number,
-	dirs?: string[],
-): PluginState {
-	state.targets[targetDir] = { lastSync: time, files, dirs: dirs ?? [] };
-	return state;
-}
-
 /**
- * 一轮同步结束后推进世代？
+ * 世代号怎么走（**只在同步包这一条通道上**）：
  *
- * **不推**。世代只跟"同步包"这条传输通道有关：本地文件夹同步有自己的 per-target 基准，
- * 两件事混在一个计数器里只会互相干扰。世代只在导出包时 +1（见 bundle/export.ts）。
+ * 导出一个包 +1、应用一个包跳到包里的 targetGeneration（但只增不减，见 `bundle/apply.ts`）。
+ * 它不是版本号，只回答"你手上这份是不是我导出这个包时以为的那一份"。
+ * 0.8.0 之前这里还写着"本地文件夹同步有自己的 per-target 基准、别混在一起" ——
+ * 那条通道已经砍掉了，现在只有包这一条线在数世代。
  */
 
 /** 这份副本在同步包里的身份 */

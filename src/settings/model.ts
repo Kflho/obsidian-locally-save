@@ -1,5 +1,7 @@
+import { BUNDLE_ROOT_DIR, BUNDLE_SUBDIR } from '../bundle/paths';
 import { DEFAULT_EXCLUDES } from '../sync/exclude';
-import type { ConflictStrategy, SyncDirection } from '../sync/types';
+import type { ConflictStrategy } from '../sync/types';
+import { toNative } from '../utils/paths';
 
 /**
  * 插件设置的**数据模型**：字段定义、默认值、取值收敛。
@@ -7,8 +9,8 @@ import type { ConflictStrategy, SyncDirection } from '../sync/types';
  * 面板怎么渲染不在这里（见 `fields/` 与 `tab.ts`）；这里只回答
  * "有哪些设置、默认是多少、脏数据怎么收敛"。
  *
- * 设置项的组织参照了 Remotely Save 的思路（目标 / 方向 / 删除 / 冲突 / 排除 / 自动同步），
- * 但把「远程」换成了「本地文件夹」，并多了「同步包」一组。
+ * 0.8.0 砍掉「同步到本地副本」通道之后，设置只剩三件事：
+ * **包放在哪 / 什么时候自动留包 / 应用包时默认怎么处理**。
  */
 
 /** 日志级别：控制台里输出多少（见 src/utils/log.ts） */
@@ -22,21 +24,15 @@ export const LOG_LEVEL_OPTIONS: Record<LogLevel, string> = {
 	debug: '全部输出（排查问题时用）',
 };
 
-export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
-	both: '双向同步（本地改动推上去，副本改动拉回来）',
-	upload: '仅上传（本地 → 副本，副本只作备份）',
-	download: '仅下载（副本 → 本地，本地改动不推）',
-};
-
 export const CONFLICT_OPTIONS: Record<ConflictStrategy, string> = {
 	'keep-both': '两份都留（新的占原名，旧的存成冲突副本）',
-	'local-wins': '以本地为准',
-	'remote-wins': '以副本为准',
+	'local-wins': '以我为准（我这边的改动留下）',
+	'remote-wins': '以包为准（用包里那一版）',
 };
 
-/** 自动同步间隔（分钟）：键是存进 data.json 的值，值是面板上的文案 */
+/** 自动留包间隔（分钟）：键是存进 data.json 的值，值是面板上的文案 */
 export const SYNC_INTERVAL_OPTIONS: Record<string, string> = {
-	'0': '不自动同步',
+	'0': '不留包',
 	'5': '每 5 分钟',
 	'15': '每 15 分钟',
 	'30': '每 30 分钟',
@@ -45,17 +41,17 @@ export const SYNC_INTERVAL_OPTIONS: Record<string, string> = {
 };
 
 /**
- * 保存之后隔多久同步一次：**0 ＝ 不同步**。
+ * 保存之后隔多久留一次包：**0 ＝ 不留**。
  *
  * 以前是"开关 + 间隔"两项，改成一个下拉：开关关掉时那个间隔项就藏在面板里，
  * 等于一个设置还得配一个依赖它的设置，用户看着就是"设置怎么这么多"。
  */
 export const SAVE_DELAY_OPTIONS: Record<string, string> = {
-	'0': '不同步',
-	'10': '停顿 10 秒后同步',
-	'30': '停顿 30 秒后同步',
-	'60': '停顿 1 分钟后同步',
-	'300': '停顿 5 分钟后同步',
+	'0': '不留包',
+	'10': '停顿 10 秒后留包',
+	'30': '停顿 30 秒后留包',
+	'60': '停顿 1 分钟后留包',
+	'300': '停顿 5 分钟后留包',
 };
 
 export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
@@ -82,38 +78,48 @@ export interface PluginSettings {
 	/** 控制台输出级别 */
 	logLevel: LogLevel;
 
-	// ------------------------------------------------------------ 同步目标
-	/** 同步到的本地文件夹（绝对路径），副本就放在这里 */
-	targetDir: string;
-	/** 同步方向 */
-	syncDirection: SyncDirection;
-	/** 删除要不要跟着传播（关掉的话，删掉的文件会被从另一边拉回来） */
+	// ------------------------------------------------------------ 包的内容
+	/** 不进包的文件：一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
+	excludePatterns: string;
+
+	// ------------------------------------------------------------ 应用同步包时的默认处理
+	// 这三项只在「应用方式＝按设置」（ApplyStrictness.normal）时生效；
+	// 对话框里选「以包为准 / 完全镜像」会各按各的规矩来，不看这里。
+	/** 包里点名要删的文件，这边也跟着删吗（关掉的话它们会留着） */
 	propagateDeletions: boolean;
-	/** 删除的文件先挪进回收目录而不是直接删 */
+	/** 删掉的文件先挪进回收目录而不是直接删 */
 	deletedToTrash: boolean;
 	/** 两边都改了怎么办 */
 	conflictStrategy: ConflictStrategy;
-	/** 排除规则，一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
-	excludePatterns: string;
 
-	// ------------------------------------------------------------ 自动同步
-	/** Obsidian 启动后自动同步一次 */
+	// ------------------------------------------------------------ 自动留包
+	// 这三个只管**时机**，留不留、留哪种看下面的 autoExport* 两个开关。
+	// 两个开关都关着时，触发了也什么都不做（只记一条日志）—— 不弹错。
+	/** Obsidian 启动后自动留一次包 */
 	syncOnStartup: boolean;
-	/** 定时同步间隔（分钟），0 = 关 */
+	/** 定时留包间隔（分钟），0 = 关 */
 	autoSyncInterval: number;
-	/** 保存笔记后隔多久同步一次（秒）；**0 ＝ 不同步** */
+	/** 保存笔记后隔多久留一次包（秒）；**0 ＝ 不留** */
 	syncAfterSaveDelay: number;
 
 	// ------------------------------------------------------------ 同步包
-	/** 同步包放哪儿；**留空＝放在同步目标文件夹的 `.lsave/bundles` 下** */
+	/** 同步包放哪儿（绝对路径）；**必填**：留空时导出与应用都不可用，只提示去填 */
 	bundleDir: string;
 	/** 应用前校验包的完整性（读一遍全包算校验和，大包会慢一点） */
 	bundleVerify: boolean;
 	/** 把 .lsave 拖到 Obsidian 窗口上时，自动打开"应用同步包"对话框 */
 	dropBundleToApply: boolean;
-	/** 每次同步成功后，把这一次的改动导成一个包（几乎不额外花时间） */
+	/**
+	 * 发现"给我的新更新包"时自动应用 —— 但**只在完全不会动到本地已有东西时**。
+	 *
+	 * 完整包永远不自动应用（它可能删掉本机独有的文件）；要删文件 / 覆盖本地改动 /
+	 * 会产生冲突副本时，也只提示一句，让人自己打开看。理由是那条老规矩：
+	 * 删除是唯一不可逆的动作，宁可留着。
+	 */
+	autoApplyIncoming: boolean;
+	/** 留包时导一个更新包（自上次完整包以来累积的改动；几乎不额外花时间） */
 	autoExportChanges: boolean;
-	/** 每次同步成功后，导一份完整包（每次都重写整个仓库，慢，默认关） */
+	/** 留包时导一份完整包（每次都重写整个仓库，慢，默认关） */
 	autoExportFull: boolean;
 	/**
 	 * 更新包攒到多大就提醒"该换基准了"（写法见 `bundle/size-warn.ts`）。
@@ -125,13 +131,13 @@ export interface PluginSettings {
 	bundleSizeWarnLimit: string;
 
 	// ------------------------------------------------------------ 界面
-	/** 左侧栏：立即同步到本地副本 */
+	/** 左侧栏：立即留包（按两个「自动留包」开关留一次） */
 	ribbonSyncIcon: boolean;
 	/** 左侧栏：导出同步包 */
 	ribbonExportIcon: boolean;
 	/** 左侧栏：打开同步包并应用 */
 	ribbonApplyIcon: boolean;
-	/** 在右下角状态栏显示状态（含上次同步的时间与结果、进行中的进度） */
+	/** 在右下角状态栏显示状态（含上次留包的时间与结果、进行中的进度） */
 	showStatusBar: boolean;
 }
 
@@ -139,8 +145,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
 	logLevel: 'error',
 
-	targetDir: '',
-	syncDirection: 'both',
 	propagateDeletions: true,
 	deletedToTrash: true,
 	conflictStrategy: 'keep-both',
@@ -154,6 +158,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	bundleDir: '',
 	bundleVerify: true,
 	dropBundleToApply: true,
+	// 会往磁盘写文件的事，默认都得用户自己点头
+	autoApplyIncoming: false,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
@@ -192,10 +198,6 @@ export function coerceLogLevel(value: unknown): LogLevel {
 	return coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel);
 }
 
-export function coerceDirection(value: unknown): SyncDirection {
-	return coerceChoice(value, ['both', 'upload', 'download'] as const, DEFAULT_SETTINGS.syncDirection);
-}
-
 export function coerceConflict(value: unknown): ConflictStrategy {
 	return coerceChoice(value, ['keep-both', 'local-wins', 'remote-wins'] as const, DEFAULT_SETTINGS.conflictStrategy);
 }
@@ -219,12 +221,22 @@ export function settingsFrom(data: unknown): PluginSettings {
 	 * 存着的那个 30 秒而突然开始往磁盘写（这类"静悄悄改了行为"是最不能接受的）。
 	 */
 	const saveDelay = raw.syncAfterSave === false ? 0 : raw.syncAfterSaveDelay;
+	/**
+	 * 迁移：0.8.0 砍掉了「同步到本地副本」通道，`targetDir` 与 `syncDirection` 随之消失。
+	 *
+	 * 老用户的包默认就放在 `<目标文件夹>/.lsave/bundles` —— 把「同步包文件夹」
+	 * 迁移成这个路径：包还在原处，用户不必重新找一遍。自己填过包目录的照旧不动。
+	 * 两个老字段留在旧 `data.json` 里不读即可（`settingsFrom` 不会把它们带进内存）。
+	 */
+	const legacyTarget = coerceText(raw.targetDir).trim();
+	const rawBundleDir = coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir);
+	const bundleDir = rawBundleDir.trim() === '' && legacyTarget !== ''
+		? toNative(legacyTarget, `${BUNDLE_ROOT_DIR}/${BUNDLE_SUBDIR}`)
+		: rawBundleDir;
 	return {
 		enabled: coerceBoolean(raw.enabled, DEFAULT_SETTINGS.enabled),
 		logLevel: coerceLogLevel(raw.logLevel),
 
-		targetDir: coerceText(raw.targetDir, DEFAULT_SETTINGS.targetDir),
-		syncDirection: coerceDirection(raw.syncDirection),
 		propagateDeletions: coerceBoolean(raw.propagateDeletions, DEFAULT_SETTINGS.propagateDeletions),
 		deletedToTrash: coerceBoolean(raw.deletedToTrash, DEFAULT_SETTINGS.deletedToTrash),
 		conflictStrategy: coerceConflict(raw.conflictStrategy),
@@ -242,9 +254,10 @@ export function settingsFrom(data: unknown): PluginSettings {
 			DEFAULT_SETTINGS.syncAfterSaveDelay,
 		),
 
-		bundleDir: coerceText(raw.bundleDir, DEFAULT_SETTINGS.bundleDir),
+		bundleDir,
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
+		autoApplyIncoming: coerceBoolean(raw.autoApplyIncoming, DEFAULT_SETTINGS.autoApplyIncoming),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 		bundleSizeWarnLimit: coerceChoice(

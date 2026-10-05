@@ -7,6 +7,7 @@
 import type { PluginManifest } from "obsidian";
 import { App, Modal, Notice } from "obsidian";
 import LocallySavePlugin from "../src/main";
+import { exportBundlesNow } from "../src/ui/actions";
 import { ApplyBundleModal, ExportBundleModal } from "../src/ui/bundle-modal";
 import { BundleManagerModal } from "../src/ui/manage-modal";
 
@@ -78,9 +79,9 @@ check("命令 ID 是稳定接口", stub.commands.map(c => c.id), [
 ]);
 check("每条命令都有名字", stub.commands.filter(c => !c.name).length, 0);
 check(
-	"左侧栏三个图标：同步 / 导出包 / 应用包",
+	"左侧栏三个图标：留包 / 导出包 / 应用包",
 	stub.ribbonItems.map(item => item.icon),
-	['refresh-cw', 'package', 'package-open'],
+	['archive', 'package', 'package-open'],
 );
 checkTrue(
 	"每个左侧栏图标都有说明文字",
@@ -88,7 +89,7 @@ checkTrue(
 	stub.ribbonItems.map(item => item.title).join(' | '),
 );
 check("状态栏占一格", stub.statusBarItems.length, 1);
-check("状态栏初始文案", stub.statusBarItems[0]?.text, '尚未同步');
+check("状态栏初始文案", stub.statusBarItems[0]?.text, '尚未留包');
 check("设置面板已挂上", stub.settingTabs.length, 1);
 // 启动**不弹通知**：以前那一条"插件已加载（v0.6.0）"没有任何信息量，设置项连它一起删了
 check("加载时不弹通知", noticeLog.length, 0);
@@ -148,14 +149,14 @@ const firstTick = barEl.text;
 plugin.statusBar.showProgress({ done: 2, total: 100, path: 'b.md' });
 check('接得太近的两次进度只写一次 DOM', barEl.text === firstTick, true);
 plugin.statusBar.showProgress({ done: 100, total: 100, path: 'z.md' });
-check('最后那一次一定要写（否则进度永远停在 1/100）', barEl.text, '同步中 100/100');
+check('最后那一次一定要写（否则进度永远停在 1/100）', barEl.text, '处理中 100/100');
 plugin.statusBar.showProgress({ done: 100, total: 100, path: 'z.md', label: '导出中' });
-check('动词由调用方给：导出时不该写着"同步中"', barEl.text, '导出中 100/100');
+check('动词由调用方给：导出时不该写着"处理中"', barEl.text, '导出中 100/100');
 plugin.statusBar.showProgress(null);
 checkTrue('收工后回到结果文案', barEl.text !== '导出中 100/100', barEl.text);
 
 // 2f. 三个同步包弹窗都开一遍：包列表是共用组件，谁的那套 DOM 写坏了都要当场炸出来
-// （还没配「目标文件夹」时列表只显示一句提示，不会碰磁盘）
+// （还没配「同步包文件夹」时列表只显示一句提示，不会碰磁盘）
 const modalInstances = (Modal as unknown as { instances: { opened: boolean }[] }).instances;
 const openedBefore = modalInstances.length;
 new ExportBundleModal(new App(), plugin).open();
@@ -168,20 +169,28 @@ check(
 	true,
 );
 
-// 3. 没设置目标文件夹时，报错要说得像人话（而不是抛个栈）
-let message = '';
-try {
-	await plugin.runSync({ dryRun: true });
-} catch (error) {
-	message = error instanceof Error ? error.message : String(error);
-}
-checkTrue("没设目标文件夹时提示去设置里填", message.includes('目标文件夹'), message);
+// 3. 留包的两道门：两个开关都没开时说清去哪一页选；开了却没填包目录时说清去哪填
+noticeLog.length = 0;
+await exportBundlesNow(plugin);
+checkTrue(
+	"两个留包开关都没开时说清去哪一页选",
+	noticeLog.some(m => m.includes('留更新包') && m.includes('留完整包')),
+	noticeLog.join(' / '),
+);
 
-// 4. 同步串行：同一时间只跑一轮
-const first = plugin.runSync({ dryRun: true }).catch(() => null);
-const second = await plugin.runSync({ dryRun: true });
-check("上一轮没跑完时直接返回 null", second, null);
-await first;
+const { plugin: noDir } = createPlugin({ logLevel: 'silent', autoExportChanges: true });
+await noDir.onload();
+noticeLog.length = 0;
+await exportBundlesNow(noDir);
+checkTrue("开了留包却没填包目录时提示去设置里填", noticeLog.some(m => m.includes('同步包文件夹')), noticeLog.join(' / '));
+
+// 4. 留包串行：同一时间只跑一轮（标记挂在插件上，定时留包的节拍也看它）
+noticeLog.length = 0;
+plugin.bundleBusy = true;
+await exportBundlesNow(plugin, '测试留包');
+checkTrue("上一轮没跑完时不重入、如实说一句", noticeLog.some(m => m.includes('还没跑完')), noticeLog.join(' / '));
+check("忙碌标记不会被这一轮误清", plugin.bundleBusy, true);
+plugin.bundleBusy = false;
 
 // 5. 「启用 / 停用」命令会翻转设置并存盘
 const toggle = stub.commands.find(c => c.id === 'toggle-enabled');
@@ -201,11 +210,11 @@ await quiet.onload();
 check("正常加载不弹提示", noticeLog.length, 0);
 
 // 8. data.json 是脏数据也照样能起来（走 settingsFrom 收敛）
-const { plugin: dirty } = createPlugin({ enabled: 'yes', logLevel: 42, syncDirection: 'sideways' });
+const { plugin: dirty } = createPlugin({ enabled: 'yes', logLevel: 42, bundleSizeWarnLimit: '999TB' });
 await dirty.onload();
 check("脏数据回落默认值", dirty.settings.enabled, true);
 check("脏日志级别回落默认值", dirty.settings.logLevel, 'error');
-check("脏同步方向回落默认值", dirty.settings.syncDirection, 'both');
+check("脏的大小提醒回落默认值", dirty.settings.bundleSizeWarnLimit, '');
 
 // 9. 左侧栏图标点了不能炸（导出 / 应用那两个会开对话框）
 for (const item of stub.ribbonItems) {

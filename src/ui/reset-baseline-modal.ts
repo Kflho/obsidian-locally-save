@@ -45,9 +45,9 @@ export class ResetBaselineModal extends Modal {
 		this.warnedThreshold = warnedThreshold;
 	}
 
-	/** 同步包根目录（与导出用的是同一套规则：留空跟着目标文件夹走） */
+	/** 同步包根目录（与导出用的是同一个设置项） */
 	private baseDir(): string {
-		return bundleBaseDir(this.plugin.settings, this.plugin.settings.targetDir);
+		return bundleBaseDir(this.plugin.settings);
 	}
 
 	private limitBytes(): number {
@@ -112,7 +112,7 @@ export class ResetBaselineModal extends Modal {
 	private openFolder(): void {
 		const base = this.baseDir();
 		if (!base) {
-			this.statusEl?.setText('还没设置「同步包文件夹」或「目标文件夹」，没有可以打开的目录');
+			this.statusEl?.setText('还没设置「同步包文件夹」，没有可以打开的目录');
 			return;
 		}
 		const dir = bundleDirForMode(base, 'changes');
@@ -138,7 +138,7 @@ export class ResetBaselineModal extends Modal {
 		if (this.busy) return;
 		const base = this.baseDir();
 		if (!base) {
-			this.statusEl?.setText('还没设置「同步包文件夹」或「目标文件夹」，没法导出');
+			this.statusEl?.setText('还没设置「同步包文件夹」，没法导出');
 			return;
 		}
 		this.busy = true;

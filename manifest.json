@@ -1,9 +1,9 @@
 {
 	"id": "locally-save",
 	"name": "Locally Save",
-	"version": "0.7.0",
+	"version": "0.8.0",
 	"minAppVersion": "1.7.0",
-	"description": "Syncs your vault to a local folder copy in seconds, and exports changes as a single transferable file you can carry on a USB drive.",
+	"description": "Packs your vault (or just the changes since the last full bundle) into a single transferable .lsave file you can carry on a USB drive or cloud folder — no network calls.",
 	"author": "KahoTAT",
 	"authorUrl": "https://github.com/Kflho",
 	"isDesktopOnly": true

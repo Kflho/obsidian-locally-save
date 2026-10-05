@@ -1,6 +1,6 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
-import { associationSupported, installCommands, uninstallCommands } from './associate';
+import { associationSupported, installCommands } from './associate';
 import { applyFileAssociation, describeCommandError, removeFileAssociation } from './associate-runner';
 import { bundleLink } from './protocol';
 

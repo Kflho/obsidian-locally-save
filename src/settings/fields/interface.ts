@@ -4,7 +4,7 @@ import type { FieldSection } from './types';
 /**
  * 「界面与交互」一页：插件把入口放在哪儿。
  *
- * 左侧栏三个图标对应三件事：同步、导出包、应用包 ——
+ * 左侧栏三个图标对应三件事：留包、导出包、应用包 ——
  * 三个都是"先建好、按开关切显隐"（见 main.ts 的 refreshEntryPoints），
  * 所以改开关立刻生效，不用重载插件。
  */
@@ -18,8 +18,8 @@ export const INTERFACE_SECTION: FieldSection = {
 			fields: [
 				{
 					key: 'ribbonSyncIcon',
-					name: '同步到本地副本',
-					desc: '在左侧栏放一个图标，点一下立即同步（等同于命令「立即同步」）',
+					name: '立即留包',
+					desc: '在左侧栏放一个图标，点一下按「自动留包」的开关立即留一次包（等同于命令「立即留包」）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.ribbonSyncIcon),
 				},
@@ -44,8 +44,8 @@ export const INTERFACE_SECTION: FieldSection = {
 			fields: [
 				{
 					key: 'showStatusBar',
-					name: '显示同步状态',
-					desc: '在右下角状态栏显示上次同步的时间与结果；同步进行中显示进度（移动端没有状态栏，这一项不生效）',
+					name: '显示同步包状态',
+					desc: '在右下角状态栏显示上次留包的时间与结果；导出 / 应用进行中显示进度（移动端没有状态栏，这一项不生效）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.showStatusBar),
 				},

@@ -1,7 +1,20 @@
-import type { SyncProgress } from '../sync/runner';
-
 /** 状态栏进度最多多久写一次 DOM（毫秒） */
 export const PROGRESS_THROTTLE_MS = 100;
+
+/**
+ * 状态栏上的一次进度：`done / total` 的含义由发起方决定
+ * （导出＝已经打进包里几个文件 / 一共几个）。
+ */
+export interface SyncProgress {
+	done: number;
+	total: number;
+	path: string;
+	/**
+	 * 状态栏上那句动词，默认"同步中"。
+	 * 导出 / 应用同步包也借这一格显示进度，界面要能说清此刻在干什么。
+	 */
+	label?: string;
+}
 
 /**
  * 状态栏那一格：同步中显示进度，平时显示上次同步的结果。
@@ -11,7 +24,7 @@ export const PROGRESS_THROTTLE_MS = 100;
  */
 export class SyncStatusBar {
 	private el: HTMLElement;
-	private summary = '尚未同步';
+	private summary = '尚未留包';
 	private visible = true;
 	/** 上一次真的写了 DOM 的时间与文字（进度更新要节流，见 showProgress） */
 	private lastProgressAt = 0;
@@ -44,7 +57,7 @@ export class SyncStatusBar {
 			this.render();
 			return;
 		}
-		const text = `${progress.label ?? '同步中'} ${progress.done}/${progress.total}`;
+		const text = `${progress.label ?? '处理中'} ${progress.done}/${progress.total}`;
 		if (text === this.lastProgressText) return;
 		const now = Date.now();
 		if (progress.done < progress.total && now - this.lastProgressAt < PROGRESS_THROTTLE_MS) return;

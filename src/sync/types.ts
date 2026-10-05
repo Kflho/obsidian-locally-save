@@ -23,7 +23,13 @@ export interface Inventory {
 	dirs: Set<string>;
 }
 
-/** 同步方向：双向 / 只往副本推 / 只从副本拉 */
+/**
+ * 比对方向：双向 / 只往外写 / 只往里写。
+ *
+ * 0.8.0 砍掉「同步到本地副本」通道之后，**没有哪条通道再让用户选方向了**；
+ * 这个类型留着是因为应用的 `normal` 档要借"仅下载"表示"包是只读的、别往回写"
+ * （见 `DiffOptions.directionDecidesConflict`）。
+ */
 export type SyncDirection = 'both' | 'upload' | 'download';
 
 /** 两边都改了怎么办 */
@@ -32,20 +38,20 @@ export type ConflictStrategy =
 	| 'keep-both'
 	/** 一律以本地为准 */
 	| 'local-wins'
-	/** 一律以副本为准 */
+	/** 一律以包里那一版为准 */
 	| 'remote-wins';
 
 export interface DiffOptions {
 	direction: SyncDirection;
-	/** 本地删了，副本也跟着删吗（关掉的话删掉的文件会被重新拉回来） */
+	/** 本地删了，对面也跟着删吗（关掉的话删掉的文件会被重新拉回来） */
 	propagateDeletions: boolean;
 	conflictStrategy: ConflictStrategy;
 	/**
 	 * 方向是否顺带决定冲突裁决。
 	 *
-	 * 默认 true：只上传＝本地说了算、只下载＝副本说了算（命令「仅上传 / 仅下载」就是这个语义）。
-	 * 同步包应用时传 false —— 它借"仅下载"这个方向只是为了**不产生写回对方的动作**
-	 * （包是只读的），冲突该怎么裁决还是听设置的。
+	 * 同步包应用时传 **false** —— 它借"仅下载"这个方向只是为了**不产生写回包里的动作**
+	 * （包是只读的），冲突该怎么裁决还是听设置的（`directionDecidesConflict` 的默认 true
+	 * 是给"真正的双向"留的语义，现在没有调用方用默认值了）。
 	 */
 	directionDecidesConflict?: boolean;
 	/**

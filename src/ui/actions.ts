@@ -1,38 +1,101 @@
 import { Notice } from 'obsidian';
-import { exportBundle, plannedExportModes } from '../bundle/export';
-import type { ExportOutcome } from '../bundle/export';
+import { exportBundle, planBundleExport, plannedExportModes } from '../bundle/export';
+import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
+import { handleIncoming, pickIncoming, skipSuperseded } from '../bundle/incoming';
+import type { IncomingOutcome } from '../bundle/incoming';
+import { describeLastActivity } from '../bundle/log';
+import { listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
+import type { BundleMode } from '../bundle/paths';
+import type { ApplyOptions } from '../bundle/apply';
 import type LocallySavePlugin from '../main';
-import type { SyncOutcome, SyncRunOptions } from '../sync/runner';
-import { describeRecord, recordFromOutcome, statusBarText } from '../sync/summary';
+import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
+import { scanTree } from '../sync/disk';
+import { loadState } from '../sync/state';
+import type { PluginState } from '../sync/state';
+import type { Inventory } from '../sync/types';
+import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
+import { ExportPreviewModal } from './export-preview-modal';
 import { BundleManagerModal } from './manage-modal';
 import { BundleLogModal } from './log-modal';
 import { offerBaselineReset } from './reset-baseline-modal';
-import { SyncPreviewModal } from './sync-modal';
 
 /**
  * 命令背后的动作：统一处理"总开关、串行、报错、通知、状态栏"，
  * 命令注册那边只留一行接线（见 commands/index.ts）。
+ *
+ * 0.8.0 起这里只有**同步包**一条通道：留包（导出）与应用（导入）。
+ * 那个"同步到本地文件夹副本"的动作连同它的引擎（`sync/runner.ts`）一起删掉了 ——
+ * 共用目录那种用法交给 Remotely Save 这类走云的插件，这里只做不联网的单文件搬运。
  */
 
+/** 串行锁的标记在插件上（`plugin.bundleBusy`）：定时留包的节拍也要看它 */
 function describe(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** 立即同步。串行由插件负责：上一次没跑完时会直接返回 null */
-export async function syncNow(plugin: LocallySavePlugin, options: SyncRunOptions = {}, label = '同步'): Promise<void> {
-	if (!plugin.isActive()) return;
-	try {
-		const outcome = await plugin.runSync(options);
-		if (!outcome) return;
-		const record = recordFromOutcome(outcome);
-		new Notice(`${label}完成：${describeRecord(record)}`, 6000);
+/** 没填包目录时，界面上所有要写包 / 找包的动作都用这一句提示 */
+export function bundleDirHint(): string {
+	return '还没设置「同步包文件夹」：设置 → Locally Save → 同步包';
+}
 
-		const bundleNote = await autoExportBundles(plugin, outcome);
-		// 状态栏总开关在 StatusBar 那边管（关掉时它自己什么都不画），这里只管把结果告诉它
-		plugin.statusBar.setSummary(`${statusBarText(record)}${bundleNote}`);
-		plugin.log.debug(`${label}：${describeRecord(record)}`);
+/**
+ * 立即留包：按两个「自动留包」开关留一次。
+ *
+ * 手动命令、左侧栏图标、启动 / 定时 / 保存后三种自动触发**都走这里** ——
+ * 以前这套挂在"同步到副本"成功之后（`syncNow`），于是没填目标文件夹就一步也跑不了；
+ * 现在留包自己就是一条完整的动作，跟别的通道没关系。
+ *
+ * `quiet`：自动触发传 true —— "没有变化、没生成包"这种**正常结果**只写状态栏与日志，
+ * 不弹通知（不然每 5 分钟的定时留包都在眼前闪一条）。真写出了包、或者失败了，照样弹。
+ */
+export async function exportBundlesNow(
+	plugin: LocallySavePlugin,
+	label = '留包',
+	options: { quiet?: boolean } = {},
+): Promise<void> {
+	if (!plugin.isActive()) return;
+	if (plugin.bundleBusy) {
+		new Notice('上一次留包还没跑完');
+		return;
+	}
+	plugin.bundleBusy = true;
+	try {
+		await runExport(plugin, label, options.quiet === true);
+	} finally {
+		plugin.bundleBusy = false;
+		// 记下"刚跑过"：定时留包的节拍靠它判断到没到点（手工留包也算数）
+		plugin.lastBundleAt = Date.now();
+		plugin.reportProgress(null);
+	}
+}
+
+/** 真的跑一轮；同一时间只允许一轮（上面的锁） */
+async function runExport(plugin: LocallySavePlugin, label: string, quiet: boolean): Promise<void> {
+	const { autoExportChanges, autoExportFull } = plugin.settings;
+	if (!autoExportChanges && !autoExportFull) {
+		new Notice('「留更新包」与「留完整包」都没开：先在设置 → Locally Save → 同步包里选一种', 9000);
+		return;
+	}
+	const base = bundleBaseDir(plugin.settings);
+	if (!base) {
+		new Notice(bundleDirHint(), 9000);
+		return;
+	}
+
+	try {
+		const result = await writePlannedBundles(plugin, base);
+		const text = result.notes.length > 0 ? result.notes.join('、') : '什么都没有生成';
+		// 自动触发 + 没有变化：正常结果，不打扰（状态栏与日志照写）
+		if (result.noChanges && quiet) {
+			await refreshStatusBar(plugin);
+			plugin.log.debug(`${label}：${text}`);
+			return;
+		}
+		new Notice(result.wrote ? `${label}完成：${text}` : `${label}：${text}`, 6000);
+		await refreshStatusBar(plugin);
+		plugin.log.debug(`${label}：${text}`);
 	} catch (error) {
 		new Notice(`${label}失败：${describe(error)}`, 9000);
 		plugin.log.error(`${label}失败`, error);
@@ -40,101 +103,259 @@ export async function syncNow(plugin: LocallySavePlugin, options: SyncRunOptions
 }
 
 /**
- * 同步成功后自动留包：改动包与完整包**各自独立**，两个开关都开时按顺序来，
- * 但**只留该留的** —— 完整包刚留过的话，改动包必然是空的，那就不留（见下）。
- *
- * 顺序是**先完整包、后改动包**（`plannedExportModes`，跟导出弹窗同一条规矩）：
- * 完整包一写完，"自上次完整副本以来的改动"就归零了 —— 紧接着算出来的改动包**必然是空的**。
- * 空的就不写：接收方应用一个空包什么也不会发生，还让人以为漏了什么；只在状态栏说明一句。
- * 反过来先写改动包的话，完整包会把它当成"被它取代的旧包"清掉，
- * 用户看到的是"我那个包没了，然后又生出来一个一模一样的"（报过的）。
+ * 按开关留一轮包：**先完整副本、后更新包**（`plannedExportModes` 一处说了算）。
  *
  * 三处刻意省：
- * - 复用同步刚扫完的仓库清单，**不再遍历一遍全库**；
- * - 没有改动就直接跳过，不写空包；
- * - 改动包算出来是空的（完整包刚留过）也不写文件。
- *
- * 返回一句给状态栏用的后缀（没留包就返回空串）。
+ * - 整库**只扫一次**，两个包共用同一份清单；
+ * - 自上次留包以来没有任何变化时**一个包都不写** —— 完整包一写就是整库重写；
+ * - 完整包刚留过的话，更新包按它算必然是空的，那就不写空包，只说明一句。
  */
-async function autoExportBundles(plugin: LocallySavePlugin, outcome: SyncOutcome): Promise<string> {
+async function writePlannedBundles(
+	plugin: LocallySavePlugin,
+	base: string,
+): Promise<{ notes: string[]; wrote: boolean; noChanges: boolean }> {
+	const inventory = await scanVault(plugin);
+	const state = await loadState(plugin.stateFile());
+	if (!hasChanges(state, inventory)) {
+		return {
+			notes: ['自上次留包以来没有变化，没有生成包（要强行导一份完整副本：用「导出同步包…」）'],
+			wrote: false,
+			noChanges: true,
+		};
+	}
+
 	const { autoExportChanges, autoExportFull } = plugin.settings;
-	if (!autoExportChanges && !autoExportFull) return '';
-	// 没有改动：没有可搬的东西，也就没必要写文件
-	if (outcome.changed === 0) return '';
-
-	const base = bundleBaseDir(plugin.settings, plugin.settings.targetDir);
-	if (!base) return '';
-
 	const notes: string[] = [];
 	/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
 	const written: string[] = [];
-	/** 这一轮留过完整包：紧随其后的改动包必然是空的 */
+	/** 这一轮留过完整包：紧随其后的更新包必然是空的 */
 	let fullWritten = false;
+	let wrote = false;
 
 	for (const mode of plannedExportModes({ changes: autoExportChanges, full: autoExportFull })) {
-		const result = await writeBundleFile(plugin, outcome, base, mode, written);
+		const result = await writeBundleFile(plugin, base, mode, inventory, written);
 		if (result.kind === 'written') {
+			wrote = true;
 			if (mode === 'full') fullWritten = true;
-			notes.push(mode === 'full' ? '已留完整包' : '已留改动包');
+			notes.push(mode === 'full'
+				? `已留完整副本（${result.outcome.entryCount} 个文件）`
+				: `已留更新包（${result.outcome.entryCount} 个文件`
+					+ `${result.outcome.deletedCount > 0 ? `、删除 ${result.outcome.deletedCount}` : ''}）`);
 			// 攒大了就弹窗问"要不要换基准"（用户点过跳过后，提醒线会抬高一倍原上限）
 			if (mode === 'changes') await offerBaselineReset(plugin, result.outcome);
 			continue;
 		}
-		// 空包只在"刚留过完整包"时才值得说 —— 别的空（同步本身没改动）上面已经提前返回了
-		if (result.kind === 'empty' && mode === 'changes' && fullWritten) {
-			notes.push('改动包是空的（刚留的完整包已含全部内容），没生成');
+		// 空的更新包：完整包刚留过时它必然空，别写；其余情况如实说一句"没有变化"
+		if (result.kind === 'empty' && mode === 'changes') {
+			notes.push(fullWritten
+				? '更新包是空的（刚留的完整副本已含全部内容），没生成'
+				: '没有变化，更新包没生成');
+			continue;
+		}
+		if (result.kind === 'failed') {
+			notes.push(mode === 'full' ? `完整包没导成（${result.error}）` : `更新包没导成（${result.error}）`);
 		}
 	}
-	return notes.length > 0 ? ` · ${notes.join('、')}` : '';
+	return { notes, wrote, noChanges: false };
 }
 
-/** 留包的结果：写了 / 空包 / 失败三种分开报，界面上才说得清"改动包为什么没生成" */
+/** 扫一遍仓库（用户的排除规则与运行时才知道的配置目录都在这里生效） */
+async function scanVault(plugin: LocallySavePlugin): Promise<Inventory> {
+	const exclude = excludePatterns(plugin.settings.excludePatterns, plugin.configDir());
+	return scanTree(plugin.vaultRoot(), { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
+}
+
+/**
+ * 仓库自上次留包以来有变化吗（没有就不写任何包）。
+ *
+ * 判据与导出挑成员用的是同一条（大小 + 修改时间，2 秒容差），
+ * 但**空文件夹也要算**：包里带着空文件夹的清单，漏了它对面永远缺那一个。
+ */
+function hasChanges(state: PluginState, inventory: Inventory): boolean {
+	const before = state.bundle?.files ?? {};
+	if (inventory.files.size !== Object.keys(before).length) return true;
+	for (const [file, record] of inventory.files) {
+		const at = before[file];
+		if (!at || !sameRecord(record, at, DEFAULT_MTIME_TOLERANCE_MS)) return true;
+	}
+	const dirs = new Set(state.bundle?.dirs ?? []);
+	if (inventory.dirs.size !== dirs.size) return true;
+	for (const dir of inventory.dirs) {
+		if (!dirs.has(dir)) return true;
+	}
+	return false;
+}
+
+/** 留包的结果：写了 / 空包 / 失败三种分开报，界面上才说得清"更新包为什么没生成" */
 type BundleWriteResult =
 	| { kind: 'written'; outcome: ExportOutcome }
 	| { kind: 'empty' }
-	| { kind: 'failed' };
+	| { kind: 'failed'; error: string };
 
 /** 导一个包出去 */
 async function writeBundleFile(
 	plugin: LocallySavePlugin,
-	outcome: SyncOutcome,
 	base: string,
-	mode: 'full' | 'changes',
+	mode: BundleMode,
+	inventory: Inventory,
 	written: string[],
 ): Promise<BundleWriteResult> {
-	const label = mode === 'full' ? '完整包' : '改动包';
+	const label = mode === 'full' ? '完整包' : '更新包';
 	try {
 		const result = await exportBundle({
-			settings: plugin.settings,
-			log: plugin.log,
-			vaultRoot: plugin.vaultRoot(),
-			vaultName: plugin.vaultName(),
-			stateFile: plugin.stateFile(),
-			mode,
-			outDir: base,
-			configDir: plugin.configDir(),
-			inventory: outcome.localInventory,
+			...exportOptions(plugin, base, mode, inventory),
 			keepPaths: [...written],
+			onProgress: (done, total, path) => plugin.reportProgress({ done, total, path, label: '导出中' }),
 		});
 		if (!result.file) return { kind: 'empty' };
 		written.push(result.file);
 		plugin.log.debug(`${label}已留下：${result.file}`);
 		return { kind: 'written', outcome: result };
 	} catch (error) {
-		// 留包失败不该让"同步成功"这件事看起来失败了
-		new Notice(`同步完成，但${label}导出失败：${describe(error)}`, 9000);
+		// 一个包失败不该让另一个已经写成的包也变成"失败"：
+		// 单独弹一条说清原因，结果那句里也带上（不然"留包完成："后面会是空的）
+		const message = describe(error);
+		new Notice(`${label}导出失败：${message}`, 9000);
 		plugin.log.error(`${label}导出失败`, error);
-		return { kind: 'failed' };
+		return { kind: 'failed', error: message };
 	}
 }
 
-/** 预览：只算不干，看完再决定 */
-export async function previewSync(plugin: LocallySavePlugin): Promise<void> {
-	if (!plugin.isActive()) return;
+/** 导出参数：留包与预览共用，别各拼一份 */
+function exportOptions(
+	plugin: LocallySavePlugin,
+	base: string,
+	mode: BundleMode,
+	inventory?: Inventory,
+): ExportOptions {
+	return {
+		settings: plugin.settings,
+		log: plugin.log,
+		vaultRoot: plugin.vaultRoot(),
+		vaultName: plugin.vaultName(),
+		stateFile: plugin.stateFile(),
+		mode,
+		outDir: base,
+		configDir: plugin.configDir(),
+		...(inventory ? { inventory } : {}),
+	};
+}
+
+/** 状态栏那句"上次留包 / 上次应用"：真相在更新记录里，这里只是把它读回来 */
+async function refreshStatusBar(plugin: LocallySavePlugin): Promise<void> {
 	try {
-		const outcome = await plugin.runSync({ dryRun: true });
-		if (!outcome) return;
-		new SyncPreviewModal(plugin.app, plugin, outcome, () => { void syncNow(plugin); }).open();
+		plugin.statusBar.setSummary(describeLastActivity(await loadState(plugin.stateFile())));
+	} catch (error) {
+		plugin.log.debug('刷新状态栏失败', error);
+	}
+}
+
+/** 应用一个包要的参数（对话框与自动应用共用一处拼装） */
+function applyOptionsFor(plugin: LocallySavePlugin, file: string): ApplyOptions {
+	return {
+		settings: plugin.settings,
+		log: plugin.log,
+		vaultRoot: plugin.vaultRoot(),
+		stateFile: plugin.stateFile(),
+		file,
+		configDir: plugin.configDir(),
+	};
+}
+
+/**
+ * 看一眼同步包文件夹里有没有"给我的新包"，该自己应用的就应用（`autoApplyIncoming` 开着时）。
+ *
+ * 由 `main.tick()` 每 30 秒调一次。安全边界全在 `bundle/incoming.ts` 里：
+ * **只有完全不会动到本地已有东西的更新包**才会自己应用，其余一律只提示一句；
+ * 这里只负责通知、状态栏与"这一拍干了活没有"。
+ *
+ * 返回 true ＝ 这一拍动过东西（调用方据此跳过同拍的留包：刚应用完不该立刻回礼）。
+ */
+export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<boolean> {
+	if (!plugin.settings.enabled || !plugin.settings.autoApplyIncoming) return false;
+	if (plugin.bundleBusy || plugin.incomingBusy) return false;
+	const base = bundleBaseDir(plugin.settings);
+	if (!base) return false;
+
+	plugin.incomingBusy = true;
+	try {
+		const state = await loadState(plugin.stateFile());
+		const candidates = pickIncoming(await listBundles(base), state);
+		if (candidates.length === 0) return false;
+
+		// 只看**最新那一个**：更新的包（更新包是累积的、完整包是完整清单）包含旧的的全部内容
+		const [newest, ...older] = candidates;
+		await skipSuperseded(plugin.stateFile(), older);
+		if (!newest) return false;
+
+		const outcome = await handleIncoming(applyOptionsFor(plugin, newest.bundle.file), newest);
+		await reportIncoming(plugin, outcome);
+		return outcome.kind === 'applied';
+	} catch (error) {
+		plugin.log.error('检查收到的包失败', error);
+		return false;
+	} finally {
+		plugin.incomingBusy = false;
+	}
+}
+
+/** 把一次自动应用的结果说给用户听（四种结果各说各的，不糊成一句） */
+async function reportIncoming(plugin: LocallySavePlugin, outcome: IncomingOutcome): Promise<void> {
+	switch (outcome.kind) {
+		case 'already':
+			plugin.log.debug(`收到的包 ${outcome.file}：本地已经有了，跳过`);
+			return;
+		case 'applied': {
+			const parts = [`写入 ${outcome.written}`];
+			if (outcome.deleted > 0) parts.push(`删除 ${outcome.deleted}`);
+			const tail = outcome.stateIdCompare === 'match'
+				? '两边内容已经一致'
+				: outcome.pending > 0
+					? `你这边还有 ${outcome.pending} 个改动没发出去（下次留包会一起带上）`
+					: '跟对方的编号还差一点，下次留包会补上';
+			new Notice(`已自动应用 ${outcome.file}：${parts.join('、')}；${tail}`, 12000);
+			await refreshStatusBar(plugin);
+			return;
+		}
+		case 'needs-review':
+			// 不自动动手，但也别沉默：告诉用户"包到了、为什么没自动应用、去哪儿处理"
+			new Notice(
+				`收到更新包 ${outcome.file}，但它会${outcome.why} —— 没有自动应用；`
+				+ '用「打开同步包并应用…」看看再决定',
+				15000,
+			);
+			return;
+		case 'failed':
+			new Notice(`自动应用 ${outcome.file} 失败：${outcome.error}`, 9000);
+			return;
+	}
+}
+
+/**
+ * 预览：这次留包会装哪些文件（只算不写，看完再决定）。
+ *
+ * 给几份预览按开关走：两个都开就都给（**先完整、后更新**，与真正的顺序一致）；
+ * 都关着时给一份更新包预览 —— 那时用户还没选留哪种，先让他看清改动有多少。
+ */
+export async function previewBundleExport(plugin: LocallySavePlugin): Promise<void> {
+	if (!plugin.isActive()) return;
+	const base = bundleBaseDir(plugin.settings);
+	if (!base) {
+		new Notice(bundleDirHint(), 9000);
+		return;
+	}
+	try {
+		const { autoExportChanges, autoExportFull } = plugin.settings;
+		const inventory = await scanVault(plugin);
+		const modes = plannedExportModes({
+			changes: autoExportChanges || !autoExportFull,
+			full: autoExportFull,
+		});
+		const previews: BundleExportPreview[] = [];
+		for (const mode of modes) {
+			previews.push(await planBundleExport(exportOptions(plugin, base, mode, inventory)));
+		}
+		new ExportPreviewModal(plugin.app, plugin, previews, () => { void exportBundlesNow(plugin); }).open();
 	} catch (error) {
 		new Notice(`预览失败：${describe(error)}`, 9000);
 		plugin.log.error('预览失败', error);
