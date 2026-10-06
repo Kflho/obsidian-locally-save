@@ -3045,6 +3045,153 @@ check(
 	'self',
 );
 
+// 51. 两台都停在第 N 代、各自改了东西：**交接之后要能叠成一条线**（用户描述的常见流程）
+//
+// 原话："两电脑 55，各自更新 56。a 传 b 更新：b 55 → a56；自己更新 b56 变为 a56 → b57；
+// 然后回传 a：a56 → b57，此时两电脑同步。"
+// 两条路都要走通（这里把 55/56/57 缩成 1/2/3，流程一模一样）：
+//   ① **顺序来**：B 先收到、再动手改 —— 用户描述的常规路径；
+//   ② **B 已经改过了才收到**：那些改动不能被镜像吃掉，要能叠回去（park 那一路：
+//      存下来的那一环就是「a56 → a56 ＋ 我的东西」，谁应用都能把两边的东西凑齐）。
+const SQ = path.join(ROOT, 'seq');
+const SQ_A = path.join(SQ, 'a');
+const SQ_B = path.join(SQ, 'b');
+const SQ_OUT = path.join(SQ, 'transfer');
+const STATE_SQ_A = path.join(SQ, 'state-a.json');
+const STATE_SQ_B = path.join(SQ, 'state-b.json');
+for (const dir of [SQ_A, SQ_B, SQ_OUT]) fs.mkdirSync(dir, { recursive: true });
+const sqExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ ...exportOptions(root, stateFile, mode), outDir: SQ_OUT });
+const sqApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+const sqRun = async (root: string, stateFile: string, file: string): Promise<void> => {
+	await executeBundlePlan(await planBundleApply(sqApply(root, stateFile, file)), sqApply(root, stateFile, file));
+};
+
+// ① 顺序来：两台先站到同一个点（第 1 代）
+write(SQ_A, 'a.md', 'A1', T0);
+const sqFull = await exportBundle(sqExport(SQ_A, STATE_SQ_A, 'full'));
+await sqRun(SQ_B, STATE_SQ_B, sqFull.file as string);
+check(
+	'两台都站在第 1 代（同一个点）',
+	[(await loadState(STATE_SQ_A)).generation, (await loadState(STATE_SQ_B)).generation],
+	[1, 1],
+);
+
+// A 改一个文件 → 导出 A 的更新（＝用户说的「b55-a56」那一份）
+write(SQ_A, 'a.md', 'A2 改长一点', T0 + 20_000);
+const sqRa = await exportBundle(sqExport(SQ_A, STATE_SQ_A));
+const sqRaInfo = await readBundleInfo(sqRa.file as string);
+check('A 的更新是「1 → 2」', [sqRaInfo.header.baseGeneration, sqRaInfo.header.targetGeneration], [1, 2]);
+
+// A → B：B 应用它，落到 A 那一点（第 2 代）
+await sqRun(SQ_B, STATE_SQ_B, sqRa.file as string);
+check('B 应用完落到第 2 代', (await loadState(STATE_SQ_B)).generation, 2);
+check('B 的内容＝A 那一版', read(SQ_B, 'a.md'), 'A2 改长一点');
+
+// B 再自己改一个文件 → 导出：**接在 a56 后面**，不是从自己那个老点分岔
+write(SQ_B, 'b.md', 'B1', T0 + 40_000);
+const sqRb = await exportBundle(sqExport(SQ_B, STATE_SQ_B));
+const sqRbInfo = await readBundleInfo(sqRb.file as string);
+check(
+	'B 的更新接在 A 那一点后面：第 2 → 3 代',
+	[sqRbInfo.header.baseGeneration, sqRbInfo.header.targetGeneration],
+	[2, 3],
+);
+check('起点指纹＝A 那一份的落点（站在 A56 上的机器直接能收）', sqRbInfo.header.baselineHash, sqRaInfo.header.targetBaselineHash);
+check('起点不是第 1 代（没从老点分岔）', sqRbInfo.header.baseGeneration === 1, false);
+check('界面上写清"从你站的这一点往外导"', sqRb.anchor?.start?.picked, 'self');
+
+// B → A：A 应用它 → 两台都在第 3 代、内容一致、站在同一个点上
+await sqRun(SQ_A, STATE_SQ_A, sqRb.file as string);
+const sqStateA = await loadState(STATE_SQ_A);
+const sqStateB = await loadState(STATE_SQ_B);
+check('两台都在第 3 代', [sqStateA.generation, sqStateB.generation], [3, 3]);
+check(
+	'两边的改动都在（A 改的 a.md + B 新写的 b.md）',
+	[read(SQ_A, 'a.md'), read(SQ_A, 'b.md'), read(SQ_B, 'a.md'), read(SQ_B, 'b.md')],
+	['A2 改长一点', 'B1', 'A2 改长一点', 'B1'],
+);
+check('两台站在同一个点上', sqStateA.bundle?.fullHash, sqStateB.bundle?.fullHash);
+check('状态编号也一致', sqStateA.stateId?.id, sqStateB.stateId?.id);
+
+// ② B **已经改过了**才收到 A 的包：镜像会把它挪走，所以先按界面那条路把"我这一半"存成包
+const SQ2 = path.join(ROOT, 'seq2');
+const SQ2_A = path.join(SQ2, 'a');
+const SQ2_B = path.join(SQ2, 'b');
+const SQ2_OUT = path.join(SQ2, 'transfer');
+const STATE_SQ2_A = path.join(SQ2, 'state-a.json');
+const STATE_SQ2_B = path.join(SQ2, 'state-b.json');
+for (const dir of [SQ2_A, SQ2_B, SQ2_OUT]) fs.mkdirSync(dir, { recursive: true });
+const sq2Export = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ ...exportOptions(root, stateFile, mode), outDir: SQ2_OUT });
+const sq2Apply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+const sq2Run = async (root: string, stateFile: string, file: string): Promise<void> => {
+	await executeBundlePlan(await planBundleApply(sq2Apply(root, stateFile, file)), sq2Apply(root, stateFile, file));
+};
+
+write(SQ2_A, 'a.md', 'A1', T0);
+const sq2Full = await exportBundle(sq2Export(SQ2_A, STATE_SQ2_A, 'full'));
+await sq2Run(SQ2_B, STATE_SQ2_B, sq2Full.file as string);
+
+// A 改自己的文件；B **也**改了自己的文件（在收到 A 的包之前）
+write(SQ2_A, 'x.md', 'A 的新东西', T0 + 20_000);
+const sq2Ra = await exportBundle(sq2Export(SQ2_A, STATE_SQ2_A));
+write(SQ2_B, 'y.md', 'B 自己的东西', T0 + 30_000);
+
+// B 应用 A 的包：先存下自己那一半（＝界面在"应用"之前自动做的那一步）
+const sq2Plan = await planBundleApply(sq2Apply(SQ2_B, STATE_SQ2_B, sq2Ra.file as string));
+const sq2Parked = await parkLocalChangesFor(sq2Export(SQ2_B, STATE_SQ2_B), {
+	header: sq2Plan.info.header,
+	pointBefore: sq2Plan.pointBefore,
+});
+checkTrue('B 的那一半存成了包', typeof sq2Parked.file === 'string' && sq2Parked.file.length > 0, sq2Parked.reason ?? '');
+const sq2ParkedInfo = await readBundleInfo(sq2Parked.file as string);
+check(
+	'存下来的那一环是「a56 → a56 ＋ 我的东西」（第 2 → 3 代）',
+	[sq2ParkedInfo.header.baseGeneration, sq2ParkedInfo.header.targetGeneration],
+	[2, 3],
+);
+check(
+	'起点＝A 那份包送到的那一点（站在 A56 上的机器直接能收）',
+	sq2ParkedInfo.header.baselineHash,
+	(sq2Ra.header as { targetBaselineHash?: string }).targetBaselineHash,
+);
+check(
+	'A 改过的那个文件不进这一环（我手里那份只是"比对方旧"，不是我改的）',
+	sq2ParkedInfo.header.entries.map(entry => entry.path),
+	['y.md'],
+);
+
+// 应用 A 的包：镜像之下 B 自己的 y.md 进回收目录（所以上面才先存一份）
+await executeBundlePlan(sq2Plan, sq2Apply(SQ2_B, STATE_SQ2_B, sq2Ra.file as string));
+check(
+	'B 应用 A 的包之后：A 的改动在，B 自己的那份挪进了回收目录',
+	[read(SQ2_B, 'x.md'), read(SQ2_B, 'y.md')],
+	['A 的新东西', null],
+);
+
+// 谁都行：自己应用存下来的那一环，两边的东西就凑齐了
+await sq2Run(SQ2_B, STATE_SQ2_B, sq2Parked.file as string);
+check(
+	'B 自己应用那一环：A 的改动还在、自己的也回来了',
+	[read(SQ2_B, 'x.md'), read(SQ2_B, 'y.md')],
+	['A 的新东西', 'B 自己的东西'],
+);
+
+// 把它发给 A：A 应用之后同样凑齐 —— 两台一致
+await sq2Run(SQ2_A, STATE_SQ2_A, sq2Parked.file as string);
+const sq2StateA = await loadState(STATE_SQ2_A);
+const sq2StateB = await loadState(STATE_SQ2_B);
+check(
+	'A 应用之后：两边的改动都在 A 那边',
+	[read(SQ2_A, 'x.md'), read(SQ2_A, 'y.md')],
+	['A 的新东西', 'B 自己的东西'],
+);
+check('两台站在同一个点上', sq2StateA.bundle?.fullHash, sq2StateB.bundle?.fullHash);
+check('状态编号也一致（两边内容一模一样）', sq2StateA.stateId?.id, sq2StateB.stateId?.id);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

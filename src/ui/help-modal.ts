@@ -95,6 +95,14 @@ export class BundleHelpModal extends Modal {
 			text: '报告里那句「你这边还有 N 个改动是对方没有的」，就是要回传的东西。',
 			cls: 'locally-save-hint',
 		});
+		contentEl.createEl('p', {
+			text: '要是对方在收到你的包之前就已经改了自己的东西：应用你这包时，它那边的改动会被'
+				+ '严格同步挪进回收目录 —— 不过插件动手前已经先把它存成了一个包'
+				+ '（列表里「第 56 → 57 代」那一份，起点正是你这包送到的那一点，内容只有它自己动过的文件）。'
+				+ '它自己应用那一份、或者发给你应用，两边的东西就凑齐了。'
+				+ '只有"两台改到同一个文件"时不会自动合：以你包的版本为准，另一版在回收目录里，捞得回来。',
+			cls: 'locally-save-hint',
+		});
 
 		contentEl.createEl('h3', { text: '两边内容一不一样：看状态编号' });
 		contentEl.createEl('p', {
