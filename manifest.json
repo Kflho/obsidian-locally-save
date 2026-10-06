@@ -1,7 +1,7 @@
 {
 	"id": "locally-save",
 	"name": "Locally Save",
-	"version": "0.12.3",
+	"version": "0.12.4",
 	"minAppVersion": "1.7.0",
 	"description": "Move a vault between computers without any network: pack it — or just what changed since the last transfer — into a single .lsave file you carry on a USB drive, then apply it on the other machine.",
 	"author": "KahoTAT",
