@@ -30,8 +30,8 @@ export class AssociateModal extends Modal {
 			text: '设置之后，双击 .lsave 文件就会用 Obsidian 打开、直接弹出应用对话框。',
 		});
 		contentEl.createEl('p', {
-			text: '注意：单纯把 .lsave「用 Obsidian 打开」是**通不了**的 —— Obsidian 收到一个陌生路径只会'
-				+ '当成未知文件，压根到不了插件。唯一能到插件的通路是 URI 协议，'
+			text: '注意：单纯把 .lsave「用 Obsidian 打开」是不通的 —— Obsidian 收到一个陌生路径只会'
+				+ '当成未知文件，压根到不了插件。能到插件的只有 URI 链接，'
 				+ '而且链接里必须写明交给哪个 vault（插件属于某个 vault）：',
 			cls: 'locally-save-hint',
 		});
@@ -55,7 +55,7 @@ export class AssociateModal extends Modal {
 
 		contentEl.createEl('h3', { text: '会改什么' });
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		facts.createEl('li', { text: '只写 当前用户 的注册表（HKCU\\Software\\Classes），**不需要管理员权限**' });
+		facts.createEl('li', { text: '只写当前用户的注册表（HKCU\\Software\\Classes），不需要管理员权限' });
 		facts.createEl('li', { text: '会覆盖你现有的 .lsave 关联；解除时可以再拆掉' });
 		facts.createEl('li', { text: '不碰系统级设置，也不影响别的文件类型' });
 

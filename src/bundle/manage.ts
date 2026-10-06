@@ -146,7 +146,7 @@ export function groupBundles(items: ManagedBundle[]): BundleGroup[] {
 	return [
 		{ title: '更新包', items: pick('changes') },
 		{ title: '完整副本', items: pick('full') },
-		{ title: '类型未知（读不出头部）', items: pick(null) },
+		{ title: '类型未知（读不出包信息）', items: pick(null) },
 	];
 }
 

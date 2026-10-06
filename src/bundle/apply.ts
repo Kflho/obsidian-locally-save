@@ -394,8 +394,9 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		if (header.mode === 'full') return { ok: true, kind: 'first' };
 		return {
 			ok: false,
-			message: '这台机器还没有基准点（没导过、也没应用过完整副本）：更新包是"从某一个基准点往后延伸"的差量，'
-				+ '没有起点就没法算。让对方先导一份**完整副本**发过来，应用它之后这台机器才有基准点。',
+			message: '这台机器还没有基准点（没导过、也没应用过完整副本）。'
+				+ '更新包只装"从某一个基准点往后变过的部分"，没有起点就算不出来。'
+				+ '让对方先导一份完整副本发过来，应用它之后这台机器才有基准点。',
 		};
 	}
 	// 完整副本：自带完整清单，就是一份新基准 —— 放行（对方重新立基准是正路）
@@ -404,7 +405,7 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 	if (theirs === null) {
 		return {
 			ok: false,
-			message: '这个更新包是旧版本插件导的（没记基准指纹），跟本机的基准对不上号。'
+			message: '这个更新包是旧版本插件导的（没记基准信息），跟本机的基准对不上号。'
 				+ `本机现在的基准是 ${mine} —— 让对方用新版本插件按这个基准重导一份；`
 				+ '要么删掉本机的状态文件重新开始（那等于重新装机，本机会当成第一份完整副本收下）。',
 		};
@@ -466,13 +467,13 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 			: '';
 		return {
 			ok: false,
-			message: `**接不上，不合并**：这个更新包从「${theirs}」这个基准点往外延伸，本机站在「${mine}」上${at} —— `
+			message: `接不上，不合并：这个更新包从「${theirs}」这个基准点往外延伸，本机站在「${mine}」上${at} —— `
 				+ '不是同一个点，插件不猜着合（起点对不上时，本机一大批文件会被当成"对方删过它们"）。\n'
 				+ '按顺序往下走，二选一：\n'
-				+ `① 让对方**从本机这个基准点重导**一份更新包：导出时把「更新包：从哪个状态」选成`
+				+ `① 让对方从本机这个基准点重导一份更新包：导出时把「更新包：从哪个状态」选成`
 				+ `「第 ${state.bundle?.fullGeneration ?? '?'} 代 · 基准 ${mine}」；\n`
-				+ '② 或者让对方把**中间缺的那几份包**一起发过来，按顺序应用（本机站在链条上某一点，缺的是它后面那几步）。\n'
-				+ '都不行就让对方导一份**完整副本**：完整清单自带基准，可以直接应用（但它会镜像覆盖本机内容）。',
+				+ '② 或者让对方把中间缺的那几份包一起发过来，按顺序应用（本机站在链条上某一点，缺的是它后面那几步）。\n'
+				+ '都不行就让对方导一份完整副本：完整清单自带基准，可以直接应用（但它会镜像覆盖本机内容）。',
 		};
 	}
 	return { ok: true, kind: 'update' };
@@ -1062,7 +1063,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					// 报成明确失败；强制两档才把目录挪进回收目录腾位置
 					if (await dirExists(target)) {
 						if (!plan.report.forced) {
-							throw new Error('本地这里是同名的文件夹，包里是一个文件：换个位置或先把文件夹挪走（“以包为准/完全镜像”档会自动把它挪进回收目录）');
+							throw new Error('本地这里是同名的文件夹，包里是一个文件：换个位置或先把文件夹挪走');
 						}
 						await moveToTrash(target, toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`), action.path, stamp);
 					}

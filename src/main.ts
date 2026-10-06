@@ -65,7 +65,7 @@ export default class LocallySavePlugin extends Plugin {
 		// 写错了只会静默显示成空白方块，见 ui/ribbon.ts）
 		this.ribbonSyncEl = this.addRibbonIcon(
 			pickIcon(['package-plus', 'archive', 'save']),
-			'Locally Save：立即留包（导出同步包）',
+			'Locally Save：立即留包',
 			() => { void exportBundlesNow(this); },
 		);
 		this.ribbonExportEl = this.addRibbonIcon(

@@ -455,7 +455,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('默认用设置里那个「同步包文件夹」。会列出它的 full 与 changes 两个子目录里的包')
+			.setDesc('默认用设置里那个「同步包文件夹」。会列出它的 full（完整副本）与 changes（更新包）两个子目录')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
@@ -486,9 +486,9 @@ export class ApplyBundleModal extends Modal {
 		// "应用完这个仓库就是包里的样子"是唯一一条能保证两边状态编号当场一致的语义，
 		// 所以这一段只是一个说明，不是控件。
 		contentEl.createEl('p', {
-			text: '应用方式：**严格同步** —— 包里点名的文件一律用包里的版本，'
-				+ '包里点名删掉的照删，本地多出来的也挪进回收目录。应用完这个仓库就是包送到的样子。'
-				+ '被换掉的那些本地版本进回收目录，捞得回来',
+			text: '应用方式：严格同步 —— 包里点名的文件一律用包里的版本，'
+				+ '包里点名删掉的照删，本地多出来的也挪进回收目录。应用完这个仓库就是包送到的样子；'
+				+ '被换掉的本地版本进回收目录，捞得回来',
 			cls: 'locally-save-hint',
 		});
 
@@ -640,7 +640,7 @@ export class ApplyBundleModal extends Modal {
 		const info = this.reportEl.createEl('ul', { cls: 'locally-save-facts' });
 		const add = (text: string) => info.createEl('li', { text });
 		add(`来源：${report.bundle.vault}，导出于 ${formatTime(report.bundle.created)}`);
-		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '仅改动'}`
+		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '更新包'}`
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
 		// 文件夹也要说清楚：只报文件的话，用户永远不知道目录这边差多少
@@ -653,14 +653,14 @@ export class ApplyBundleModal extends Modal {
 		// （更新包的起点必须与本机站的基准点完全相等，`checkAncestor` 拦在前面）
 		if (report.bundle.mode !== 'full') {
 			this.reportEl.createEl('p', {
-				text: '更新包：只装自起点那一点以来变过的文件。应用方式是**严格同步** —— '
+				text: '更新包：只装自起点那一点以来变过的文件。应用方式是严格同步 —— '
 					+ '包里点名的用包里的版本、点名的删除照删，其余按"你站的基准点 ＋ 这些条目 − 这些删除"补全'
 					+ '（不在这份状态里的本地文件挪进回收目录）。',
 				cls: 'locally-save-hint',
 			});
 		} else {
 			this.reportEl.createEl('p', {
-				text: '完整副本：**完全镜像** —— 包里没有的本地文件全挪进回收目录，'
+				text: '完整副本：完全镜像 —— 包里没有的本地文件全挪进回收目录，'
 					+ '仓库会变成和那个包一模一样（本机改过的、自己新建的都不留）。',
 				cls: 'locally-save-hint',
 			});
@@ -669,7 +669,7 @@ export class ApplyBundleModal extends Modal {
 		// 旧版本导的包：它没记空文件夹，所以这次目录只建不删（否则会删错）
 		if (report.bundleDirsUnknown) {
 			this.reportEl.createEl('p', {
-				text: '⚠ 旧版本导的包（没记空文件夹）：文件夹这次**只建不删**',
+				text: '⚠ 旧版本导的包（没记空文件夹）：文件夹这次只建不删',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -682,7 +682,7 @@ export class ApplyBundleModal extends Modal {
 				// 合并相邻更新包之后常见：链条上只剩两端的点，而我站在被吞掉的某一个点上
 				this.reportEl.createEl('p', {
 					text: `✓ 这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
-						+ '**你站的这一点正好在它的路线上**：应用它会直接把你送到终点（中间那几环不用补）。',
+						+ '你站的这一点正好在它的路线上：应用它会直接把你送到终点（中间那几环不用补）。',
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'match') {
@@ -696,14 +696,14 @@ export class ApplyBundleModal extends Modal {
 				// 那边只看到"基准对不上"，看不出其实是白跑一趟 —— 这里说清并给出下一步。
 				this.reportEl.createEl('p', {
 					text: `✓ 这个包要送到的那份完整副本（第 ${plan.info.header.targetGeneration} 代 · 基准 ${report.targetBaseline}）`
-						+ '**就是你这边的基准**：里面没有你缺的内容，应用它不会改动任何文件。'
+						+ '就是你这边的基准：里面没有你缺的内容，应用它不会改动任何文件。'
 						+ `要拿对方后来的改动，让他按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重新导一份`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'mismatch') {
 				this.reportEl.createEl('p', {
 					text: `⚠ 基准对不上：包基于「${report.bundleBaseline}」，你这边是「${report.myBaseline}」。`
-						+ '这次逐文件合并，不会丢东西，但不是"接着同一份基准"。'
+						+ '应用完你会落到这个包送到的状态，而不是从你现在的基准往外延伸。'
 						+ `让对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份（认指纹，别只看第几代）`,
 					cls: 'locally-save-warn',
 				});
@@ -731,9 +731,9 @@ export class ApplyBundleModal extends Modal {
 		} else {
 			this.reportEl.createEl('p', {
 				text: `基准：应用之后，你这台就以这份完整副本为基准（第 ${plan.info.header.targetGeneration} 代）。`
-					+ '**完整副本是镜像，不合并**：包里没有的本地文件会挪进回收目录（捞得回来），'
+					+ '完整副本是镜像，不合并：包里没有的本地文件会挪进回收目录（捞得回来），'
 					+ '本机改过的会被包里那一版覆盖（旧的同样进回收目录）—— 应用完这个仓库就是那个包。'
-					+ '这样两边的基准是**同一份东西**，之后互发更新包才不会对不上。',
+					+ '这样两边的基准是同一份东西，之后互发更新包才不会对不上。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -828,26 +828,24 @@ export class ApplyBundleModal extends Modal {
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
 		this.reportEl.createEl('p', {
-			text: report.strictness === 'listed-wins'
-				? '以包为准：包里点名的文件一律用包里的版本（本地那份挪进回收目录的「冲突」文件夹），'
-					+ '包里没提到的文件一个都不动。'
-				: '严格同步：包里点名的文件一律用包里的版本、点名的删除照删、'
-					+ '本地多出来的（包里送到的状态里没有的）也挪进回收目录；'
-					+ '动到的东西全在回收目录里（仓库/.trash/locally-save），捞得回来。',
+			text: '严格同步：包里点名的文件一律用包里的版本、点名的删除照删、'
+				+ '本地多出来的（包送到的状态里没有的）也挪进回收目录；'
+				+ '动到的东西全在回收目录里（仓库/.trash/locally-save），捞得回来。',
 			cls: 'locally-save-hint',
 		});
 
 		const mode = this.reportEl.createEl('p');
 		if (report.mode === 'fast') {
-			mode.setText('通道：快速（同一份基准，按包的清单直接写入）');
+			mode.setText('方式：按包直接写入（你与这个包站在同一份基准上）');
 		} else {
-			mode.setText('通道：逐文件合并（世代对不上，逐个确认"本地是不是还停在包的基准上"）');
+			mode.setText('方式：逐文件比对（逐个确认本地那一份是不是还停在包所基于的版本上）');
 		}
 		mode.addClass('locally-save-hint');
 
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
-				text: '注意：这个包来自另一条血脉（另一台机器独立立的基准）。应用后会认祖。',
+				text: '注意：这个包不是接着你现在的基准点长的（多半来自另一台独立打包的机器）。'
+					+ '应用它之后，你会以它为准。',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -989,7 +987,7 @@ export class ApplyBundleModal extends Modal {
 			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一点上）应用＝同理
 			if (parked) {
 				parts.push(`你这边的改动已存成 ${parked}（接在刚应用到的这个基准点上：`
-					+ '你自己应用它就加回来，发给对方、他站在同一点上应用也等于把你的改动叠上去）');
+					+ '你自己应用它就加回来，发给对方、他站在同一点上应用也一样）');
 			} else if (strict) {
 				parts.push('你这边跟那个点本来就没有差别，所以没有另存包');
 			}
@@ -1073,9 +1071,7 @@ class ConfirmApplyModal extends Modal {
 
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		facts.createEl('li', {
-			text: `两边都改过的：${report.conflicts} 个（按「${
-				report.conflictStrategy === 'keep-both' ? '留两份' : report.conflictStrategy === 'local-wins' ? '以我为准' : '以包为准'
-			}」处理）`,
+			text: `两边都改过的：${report.conflicts} 个（用包里那一版覆盖，你改过的那份挪进回收目录）`,
 		});
 		if (report.forcedOverwrites > 0) {
 			facts.createEl('li', { text: `会覆盖 ${report.forcedOverwrites} 个本地改动过的文件` });

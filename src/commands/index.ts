@@ -35,10 +35,10 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 	// 下面两条是被砍掉的副本通道留下的 ID：留着弹指路通知，下一版再删
 	plugin.addCommand({
 		id: 'upload-to-copy',
-		name: '上传到本地副本（通道已移除）',
+		name: '上传到本地副本（旧功能，已移除）',
 		callback: () => {
 			new Notice(
-				'「同步到本地副本」通道已移除：把改动带走请用「导出同步包…」（导一个更新包拷到另一台机器）',
+				'「同步到本地副本」这个旧功能已经移除：把改动带走请用「导出同步包…」（导一个更新包拷到另一台机器）',
 				9000,
 			);
 		},
@@ -46,10 +46,10 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 
 	plugin.addCommand({
 		id: 'download-from-copy',
-		name: '从本地副本拉取（通道已移除）',
+		name: '从本地副本拉取（旧功能，已移除）',
 		callback: () => {
 			new Notice(
-				'「同步到本地副本」通道已移除：从别处拿内容请用「打开同步包并应用…」（选一个 .lsave 应用）',
+				'「同步到本地副本」这个旧功能已经移除：从别处拿内容请用「打开同步包并应用…」（选一个 .lsave 应用）',
 				9000,
 			);
 		},

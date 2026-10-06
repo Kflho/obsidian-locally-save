@@ -1306,7 +1306,7 @@ async function removeSupersededChanges(
 		if (other.mode !== 'changes') continue;
 		// 到这儿它就是一个"看着该被取代"的更新包了：没删就得说清为什么
 		if (other.lineage !== header.lineage) {
-			kept.push({ name: item.name, why: '不是同一条血脉（多半是另一台机器导的）' });
+			kept.push({ name: item.name, why: '不是同一份基准线上的包（多半是另一台机器导的）' });
 			continue;
 		}
 		/**

@@ -216,8 +216,8 @@ class ConfirmMergeModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '合并相邻的更新包' });
 		contentEl.createEl('p', {
-			text: '把连着的一串小环并成一份大的：链条上少几个基准点，搬起来也省事。'
-				+ '合并后那份**起点还是段首那一点、落点还是段末那一点**，中间那几个点不再有自己的包。',
+			text: '把连着的一串小更新包并成一份大的：链条上少几个基准点，搬起来也省事。'
+				+ '合并后那份的起点还是这一串的开头、落点还是这一串的末尾，中间那几个点不再有自己的包。',
 			cls: 'locally-save-hint',
 		});
 
@@ -230,8 +230,8 @@ class ConfirmMergeModal extends Modal {
 			});
 		}
 		contentEl.createEl('p', {
-			text: '**原来那几份会挪进回收站**（不是真删，捞得回来）。'
-				+ '站在中间那几个点上的机器**照样收得下合并后的这一份**：应用它会算一遍落点，正好落到段末那一点。',
+			text: '原来那几份会挪进回收站（不是真删，捞得回来）。'
+				+ '站在中间那几个点上的机器照样收得下合并后的这一份：应用它会直接把你送到这一串的末尾。',
 			cls: 'locally-save-hint',
 		});
 
