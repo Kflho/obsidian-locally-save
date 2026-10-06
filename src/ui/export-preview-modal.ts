@@ -2,6 +2,7 @@ import { Modal, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import type { BundleExportPreview } from '../bundle/export';
+import { describeExportStart } from '../bundle/log';
 import { formatBytes } from '../utils/format';
 
 /** 列表里最多列多少条 —— 几千条会把界面拖垮，剩下的用计数说明 */
@@ -51,6 +52,13 @@ export class ExportPreviewModal extends Modal {
 					+ (preview.targetGeneration === null ? ' → 最新' : ` → 第 ${preview.targetGeneration} 代`));
 			}
 			contentEl.createEl('p', { text: parts.join(' · '), cls: 'locally-save-summary' });
+
+			// 起点是自动接线头时说明一句（"你站在第 39 代、这一份接在第 54 代后面"）——
+			// 与导出结果、导出对话框共用同一句话（见 bundle/log.ts 的 describeExportStart）
+			const startNote = describeExportStart(preview.start);
+			if (startNote) {
+				contentEl.createEl('p', { text: startNote, cls: 'locally-save-hint' });
+			}
 
 			if (preview.existing) {
 				contentEl.createEl('p', {

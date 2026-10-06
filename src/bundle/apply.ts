@@ -8,7 +8,7 @@ import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pathExists, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
-import { loadState, saveState } from '../sync/state';
+import { loadState, raiseGeneration, saveState } from '../sync/state';
 import type { PluginState, StateIdInfo, StateIdRecord } from '../sync/state';
 import { compareStateId, computeStateId } from '../sync/state-id';
 import type { StateIdCompare } from '../sync/state-id';
@@ -1201,6 +1201,9 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * 所以世代**更高**的更新包一定是更晚的内容，那条"比我新的不删"照样守得住。
 	 */
 	state.generation = plan.info.header.targetGeneration;
+	// 高水位只增不减：应用别人的包时把它报过的号一并算进来（回退那一趟不会把水位拉低，
+	// 于是"回退之后再导出"不会去撞历史上用过的号，见 sync/state.ts 的 maxGeneration）
+	raiseGeneration(state, plan.info.header.targetGeneration, plan.info.header.baseGeneration);
 	state.lastBundleId = plan.info.header.bundleId;
 
 	/**

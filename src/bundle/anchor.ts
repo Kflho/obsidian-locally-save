@@ -6,7 +6,7 @@ import type { BundleHeader } from './format';
 import { bundleDirsToScan } from './paths';
 import type { ChainPoint } from './points';
 import { listFilesSync } from '../sync/disk';
-import type { StateIdInfo } from '../sync/state';
+import type { PluginState, StateIdInfo } from '../sync/state';
 import type { FileRecord } from '../sync/types';
 
 /**
@@ -166,6 +166,99 @@ function sortAnchors(anchors: BundleAnchor[]): BundleAnchor[] {
 	return anchors.sort((a, b) => b.generation - a.generation || b.mtime - a.mtime);
 }
 
+/** 「自动选起点」的结论：这条线从我这一点往后能走到的最新点 */
+export interface AutoStartPlan {
+	/** 我站的这一点（还没有基准点时 null） */
+	mine: { generation: number; hash: string; name: string } | null;
+	/** 自动接上的线头；null ＝ 我就是线头，或者走不到（那时看 `problem`） */
+	head: { generation: number; hash: string; name: string } | null;
+	/** 接不上的说明（正常时为 null） */
+	problem: string | null;
+}
+
+/**
+ * **自动选起点：这条线从我站的这一点往后，最新的一点是哪一点**（只读）。
+ *
+ * 为什么需要（用户报的）：应用一份完整副本**回退**到第 39 代之后，老的默认是"从我站的
+ * 这一点往外导"——于是导出来「39 → 40」，而 40 在历史上早被这条线用过，顺序当场乱掉、
+ * 还从 39 分出一条岔。用户的原话："我希望更新有严格顺序，所以应该基于最新基准点"。
+ *
+ * 走法就是链条本身（与 `chain.ts` 那套一致）：每一步找"起点指纹 ＝ 当前落点"的那一环，
+ * 同一起点上有分支时取**最新**的那一份（另一份是并行的支线）；世代必须往前走（防环）。
+ * 三类结果：
+ * - **我就是线头**（没有环从我这一点往外长）→ `head` 为 null，导出行为与老版本一模一样；
+ * - **前面有线** → `head` ＝ 那一串的末尾（从它后面往外导，顺序不乱、不分支）；
+ * - **中间那几环被完整副本取代掉了**（完整副本一写就会清老环，`removeSupersededChanges`）→
+ *   退一步拿"比我新的最新那份完整副本"当线头（它自带完整清单，照样能当起点）；
+ * - 都不行 → `head` 为 null 并给一句 `problem`（退回"我站的这一点"导出，
+ *   号仍然从高水位往后发，不会撞号）。
+ */
+export async function planAutoStart(baseDir: string, state: PluginState): Promise<AutoStartPlan> {
+	const mineHash = state.bundle?.fullHash ?? null;
+	const mine: AutoStartPlan['mine'] = mineHash
+		? {
+			generation: state.bundle?.fullGeneration ?? state.generation,
+			hash: mineHash,
+			name: state.bundle?.fullFile ?? '（状态里记着的那份包）',
+		}
+		: null;
+	if (!baseDir || !mine) return { mine, head: null, problem: null };
+
+	// 只看同一条血脉：别的机器独立立的基准跟我这边不是一份东西，拿它当起点谁也不认识
+	const items = (await listBundles(baseDir)).filter(item => item.header?.lineage === state.lineage);
+	const rings = items
+		.filter(item => item.header?.mode === 'changes' && (item.header.targetBaselineHash ?? null) !== null)
+		.map(item => ({
+			file: item.file,
+			name: item.name,
+			generation: item.header?.targetGeneration ?? 0,
+			baseline: item.header?.baselineHash ?? null,
+			target: item.header?.targetBaselineHash as string,
+		}));
+
+	const used = new Set<string>();
+	let cursor = mine.hash;
+	let generation = mine.generation;
+	let head: AutoStartPlan['head'] = null;
+	for (;;) {
+		const next = rings
+			.filter(ring => ring.baseline === cursor && !used.has(ring.file) && ring.generation > generation)
+			.sort((a, b) => b.generation - a.generation)[0];
+		if (!next) break;
+		used.add(next.file);
+		cursor = next.target;
+		generation = next.generation;
+		head = { generation, hash: cursor, name: next.name };
+	}
+	if (head) return { mine, head, problem: null };
+
+	// 老环可能已经被一份完整副本取代掉了：拿"比我新"的最新那份完整副本当线头
+	const fulls = items
+		.filter(item => item.header?.mode === 'full')
+		.map(item => ({
+			name: item.name,
+			generation: item.header?.targetGeneration ?? 0,
+			hash: item.header ? baselineOfBundle(item.header) : null,
+		}))
+		.filter(item => item.hash !== null && item.generation > mine.generation)
+		.sort((a, b) => b.generation - a.generation);
+	const freshest = fulls[0];
+	if (freshest?.hash) {
+		return { mine, head: { generation: freshest.generation, hash: freshest.hash, name: freshest.name }, problem: null };
+	}
+
+	// 前面确实还有东西、但接不上：如实说一句（这一份只能从本机这一点往外导）
+	const highest = items.reduce((max, item) => Math.max(max, item.header?.targetGeneration ?? 0), 0);
+	return {
+		mine,
+		head: null,
+		problem: highest > mine.generation
+			? `这条线在包目录里已经到第 ${highest} 代了，但没有接着你站的那一点往后的环（中间缺几份包）——`
+				+ '这一份只能从你站的这一点往外导。把缺的那几份包（或者一份更新的完整副本）拷进来就能接在线头后面'
+			: null,
+	};
+}
+
 /**
  * 按**基准指纹**找状态 —— 下拉框的键就是它（`''` ＝ 最新）。
  *
@@ -226,7 +319,9 @@ export interface LatestInfo {
  * 同一份东西（指纹相同）只留一个选项。
  *
  * 「最新」在两端意思不一样，所以文案分开写：
- * - `from`：最新 ＝ **我站的这个基准点**（默认；对方多半就站在它上面，链条也是从它往外长）；
+ * - `from`：最新 ＝ **自动接线头**（默认）—— 我就是这条线的最新点就从我这一点往外导；
+ *   我落在后面（回退过 / 没跟上）时自动接在这条线的最新点后面（用户拍板的"严格顺序"，
+ *   见 `planAutoStart`：不这么办会从老点分岔、还会撞上历史上用过的号）；
  * - `to`：最新 ＝ **当前仓库**（现在这一刻，含你刚改的东西）—— 这也是默认。
  *
  * 选项里除了完整副本，还有**链条上的点**（每份更新包落出的那一点，见 `points.ts`）：
@@ -240,9 +335,9 @@ export function anchorOptions(
 	const options: Record<string, string> = {};
 	if (end === 'from') {
 		const detail = latest.generation !== null
-			? `第 ${latest.generation} 代${latest.hash ? ` · 基准 ${latest.hash}` : ''}`
-			: '还没站上过基准点';
-		options[LATEST_STATE] = `我站的这个基准点（${detail}）`;
+			? `，你站在第 ${latest.generation} 代${latest.hash ? ` · ${latest.hash}` : ''}`
+			: '（还没站上过基准点）';
+		options[LATEST_STATE] = `自动：接在这条线的最新点后面${detail}`;
 	} else {
 		options[LATEST_STATE] = '最新（当前仓库，现在这一刻）';
 	}

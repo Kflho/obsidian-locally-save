@@ -2051,7 +2051,16 @@ check('基准指纹＝a 那份完整副本的（对方一比正好 match）', ab
 check('终点还是"最新"：第 3 代', abC1Info.header.targetGeneration, 3);
 check('自 a 以来变过的三个文件都装进来了', abC1Info.header.entries.map(entry => entry.path), ['a.md', 'b.md', 'c.md']);
 check('每个条目都带上"站在 a 上的人手里那一版"', typeof abC1Info.header.entries[0]?.baseSize, 'number');
-check('报告里写清是哪一份完整副本', abC1.anchor, {
+check('报告里写清是哪一份完整副本', {
+	generation: abC1.anchor?.generation,
+	hash: abC1.anchor?.hash,
+	file: abC1.anchor?.file,
+	name: abC1.anchor?.name,
+	stateId: abC1.anchor?.stateId,
+	checkpoint: abC1.anchor?.checkpoint,
+	targetGeneration: abC1.anchor?.targetGeneration,
+	targetHash: abC1.anchor?.targetHash,
+}, {
 	generation: 1,
 	hash: AB_FINGERPRINT_A,
 	file: AB_FULL_A,
@@ -2061,7 +2070,8 @@ check('报告里写清是哪一份完整副本', abC1.anchor, {
 	targetGeneration: 3,
 	targetHash: null,
 });
-check('导出结果那句带上基准指纹', describeExportRange(abC1), `（第 1 代 → 最新 · 基准 ${AB_FINGERPRINT_A}）`);
+check('起点是**用户在下拉里指定**的（不是自动接线头）', abC1.anchor?.start?.picked, 'explicit');
+check('导出结果那句带上基准指纹与落点号', describeExportRange(abC1), `（第 1 代 → 第 3 代 · 基准 ${AB_FINGERPRINT_A}）`);
 
 // ③ Y（还在第 1 代）应用它：快速通道、零冲突，直接追上
 const abPlanY2 = await planBundleApply(applyOptions(AB_Y, AB_STATE_Y, abC1.file as string));
@@ -2935,6 +2945,105 @@ const agResultC = await executeBundlePlan(agPlanC, agApply(AG_C, AG_STATE_C, agM
 check('C 应用后也是段末那一刻的内容', read(AG_C, 'a.md'), 'AG3 再长一点点');
 check('C 也落在第 3 代', (await loadState(AG_STATE_C)).generation, 3);
 check('C 那边状态编号也一致', agResultC.stateIdCompare, 'match');
+
+// 50. **回退之后再导出：接在这条线的最新点后面，号不撞**（用户拍板的那条"严格顺序"）
+//
+// 他报的现场：链条走到 39 → 54，这时应用一份更老的完整副本**回退到第 39 代**，
+// 之后再导出，老代码发的是「39 → 40」—— 40 在历史上早被这条线用过，
+// 于是同一个号底下出现两份不同内容、还从 39 分出一条岔（"这样会搞乱更新顺序产生分支"）。
+// 现在的规矩：**默认接在这条线的最新点后面**，号从高水位往后发 → 「54 → 55」。
+const RBK = path.join(ROOT, 'rollback');
+const RBK_A = path.join(RBK, 'a');
+const RBK_B = path.join(RBK, 'b');
+const RBK_B2 = path.join(RBK, 'b2');
+const RBK_OUT = path.join(RBK, 'transfer');
+const STATE_RBK_A = path.join(RBK, 'state-a.json');
+const STATE_RBK_B = path.join(RBK, 'state-b.json');
+const STATE_RBK_B2 = path.join(RBK, 'state-b2.json');
+for (const dir of [RBK_A, RBK_B, RBK_B2, RBK_OUT]) fs.mkdirSync(dir, { recursive: true });
+const rbkExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ ...exportOptions(root, stateFile, mode), outDir: RBK_OUT });
+const rbkApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+const rbkApplyFile = async (root: string, stateFile: string, file: string): Promise<void> => {
+	await executeBundlePlan(await planBundleApply(rbkApply(root, stateFile, file)), rbkApply(root, stateFile, file));
+};
+
+// A 机：第 1 代完整副本 → 两环更新包，线的末端到第 3 代
+write(RBK_A, 'a.md', 'A1', T0);
+const rbkFull1 = await exportBundle(rbkExport(RBK_A, STATE_RBK_A, 'full'));
+write(RBK_A, 'a.md', 'A2 改长一点', T0 + 20_000);
+const rbkRing1 = await exportBundle(rbkExport(RBK_A, STATE_RBK_A));
+write(RBK_A, 'b.md', 'B1', T0 + 40_000);
+const rbkRing2 = await exportBundle(rbkExport(RBK_A, STATE_RBK_A));
+check('线末端到第 3 代（1 → 2 → 3）', rbkRing2.header?.targetGeneration, 3);
+
+// B 机：跟着走到第 3 代，然后**应用第 1 代那份完整副本回退**
+await rbkApplyFile(RBK_B, STATE_RBK_B, rbkFull1.file as string);
+await rbkApplyFile(RBK_B, STATE_RBK_B, rbkRing1.file as string);
+await rbkApplyFile(RBK_B, STATE_RBK_B, rbkRing2.file as string);
+check('B 走到了第 3 代', (await loadState(STATE_RBK_B)).generation, 3);
+await rbkApplyFile(RBK_B, STATE_RBK_B, rbkFull1.file as string);
+check('回退：号跟着内容回到第 1 代', (await loadState(STATE_RBK_B)).generation, 1);
+check('但高水位没被拉低（还记着这条线到过第 3 代）', (await loadState(STATE_RBK_B)).maxGeneration, 3);
+
+// B 回退之后**原样不动**就导出：没有新东西要发，一个包都不写
+// （回退本身把那份完整副本发给对方应用就够了；写了只会是"把大家带回老点"的重复包）
+const rbkNoEdit = await exportBundle(rbkExport(RBK_B, STATE_RBK_B));
+check('回退之后没改动 → 不生成包', rbkNoEdit.file, null);
+checkTrue('并说清为什么', (rbkNoEdit.reason ?? '').includes('没有改动'), rbkNoEdit.reason ?? '');
+
+// B 改出新东西 → 导出：**自动接在线头（第 3 代）后面**，落点号从高水位往后（第 4 代）
+write(RBK_B, 'c.md', 'C 回退之后新写的', T0 + 60_000);
+const rbkRebased = await exportBundle(rbkExport(RBK_B, STATE_RBK_B));
+const rbkInfo = await readBundleInfo(rbkRebased.file as string);
+check('起点是线头（第 3 代），不是本机退到的第 1 代', rbkInfo.header.baseGeneration, 3);
+check('起点指纹＝线头那一点（站在第 3 代上的机器直接能收）', rbkInfo.header.baselineHash, rbkRing2.header?.targetBaselineHash);
+check('落点从高水位往后发：第 4 代（不撞历史上那个 2）', rbkInfo.header.targetGeneration, 4);
+check('报告里写清"自动接了线头"', rbkRebased.anchor?.start?.picked, 'auto');
+check(
+	'界面上说得出"你站在第 1 代、这份接在第 3 代后面"',
+	[rbkRebased.anchor?.start?.mine?.generation, rbkRebased.anchor?.start?.head?.generation],
+	[1, 3],
+);
+check(
+	'包名也写着「3代到4代」',
+	path.basename(rbkRebased.file as string).includes('更新-3代到4代'),
+	true,
+);
+
+// A（正站在第 3 代）收下它：内容变成 B 那一版（回退 + B 的新东西），两边一致
+const rbkPlanA = await planBundleApply(rbkApply(RBK_A, STATE_RBK_A, rbkRebased.file as string));
+check('线头那台收得下（基准一致）', rbkPlanA.report.baselineMatch, 'match');
+const rbkResultA = await executeBundlePlan(rbkPlanA, rbkApply(RBK_A, STATE_RBK_A, rbkRebased.file as string));
+check('A 跟着落到第 4 代', (await loadState(STATE_RBK_A)).generation, 4);
+check('A 的内容＝B 那一版（回退 + 新文件都在）', [read(RBK_A, 'a.md'), read(RBK_A, 'c.md')], ['A1', 'C 回退之后新写的']);
+check('B 回退时丢掉的 b.md 在 A 那边也删了', read(RBK_A, 'b.md'), null);
+check('两边状态编号一致', rbkResultA.stateIdCompare, 'match');
+
+// B2 机：同一套经历，但导出时**线头算不出来**（中间那几环不在包目录里）——
+// 号仍然从高水位往后发（第 4 代），不会退回去撞历史上用过的 2
+await rbkApplyFile(RBK_B2, STATE_RBK_B2, rbkFull1.file as string);
+await rbkApplyFile(RBK_B2, STATE_RBK_B2, rbkRing1.file as string);
+await rbkApplyFile(RBK_B2, STATE_RBK_B2, rbkRing2.file as string);
+await rbkApplyFile(RBK_B2, STATE_RBK_B2, rbkFull1.file as string);
+write(RBK_B2, 'd.md', 'D2', T0 + 80_000);
+const rbkHidden: string[] = [];
+for (const ring of [rbkRing1.file as string, rbkRing2.file as string]) {
+	const hidden = `${ring}.hidden`;
+	fs.renameSync(ring, hidden);
+	rbkHidden.push(hidden);
+}
+const rbkFallback = await exportBundle(rbkExport(RBK_B2, STATE_RBK_B2));
+for (const hidden of rbkHidden) fs.renameSync(hidden, hidden.replace(/\.hidden$/, ''));
+const rbkFallbackInfo = await readBundleInfo(rbkFallback.file as string);
+check('线头算不出来时：从本机站的这一点往外导', rbkFallbackInfo.header.baseGeneration, 1);
+check('号仍然从高水位往后（第 4 代），不去撞历史上那个 2', rbkFallbackInfo.header.targetGeneration, 4);
+check(
+	'并如实说明为什么没接线头',
+	rbkFallback.anchor?.start?.picked,
+	'self',
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

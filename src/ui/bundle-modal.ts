@@ -9,8 +9,8 @@ import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle
 import { baselineOfFullBundle, listingHashOfFiles } from '../bundle/baseline';
 import type { BundleAnchor } from '../bundle/anchor';
 import type { FileRecord } from '../sync/types';
-import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
-import type { AnchorRef, LatestInfo } from '../bundle/anchor';
+import { anchorOptions, listFullAnchorsSync, planAutoStart } from '../bundle/anchor';
+import type { AnchorRef, AutoStartPlan, LatestInfo } from '../bundle/anchor';
 import { listPointRefsSync } from '../bundle/points';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
@@ -20,7 +20,7 @@ import type { DropdownComponent, TextComponent } from 'obsidian';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
 import { focusWindow, markDestructive } from './modal-layout';
-import { describeExportRange } from '../bundle/log';
+import { describeExportRange, describeExportStart } from '../bundle/log';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 确认框里最多列多少个会被删的文件 */
@@ -51,6 +51,13 @@ export class ExportBundleModal extends Modal {
 	 */
 	private fromState: string;
 	private toState: string;
+	/**
+	 * 「这条线的最新点」——起点留空（默认）时，引擎会自动接在它后面导出。
+	 *
+	 * 与引擎**共用同一个判断**（`planAutoStart`）：窗口里那句"本次：第 N 代 → 最新"
+	 * 就是照它写的，所以不会出现"界面说接线头、实际从本机这一点导"这种对不上的情况。
+	 */
+	private autoStart: AutoStartPlan | null = null;
 	private fromDropdown: DropdownComponent | null = null;
 	private toDropdown: DropdownComponent | null = null;
 	private statusEl!: HTMLElement;
@@ -130,6 +137,28 @@ export class ExportBundleModal extends Modal {
 		}
 	}
 
+	/**
+	 * 看一眼"这条线的最新点"（起点留空 ＝ 自动接在它后面）。
+	 *
+	 * 与引擎共用 `planAutoStart`：它走一遍包目录里的环，得出"从我站的这一点往后能走到哪一点"。
+	 * 我本来就是线头 → `head` 为 null（跟老行为一样，从本机这一点往外导）；
+	 * 我落在后面（回退过 / 没跟上）→ 接上线头，界面里那句"本次：第 N 代 → 最新"照它写。
+	 */
+	private async refreshAutoStart(): Promise<void> {
+		if (!this.wantChanges || this.fromState !== '') {
+			this.autoStart = null;
+			this.renderWhere();
+			return;
+		}
+		try {
+			const state = loadStateSync(this.plugin.stateFile());
+			this.autoStart = await planAutoStart(this.effectiveDir(), state);
+		} catch {
+			this.autoStart = null;
+		}
+		this.renderWhere();
+	}
+
 	/** 选中的那一个状态（完整副本或链条上的点），找不到就是 null —— 只用来显示第几代 */
 	private pickedAnchor(fingerprint: string): AnchorRef | null {
 		if (fingerprint === '') return null;
@@ -148,6 +177,13 @@ export class ExportBundleModal extends Modal {
 	/** 这次更新包「从哪一份到哪一份」那句话（没勾更新包时不显示） */
 	private describeRange(): string {
 		if (!this.wantChanges) return '';
+		// 起点是自动选的时候（我落在后面）：说清"接在这条线的最新点后面"
+		if (this.fromState === '' && this.autoStart?.head) {
+			const head = this.autoStart.head;
+			const mine = this.autoStart.mine;
+			return `本次：第 ${head.generation} 代 → 最新（自动接在这条线的最新点后面`
+				+ `${mine ? `：你站在第 ${mine.generation} 代` : ''}）`;
+		}
 		const from = this.pickedAnchor(this.fromState);
 		const fromText = this.fromState === ''
 			? '我站的这个基准点'
@@ -181,6 +217,7 @@ export class ExportBundleModal extends Modal {
 				.onChange(value => {
 					this.wantChanges = value;
 					this.renderWhere();
+					void this.refreshAutoStart();
 				}));
 
 		new Setting(contentEl)
@@ -204,6 +241,7 @@ export class ExportBundleModal extends Modal {
 					this.renderWhere();
 					// 换了目录 → 可选的"状态"（＝那个目录里的完整包）也跟着换
 					this.fillStateOptions();
+					void this.refreshAutoStart();
 					this.list?.schedule();
 				}));
 
@@ -211,13 +249,16 @@ export class ExportBundleModal extends Modal {
 		// 两个下拉的选项＝本机那几份完整包（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
 		new Setting(contentEl)
 			.setName('更新包：从哪个状态')
-			.setDesc('接着哪一份完整副本往后算。默认最新那份；对方还停在更老的一份上时，照它「更新记录」里的基准指纹选')
+			.setDesc('接着哪一份完整副本往后算。默认「自动」：你就是线头就从你这一点往外导，'
+				+ '你落在后面（比如回退过）就自动接在这条线的最新点后面；对方还停在更老的一份上时，'
+				+ '照它「更新记录」里的基准指纹选')
 			.addDropdown(dropdown => {
 				this.fromDropdown = dropdown;
 				dropdown.onChange(value => {
 					this.fromState = value;
 					void this.persistStates();
 					this.renderWhere();
+					void this.refreshAutoStart();
 				});
 			});
 
@@ -238,6 +279,7 @@ export class ExportBundleModal extends Modal {
 		this.whereEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.statusEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.renderWhere();
+		void this.refreshAutoStart();
 
 		// 顺手就能管理：包攒多了、看到过时的，不用关掉这个窗再去导入弹窗里删
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -276,7 +318,11 @@ export class ExportBundleModal extends Modal {
 			.map(mode => `${mode === 'full' ? '完整副本' : '更新包'} → ${bundleDirForMode(base, mode)}`)
 			.join('；');
 		const range = this.describeRange();
-		this.whereEl.setText(`会写到：${targets}${range ? ` ｜ ${range}` : ''}`);
+		// 线头算不出来（缺环 / 缺那份完整副本）时把原因也写出来：这一份会从本机这一点往外导
+		const problem = this.wantChanges && this.fromState === '' && this.autoStart?.problem
+			? ` ｜ ${this.autoStart.problem}`
+			: '';
+		this.whereEl.setText(`会写到：${targets}${range ? ` ｜ ${range}` : ''}${problem}`);
 	}
 
 	/** 勾了哪几种，以及导出顺序：**先完整副本、后更新包**（见 plannedExportModes） */
@@ -353,11 +399,14 @@ export class ExportBundleModal extends Modal {
 					? `；changes 里另有 ${outcome.keptChanges.length} 个包留着（`
 						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}）`
 					: '';
+				// 起点是自动接线头时说明一句（"你站在第 39 代、这一份接在第 54 代后面"）——
+				// 用户最想确认的就是"顺序没乱、没从老点分岔"
+				const startNote = describeExportStart(outcome.anchor?.start);
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
 					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
 					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）`
-					+ `${describeExportRange(outcome)} → ${outcome.file}`
+					+ `${describeExportRange(outcome)}${startNote ? `（${startNote}）` : ''} → ${outcome.file}`
 					+ (outcome.superseded.length > 0
 						? `；顺手清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
 						: '')

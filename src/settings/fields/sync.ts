@@ -83,8 +83,10 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'changesFromState',
 					name: '从哪个状态开始',
-					desc: '更新包接着哪一份完整副本往后算。默认「我站的这个基准点」；'
-						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（只看第几代会选错）',
+					desc: '更新包接着哪一份完整副本往后算。默认「自动」：你就是这条线的最新点就从你这一点往外导；'
+						+ '你落在后面（比如应用完整副本回退过）就自动接在这条线的最新点后面 —— '
+						+ '顺序不会乱、号也不会跟历史上用过的撞上。'
+						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
@@ -202,7 +204,7 @@ function hasBundleDir(settings: PluginSettings): boolean {
  */
 function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
 	const fallback = end === 'from'
-		? { [LATEST_STATE]: '我站的这个基准点' }
+		? { [LATEST_STATE]: '自动：接在这条线的最新点后面' }
 		: { [LATEST_STATE]: '最新（当前仓库，现在这一刻）' };
 	/** 现在存着的值（一个基准指纹）：那一份要是找不到了，也得把它列出来（否则下拉框会显示成别的项） */
 	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;

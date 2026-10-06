@@ -134,6 +134,21 @@ export interface PluginState {
 	 *   "第几代"当场失去意义。
 	 */
 	generation: number;
+	/**
+	 * **高水位：这个血脉里已经发到第几号了**（只增不减）。
+	 *
+	 * 为什么单独记一个：`generation` 回答的是"**我的内容**站在哪一点" —— 应用一份更老的完整副本
+	 * 回退时它会往回走（同一份内容同一个号，这是对的）。可"**新**内容该发第几号"问的是另一件事：
+	 * 这个血脉里**已经用过**哪些号。
+	 *
+	 * 没有它时，回退到第 39 代再导出会发「39 → 40」—— 而 40 在历史上早被这条线用过
+	 * （39→40→…→54），同一个号底下出现两份不同内容，更新顺序当场乱掉、还从 39 分出一条岔
+	 * （用户报的："39-54-最新更新，回退到 39 之后应该导 54→55，现在却变成 39→40"）。
+	 *
+	 * 所以：**新内容一律发 `maxGeneration + 1`**；内容没动（沿用当前号）时不动它。
+	 * 旧状态文件没有这一项 → 以 `generation` 当起点，之后只增不减。
+	 */
+	maxGeneration: number;
 	/** 上一次应用的同步包 ID：用来发现漏包 */
 	lastBundleId: string | null;
 	/** 上一次导出的同步包 ID：下一个包会把它记成 parentBundleId */
@@ -251,6 +266,7 @@ export function emptyState(): PluginState {
 		copyId: randomUUID(),
 		lineage: randomUUID(),
 		generation: 0,
+		maxGeneration: 0,
 		lastBundleId: null,
 		lastExportedBundleId: null,
 		bundle: null,
@@ -296,6 +312,10 @@ function normalizeState(raw: Partial<PluginState> | null): PluginState {
 		copyId: typeof raw.copyId === 'string' && raw.copyId ? raw.copyId : randomUUID(),
 		lineage: typeof raw.lineage === 'string' && raw.lineage ? raw.lineage : randomUUID(),
 		generation: typeof raw.generation === 'number' ? raw.generation : 0,
+		// 老状态文件没有高水位（升级上来的）：拿当前的号当起点，之后只增不减
+		maxGeneration: typeof raw.maxGeneration === 'number' && raw.maxGeneration > 0
+			? raw.maxGeneration
+			: (typeof raw.generation === 'number' && raw.generation > 0 ? raw.generation : 0),
 		lastBundleId: raw.lastBundleId ?? null,
 		lastExportedBundleId: raw.lastExportedBundleId ?? null,
 		bundle: raw.bundle
@@ -339,6 +359,21 @@ export async function saveState(absPath: string, state: PluginState): Promise<vo
 /** 这份副本在同步包里的身份 */
 export function copyRef(state: PluginState): { copyId: string; generation: number } {
 	return { copyId: state.copyId, generation: state.generation };
+}
+
+/**
+ * 抬高**高水位**（只增不减）：把"发出过 / 见过"的世代号都过一遍。
+ *
+ * 两个调用点：**导出**写下某个号之后、**应用**别人的包采纳它报的号之后。
+ * 它不参与"我站在哪一点"（那是 `generation`，回退时会往回走），
+ * 只保证"这个血脉里发过的号不会被第二次发出去"（见 `maxGeneration` 那段）。
+ */
+export function raiseGeneration(state: PluginState, ...values: (number | null | undefined)[]): void {
+	let highest = typeof state.maxGeneration === 'number' ? state.maxGeneration : 0;
+	for (const value of values) {
+		if (typeof value === 'number' && Number.isFinite(value) && value > highest) highest = value;
+	}
+	state.maxGeneration = highest;
 }
 
 /** 指纹缓存的键：路径 + 形态，形态变了缓存就作废 */
