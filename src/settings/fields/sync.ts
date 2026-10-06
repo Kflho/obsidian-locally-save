@@ -44,7 +44,7 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'excludePatterns',
 					name: '不进包的文件',
-					desc: '一行一条，写法同 .gitignore（`目录/`、`*.tmp`、`a/**/*.md`）。默认已排除配置目录、回收目录与系统垃圾文件',
+					desc: '一行一条，写法同 .gitignore：目录/ 表示整个目录，*.tmp 表示这一类文件，a/**/*.md 表示路径。默认已排除配置目录、回收目录与系统垃圾文件',
 					control: {
 						type: 'textarea',
 						placeholder: '一行一条，例如：\n附件/临时/\n*.tmp',
@@ -83,15 +83,15 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'changesFromState',
 					name: '从哪个状态开始',
-					desc: '更新包接着哪一份完整副本往后算。默认「最新那份完整副本」；'
-						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（世代号说不出是哪一份完整副本）',
+					desc: '更新包接着哪一份完整副本往后算。默认「我站的这个基准点」；'
+						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选（只看第几代会选错）',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
 				{
 					key: 'changesToState',
 					name: '到哪个状态为止',
-					desc: '默认「最新（当前仓库）」；选一份完整副本则导到那一刻为止（内容取自那份包，不是你现在的仓库）',
+					desc: '默认「最新（当前仓库）」；选一个更早的状态则导到那一刻为止（内容取自那些包，不是你现在的仓库）',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
@@ -132,15 +132,15 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'autoApplyIncoming',
 					name: '自动应用收到的更新包',
-					desc: '每 30 秒看一眼包文件夹：只在**不会动到本地已有东西**时才自己应用；'
-						+ '完整包、要删东西的、两边都改过的一律只提示一句',
+					desc: '每 30 秒看一眼包文件夹：只在不会删东西、也不会覆盖你改过的内容时才自动应用；'
+						+ '完整副本、要删东西的、两边都改过的一律只提示一句',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncoming),
 				},
 				{
 					key: 'dropBundleToApply',
 					name: '拖入 .lsave 即打开应用对话框',
-					desc: '把 .lsave 拖到 Obsidian 窗口上就打开应用对话框。只拦 .lsave，别的文件一概不受影响',
+					desc: '把 .lsave 拖到 Obsidian 窗口上就打开应用对话框（往笔记里拖图片、拖附件照旧）',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.dropBundleToApply),
 				},

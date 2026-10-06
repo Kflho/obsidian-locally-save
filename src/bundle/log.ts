@@ -80,7 +80,7 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
  */
 export function describePointConfirmed(bundle: PluginState['bundle']): string {
 	if (!bundle || bundle.pointConfirmed === null || bundle.pointConfirmed === undefined) return '';
-	return bundle.pointConfirmed ? ' · 已确认' : ' · 待对方合并';
+	return bundle.pointConfirmed ? ' · 已确认' : ' · 待对方确认';
 }
 
 /**
@@ -92,7 +92,7 @@ export function describePointConfirmed(bundle: PluginState['bundle']): string {
 export function describeLocalState(state: PluginState): string {
 	const bundle = state.bundle;
 	const anchor = bundle?.fullGeneration !== null && bundle?.fullGeneration !== undefined
-		? `基准点：第 ${bundle.fullGeneration} 代${bundle.fullFile ? `（${bundle.fullFile}）` : ''}${describePointConfirmed(bundle)}`
+		? `站在第 ${bundle.fullGeneration} 代那个基准点上${bundle.fullFile ? `（${bundle.fullFile}）` : ''}${describePointConfirmed(bundle)}`
 		: '还没有基准点（没导过、也没应用过完整副本）';
 	const id = state.stateId ? `状态 ${state.stateId.id}` : '状态编号还没算过（下次导出 / 应用时会有）';
 	return `本机：第 ${state.generation} 代 · ${anchor} · ${id}`;
@@ -154,7 +154,7 @@ export function describeBundlePosition(state: PluginState): string[] {
 	const owed = state.pendingReturn;
 	if (owed) {
 		lines.push(
-			`⚠ 还欠一次回传：你这边有 ${owed.changes} 个改动`
+			`⚠ 还有一笔改动没发出去：你这边有 ${owed.changes} 个改动`
 			+ `${owed.deletes > 0 ? `、${owed.deletes} 个删除` : ''}`
 			+ `是对方没有的 —— 下次导出更新包会一起带上（上次收到的是 ${owed.file ?? owed.bundleId.slice(0, 6)}）`,
 		);

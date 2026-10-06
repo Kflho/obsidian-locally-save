@@ -3,7 +3,7 @@
 	"name": "Locally Save",
 	"version": "0.12.2",
 	"minAppVersion": "1.7.0",
-	"description": "Packs your vault (or just the changes since the last full bundle) into a single transferable .lsave file you can carry on a USB drive or cloud folder — no network calls.",
+	"description": "Move a vault between computers without any network: pack it — or just what changed since the last transfer — into a single .lsave file you carry on a USB drive, then apply it on the other machine.",
 	"author": "KahoTAT",
 	"authorUrl": "https://github.com/Kflho",
 	"isDesktopOnly": true

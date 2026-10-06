@@ -170,7 +170,7 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 			const info = await readBundleInfo(file);
 			links.push({ name, file, header: info.header, payloadOffset: info.payloadOffset });
 		} catch (error) {
-			throw new Error(`合并要用的「${name}」现在读不出头部了（${describe(error)}）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
+			throw new Error(`合并要用的「${name}」现在读不出包信息了（${describe(error)}）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
 		}
 	}
 	const first = links[0];

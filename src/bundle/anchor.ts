@@ -261,7 +261,7 @@ export function anchorOptions(
  * 照这一串去对方「更新记录」里找同一个指纹，就知道该选哪一个。
  */
 export function describeAnchorList(anchors: AnchorRef[]): string {
-	if (anchors.length === 0) return '这个文件夹里一份同血脉的完整副本都没有';
+	if (anchors.length === 0) return '这个文件夹里还没有可以当起点的完整副本';
 	return `现在找得到的状态是：${anchors
 		.map(anchor => `${describeAnchor(anchor, 'from')}（${anchor.name}）`)
 		.join('、')}`;

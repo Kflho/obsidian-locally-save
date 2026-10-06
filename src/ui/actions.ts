@@ -344,8 +344,8 @@ async function reportIncomingSweep(plugin: LocallySavePlugin, sweep: IncomingSwe
 	for (const name of fresh) waitingNotified.add(name);
 	if (fresh.length > 0) {
 		new Notice(
-			`收到 ${fresh.length} 个更新包，但它们接在本机还没走到的那一环后面 —— `
-			+ '先把缺的那几份包也拷进来（或者让对方从本机这个基准点重导一份），到时自动接上',
+			`收到 ${fresh.length} 个更新包，但它们接在本机还没走到的那一点后面 —— `
+			+ '先把缺的那几份包也拷进来（或者让对方从本机这个基准点重导一份），到齐了会自动接上',
 			15000,
 		);
 	}

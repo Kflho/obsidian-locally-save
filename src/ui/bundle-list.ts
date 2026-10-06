@@ -209,7 +209,7 @@ export class BundleListView {
 		});
 		// 文件名不写进行里（用户提的：名字一长串挤占大量空间，一行就废了）——
 		// 想认它是哪个包，鼠标停在这行上就是完整路径；「复制路径」也还在。
-		row.setAttribute('title', item.error ? `读不出包头部：${item.error}` : item.file);
+		row.setAttribute('title', item.error ? `读不出包信息：${item.error}` : item.file);
 		// 类型由分组标题说了，行里只写**看包的判据**：第几代 → 第几代 · 状态编号 · 大小 · 时间
 		row.createSpan({ text: this.describeRow(item), cls: 'locally-save-reason' });
 		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"
@@ -260,7 +260,7 @@ export class BundleListView {
 		const time = formatTime(item.mtime);
 		return item.header
 			? `${this.describeGeneration(item)} · ${size} · ${time}`
-			: `${size} · ${time} · 读不出头部（可能不是我们的包）`;
+			: `${size} · ${time} · 读不出包信息（可能不是本插件的包）`;
 	}
 
 	/**
@@ -287,7 +287,7 @@ export class BundleListView {
 		host.empty();
 		const state = this.local;
 		if (!state) {
-			host.setText('读不到本机状态（sync-state.json）：下面只是包文件夹里有什么');
+			host.setText('读不到本机状态：下面只是包文件夹里有什么');
 			return;
 		}
 		host.createSpan({ text: describeLocalState(state) });
@@ -345,7 +345,7 @@ export class BundleListView {
 		new ConfirmBundleModal(this.plugin.app, {
 			title: '彻底删除这个同步包？',
 			lines: [
-				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被**直接删掉，不进回收站**`,
+				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被直接删掉，不进回收站`,
 			],
 			note: '这一步之后就捞不回来了。只是想把它从列表里清走的话，用旁边的「挪进回收站」—— 那一步还能捞回来。',
 			confirmText: '彻底删除',
@@ -382,7 +382,7 @@ export class BundleListView {
 		empty.addEventListener('click', () => {
 			new ConfirmBundleModal(this.plugin.app, {
 				title: '清空回收站？',
-				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被**真正删掉**`],
+				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被真正删掉`],
 				note: '这一步之后就捞不回来了。只想真删某一个包的话，用那一行里的「彻底删除」；这里是把回收站整个清掉。',
 				confirmText: '彻底删除',
 				onConfirm: async () => {
