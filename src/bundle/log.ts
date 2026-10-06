@@ -101,6 +101,8 @@ export function describeLocalState(state: PluginState): string {
 /**
  * 一次导出结果里那句"从哪一份到哪一份"（通知与弹窗里用）。
  *
+ * 两个号都写出来：**起点从哪一代、这一份落到第几代** —— 用户要的就是这个
+ * （"54 → 55"）；回退之后再导出时，落点号从高水位往后发，这里一看就知道没撞号。
  * 差量包要点明**内容到那一刻为止**（它不代表你现在的仓库）；起点一律带上**基准指纹**——
  * 对方「更新记录」顶上写的就是它，对不上就是"基准对不上"（世代号说不出是哪一份完整副本，光看代认不出来）。
  */
@@ -108,9 +110,33 @@ export function describeExportRange(outcome: ExportOutcome): string {
 	const anchor = outcome.anchor;
 	if (!anchor) return '';
 	const base = anchor.hash ? `基准 ${anchor.hash}` : '基准未知';
-	return anchor.checkpoint
-		? `（第 ${anchor.generation} 代 → 第 ${anchor.targetGeneration} 代 · ${base}）`
-		: `（第 ${anchor.generation} 代 → 最新 · ${base}）`;
+	return `（第 ${anchor.generation} 代 → 第 ${anchor.targetGeneration} 代 · ${base}）`;
+}
+
+/**
+ * 起点的说明：导出对话框、导出预览、导出结果三处**共用这一句**（别各写一套）。
+ *
+ * 用户拍板的那条规矩（"更新要有严格顺序"）落地之后，最需要说清的就是这件事：
+ * 你落在后面（回退过 / 没跟上）时，这一份**接在这条线的最新点后面**，而不是从你站的
+ * 那一点往外岔 —— 那会分出一条岔、还会撞上历史上用过的号。
+ */
+export function describeExportStart(
+	start: {
+		picked?: 'auto' | 'explicit' | 'self';
+		mine?: { generation: number } | null;
+		head?: { generation: number } | null;
+		problem?: string | null;
+	} | null | undefined,
+): string {
+	if (!start) return '';
+	const mine = start.mine ? `你站在第 ${start.mine.generation} 代` : '';
+	if (start.picked === 'auto' && start.head) {
+		return `这一份自动接在这条线的最新点（第 ${start.head.generation} 代）后面`
+			+ `${mine ? `：${mine}，接上去顺序才不会乱` : ''}`;
+	}
+	if (start.picked === 'explicit') return '';
+	if (start.problem) return `这一份只能从你站的这一点往外导：${start.problem}`;
+	return mine ? `从${mine}这一点往外导（这条线的最新点就是你这一点）` : '';
 }
 
 /**
