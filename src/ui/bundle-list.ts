@@ -167,7 +167,7 @@ export class BundleListView {
 		this.headEl.createSpan({
 			text: this.items.length > 0
 				? `已有的同步包：${this.items.length} 个（更新 ${changes} · 完整 ${full}`
-					+ `${unknown > 0 ? ` · 读不出头部 ${unknown}` : ''}）`
+					+ `${unknown > 0 ? ` · 读不出包信息 ${unknown}` : ''}）`
 				: '已有的同步包',
 		});
 		const refreshButton = this.headEl.createEl('button', { text: '重新列出', cls: 'locally-save-mini' });
