@@ -5,9 +5,8 @@ import type { BundleDeletedEntry, BundleHeader, BundleInfo, BundleSource } from 
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
 import { baselineOfBundle, baselineOfFullBundle, listingHashOfFiles } from './baseline';
-import { anchorOfPoint, describeAnchorList, listFullAnchors, pickAnchor, planAutoStart } from './anchor';
+import { describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
 import type { BundleAnchor } from './anchor';
-import { listPointRefsSync, materializePointSync } from './points';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
@@ -166,16 +165,21 @@ export interface ExportOutcome {
 	 * 界面上要写出来：光有世代号对不上号，指纹 + 状态编号才认得出是对方站的哪一点。
 	 */
 	anchor: ExportAnchor | null;
-	/** 这次顺手删掉了哪些旧环（同一环重导的 / 被完整副本取代的，文件名，已排序） */
+	/** 这次顺手删掉了哪些被取代的旧更新包（同一份起点重导的 / 被完整副本取代的，文件名，已排序） */
 	superseded: string[];
 	/**
-	 * 留着没删的更新包，以及为什么（链条上的另一环 / 别的血脉 / 世代不比新包小）。
+	 * 留着没删的更新包，以及为什么（别的起点 / 别的血脉 / 世代不比新包小 / 别的机器导的）。
 	 * 界面上要如实说明 —— 不然用户会以为"清理开关没生效"，或者当成偶发 bug（报过）。
 	 */
 	keptChanges: { name: string; why: string }[];
+	/**
+	 * **该立新完整包了** 的提醒（这一份要搬的字节数超过阈值时才有，其余是 null）：
+	 * 整句由引擎算好（`baselineAdvice`），界面直接显示。
+	 */
+	advice: string | null;
 }
 
-/** 清理旧环的结果：删了哪些、留了哪些（留的要说清原因） */
+/** 清理旧更新包的结果：删了哪些、留了哪些（留的要说清原因） */
 export interface SupersededReport {
 	removed: string[];
 	kept: { name: string; why: string }[];
@@ -184,23 +188,16 @@ export interface SupersededReport {
 /**
  * **起点是怎么定下来的** —— 界面上要说清"这一份为什么从这一点往外导"。
  *
- * 默认那条路（用户拍板："我希望更新有严格顺序，所以应该基于最新基准点"）是**自动接线头**：
- * 应用完整副本回退到老一点之后再导出，接的是这条线的最新点（第 54 代），而不是本机站的
- * 那一点（第 39 代）——否则会从 39 分出一条岔、还会撞上历史上用过的号。
+ * 0.14 起只有两种来路（"自动接线头"那套随链条模型一起去掉了，
+ * 见 `docs/只有完整包才算基准点-实施计划.md`）：
+ * - `self`：**我站的那一份完整包**（`state.bundle.fullHash`）—— 默认，也是绝大多数情况；
+ * - `override`：调用方合成的那一点（"应用前先把本机改动存成包"那一趟）。
+ * 用户在下拉里明确指定起点时，`anchor` 里那份就是指定的那一份（`picked` 记 `explicit`）。
  */
 export interface ExportStartInfo {
-	/**
-	 * - `auto`：自动接在这条线的**最新点**后面（本机落在后面时）；
-	 * - `explicit`：用户在下拉里指定了起点；
-	 * - `self`：从**我站的这一点**往外导（我就是线头，或者线头接不上 —— 见 `problem`）。
-	 */
-	picked: 'auto' | 'explicit' | 'self';
-	/** 我站的这一点（还没有基准点时 null） */
+	picked: 'self' | 'explicit' | 'override';
+	/** 我站的那一份完整包（还没站上过基准点时 null） */
 	mine: { generation: number; hash: string; name: string } | null;
-	/** 自动接上的那个线头（`picked === 'auto'` 时才有） */
-	head: { generation: number; hash: string; name: string } | null;
-	/** 为什么没接线头（正常时为 null）：中间缺几份包、那份完整副本不在目录里… */
-	problem: string | null;
 }
 
 /** 更新包基于的那份完整副本（界面上把"第几代 + 基准指纹 + 状态编号 + 包名"都写出来） */
@@ -223,13 +220,48 @@ export interface ExportAnchor {
 	targetGeneration: number;
 	/** 终点那份完整副本的基准指纹（只有差量包有） */
 	targetHash: string | null;
-	/** 起点是怎么定下来的（自动接线头 / 用户指定 / 从我站的这一点） */
+	/** 起点是怎么定下来的（我站的那一份完整副本 / 用户指定 / 合成的那一点） */
 	start?: ExportStartInfo;
 }
 
 /** 文件名里不能有的字符换成下划线（仓库名可能含 : / 之类） */
 function safeName(name: string): string {
 	return name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'vault';
+}
+
+/**
+ * 每个文件最多记几个"我发出去过的版本"（见 `history` 那段）。
+ *
+ * 为什么要有上限：新模型下一份完整包会被用很久（累积到该换基准为止），
+ * 每导一次更新包就给每个改过的文件加一条记录 —— 不封顶的话状态文件会一直长
+ * （它每次读写都要整个过一遍）。留最近这几版就够：对方手里多半是最新的那一两版，
+ * 认不出来时也只是一次多余的备份（进回收目录），不是丢数据。
+ */
+const HISTORY_LIMIT = 8;
+
+/**
+ * **该立新完整包了**（用户拍板要的提醒）—— 更新包是"自起点那份完整包累积"的，
+ * 攒大了就该换基准：这是新模型里唯一需要用户做的维护动作，也是包会变大的唯一节制阀
+ * （换了基准，之后每一份更新包都从新完整包重新算起）。
+ *
+ * 看的是**这一份实际要搬的字节数**（＝自起点那份完整包以来的改动量），不是目录总大小。
+ * 差量包不提醒（它的内容由两份完整包决定，用户就是奔着那个终点去的）；
+ * `limitMb <= 0` ＝ 关掉提醒（默认值见 `DEFAULT_SETTINGS.bundleSizeWarnLimit`）。
+ * 返回整句，界面直接显示。
+ */
+export function baselineAdvice(
+	mode: BundleMode,
+	checkpoint: boolean,
+	limitMb: number,
+	payloadBytes: number,
+	anchorGeneration: number | null,
+): string | null {
+	if (mode !== 'changes' || checkpoint) return null;
+	if (!(limitMb > 0)) return null;
+	const mb = payloadBytes / (1024 * 1024);
+	if (mb < limitMb) return null;
+	return `这一份更新包要搬 ${mb.toFixed(1)} MB（自第 ${anchorGeneration ?? '?'} 代那份完整副本以来攒下的改动）——`
+		+ `已经超过 ${limitMb} MB 了：建议顺手导一份新的完整副本当基准，之后的更新包会从它重新算起，小得多`;
 }
 
 /**
@@ -324,11 +356,11 @@ export function describeLocalChanges(
 interface BundleWork {
 	state: PluginState;
 	inventory: Inventory;
-	/** 上次导出（任何类型）时仓库的样子：每个条目的 `base` —— 接收方最可能就停在这个版本 */
+	/** 上次导出 / 应用时仓库的样子：用来记"我发出去过哪几版"（`history`） */
 	previous: Record<string, FileRecord>;
-	/** 这次更新包**从哪个状态**开始（一份完整副本）；还没立过基准时是 null */
+	/** 这次更新包**从哪一份完整包**开始；还没立过基准时是 null */
 	anchor: BundleAnchor | null;
-	/** 起点是怎么定下来的（自动接线头 / 用户指定 / 从本机这一点）—— 界面上要说清 */
+	/** 起点是怎么定下来的（我站的那一份 / 用户指定 / 合成的那一点）—— 界面上要说清 */
 	start: ExportStartInfo | null;
 	/**
 	 * 这次更新包**到哪个状态为止**：
@@ -337,14 +369,11 @@ interface BundleWork {
 	 */
 	target: BundleAnchor | null;
 	/**
-	 * 条目 / 删除项的 `base` 从哪儿取：
-	 * - `anchor`：**这次明确指定了起点**（`options.baseGeneration`）—— 对方就站在那份完整副本上，
-	 *   它手里是这个文件的哪一版，只有那份清单知道（拿"我上次导出的样子"当 base 会把
-	 *   对方正常的旧版本误判成"它也改过"，满屏冲突副本）；
-	 * - `previous`：默认那条路 —— 接收方**最可能**停在我上次导出的那一版上（原行为，不动）。
+	 * 自起点那份完整包以来、我发出去过的那些版本（每个文件一串）。
+	 *
+	 * 用处：对方停在其中某一版上时认得出"这是对方发过的，不是我改的"——
+	 * 新模型下"接收方停在起点与最新之间某一版"是常态（他应用过上一份更新包）。
 	 */
-	baseFrom: 'anchor' | 'previous';
-	/** 自上次完整包以来各文件经历过的中间版本 */
 	history: Record<string, FileRecord[]>;
 	picked: string[];
 	deleted: BundleDeletedEntry[];
@@ -358,17 +387,19 @@ interface BundleWork {
 /**
  * 这次更新包**从哪个状态**开始（**只读**）。
  *
- * 默认（没指定）＝ 状态里那份最新的，行为与以前完全一致，一个包都不多读。
+ * 默认（没指定）＝ **我站的那一份完整包**（`state.bundle.fullHash`）：磁盘上还找得到它
+ * 就把那份读回来 —— 报告里"起点 · 状态 xxxx"写的是**它**的编号，状态里那份只是"我记得的样子"。
  * 指定了指纹时去**磁盘上**把那份完整包找回来（完整副本是还原点，一直躺在 `full/` 里）；
  * 找不到就报错 —— 换成"最新那份"会让包头部记错基准，接收方按它比对只会得出错误结论。
  */
 async function resolveAnchor(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
 	// 调用方合成的起点（"我马上要应用的那份包送到的那一点"）：磁盘上没有它，直接用它
 	if (options.anchorOverride) return options.anchorOverride;
+	const mineHash = state.bundle?.fullHash ?? null;
 	const fromState: BundleAnchor | null = state.bundle?.fullFiles
 		? {
 			generation: state.bundle.fullGeneration ?? state.generation,
-			hash: state.bundle.fullHash ?? null,
+			hash: mineHash,
 			files: state.bundle.fullFiles,
 			emptyDirs: [],
 			name: state.bundle.fullFile ?? '（状态里记着的那份完整副本，磁盘上已找不到）',
@@ -379,7 +410,15 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 		: null;
 
 	const requested = options.baseFingerprint ?? null;
-	if (requested === null) return fromState;
+	// 默认：**我站的那一份完整包**。磁盘上还找得到它就把那份读回来 ——
+	// 报告里"起点 · 状态 xxxx"要写的是**它**的编号（状态里那份只是"我记得的样子"）。
+	if (requested === null) {
+		if (mineHash) {
+			const found = pickAnchor(await listFullAnchors(options.outDir, state.lineage), mineHash);
+			if (found) return found;
+		}
+		return fromState;
+	}
 	// 要的就是我自己这份基准：直接用状态里的清单（那份包文件被挪走 / 删了也照样能算）
 	if (fromState && fromState.hash === requested) return fromState;
 
@@ -387,39 +426,32 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 	const found = pickAnchor(anchors, requested);
 	if (found) return found;
 
-	// 链条上的点（某份更新包落出的那一点）：清单沿链条叠加算出来
-	const point = materializePointSync(options.outDir, state.lineage, requested);
-	if (point) return anchorOfPoint(point);
-
-	const refs = listPointRefsSync(options.outDir, state.lineage);
 	throw new Error(
 		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一个状态。`
-		+ `${describeAnchorList([...anchors, ...refs])}。`
+		+ `${describeAnchorList(anchors)}。`
 		+ '先把那份包拷进来（或从回收站捞回来），'
-		+ '或者把设置里「从哪个状态开始」改回「自动」',
+		+ '或者把设置里「从哪个状态开始」改回「自动：我站的那一份完整包」',
 	);
 }
 
-/** `resolveStart` 的结论：拿哪一点当起点、base 从哪儿取、界面上怎么说 */
+/** `resolveStart` 的结论：拿哪一份完整包当起点、界面上怎么说 */
 interface StartResolution {
-	anchor: BundleAnchor | null;
-	/** 条目的 `base` 取起点清单里的版本（起点不是我站的这一点时必须这样） */
-	fromAnchor: boolean;
+	anchor: BundleAnchor;
 	info: ExportStartInfo;
 }
 
 /**
- * 这次更新包**从哪一点往外导**（只读）—— 三种来路，一处说了算：
+ * 这次更新包**从哪一份完整包往外导**（只读）—— 三种来路，一处说了算：
  *
  * 1. **合成的起点**（`anchorOverride`：应用前"先把我的改动存成包"那一趟）；
- * 2. **用户在下拉里指定了起点**（`baseFingerprint`）：走老那条路，找不到就报错；
- * 3. **默认：自动接在这条线的最新点后面**（用户拍板："我希望更新有严格顺序，
- *    所以应该基于最新基准点"）。我本来就是线头时 `planAutoStart` 给出 `head: null`，
- *    于是与老行为**完全一样**（从我站的这一点往外导）；只有"我落在后面"时才接上线头 ——
- *    回退到第 39 代之后再导出，接的是这条线的最新点（第 54 代），不是从 39 分出一条岔。
+ * 2. **用户在下拉里指定了起点**（`baseFingerprint`）：找不到就报错，绝不悄悄换一份
+ *    （包头部记的基准决定接收方怎么比对，偷偷换一份等于骗它）；
+ * 3. **默认：我站的那一份完整包**（`state.bundle.fullHash`）。
  *
- * 线头算不出来（中间那几环被清掉、那份完整副本不在目录里）时**退回我站的这一点**，
- * 并把原因放进 `info.problem`（界面上如实说一句）；号仍然从高水位往后发，不会撞号。
+ * "自动接在这条线的最新点后面"（0.13 那条"严格顺序"）随链条模型一起去掉了：
+ * 点只有完整包了，没有"线头"可接 —— 从那份完整副本往外导时，
+ * 新号仍然从高水位往后发（回退之后也不会撞历史上用过的号），
+ * 见 `docs/只有完整包才算基准点-实施计划.md`。
  */
 async function resolveStart(options: ExportOptions, state: PluginState): Promise<StartResolution> {
 	const mine = state.bundle?.fullHash
@@ -432,49 +464,17 @@ async function resolveStart(options: ExportOptions, state: PluginState): Promise
 
 	// ① 合成的起点：磁盘上没有它，直接用它（界面上不显示"起点是怎么来的"）
 	if (options.anchorOverride) {
-		return {
-			anchor: options.anchorOverride,
-			fromAnchor: true,
-			info: { picked: 'self', mine, head: null, problem: null },
-		};
+		return { anchor: options.anchorOverride, info: { picked: 'override', mine } };
 	}
-	// ② 明确指定了起点：找不到就报错，绝不悄悄换一份（包头部记的基准决定接收方怎么比对）
-	if (options.baseFingerprint !== null && options.baseFingerprint !== undefined) {
-		return {
-			anchor: await resolveAnchor(options, state),
-			fromAnchor: true,
-			info: { picked: 'explicit', mine, head: null, problem: null },
-		};
+	const explicit = options.baseFingerprint !== null && options.baseFingerprint !== undefined;
+	const anchor = await resolveAnchor(options, state);
+	if (!anchor) {
+		throw new Error(
+			'还没导出过完整副本：更新包是"从某个状态到某个状态"的差量，没有起点就没法算。'
+			+ '请先用「完整副本」导一次（对方也必须先应用它）',
+		);
 	}
-
-	// ③ 默认：接在这条线的最新点后面
-	const plan = await planAutoStart(options.outDir, state);
-	if (plan.head && plan.head.hash !== mine?.hash) {
-		try {
-			const anchor = await resolveAnchor({ ...options, baseFingerprint: plan.head.hash }, state);
-			if (anchor) {
-				return { anchor, fromAnchor: true, info: { picked: 'auto', mine: plan.mine, head: plan.head, problem: null } };
-			}
-		} catch {
-			// 线头那一点算不出来（缺环 / 缺那份完整副本）：往下走，退回"我站的这一点"
-		}
-		return {
-			anchor: await resolveAnchor(options, state),
-			fromAnchor: false,
-			info: {
-				picked: 'self',
-				mine: plan.mine,
-				head: null,
-				problem: plan.problem
-					?? '这条线的最新点算不出来（中间那几份包不在包目录里）：这一份只能从你站的这一点往外导',
-			},
-		};
-	}
-	return {
-		anchor: await resolveAnchor(options, state),
-		fromAnchor: false,
-		info: { picked: 'self', mine: plan.mine, head: null, problem: plan.problem },
-	};
+	return { anchor, info: { picked: explicit ? 'explicit' : 'self', mine } };
 }
 
 /**
@@ -490,14 +490,10 @@ async function resolveTarget(options: ExportOptions, state: PluginState): Promis
 	const found = pickAnchor(anchors, requested);
 	if (found) return found;
 
-	// 链条上的点：内容散在链条上好几份包里，`sources` 会告诉导出那条路每个文件去哪取
-	const point = materializePointSync(options.outDir, state.lineage, requested);
-	if (point) return anchorOfPoint(point);
-
-	const refs = listPointRefsSync(options.outDir, state.lineage);
+	// 链条上的点（某份更新包落出的那一点）不再是状态 —— 0.14 起只有完整副本能当终点
 	throw new Error(
-		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一个状态。`
-		+ `${describeAnchorList([...anchors, ...refs])}。`
+		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一个完整副本。`
+		+ `${describeAnchorList(anchors)}。`
 		+ '先把那份包拷进来（或从回收站捞回来），'
 		+ '或者把设置里「到哪个状态为止」改回「最新（当前仓库）」',
 	);
@@ -515,27 +511,32 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	const inventory = options.inventory
 		?? await scanTree(options.vaultRoot, { exclude, skipTopLevelDirs: [VAULT_TRASH_DIR] });
 
-	/** 上次导出（任何类型）时仓库的样子：用来当每个文件的 base —— 接收方最可能就是这个版本 */
+	/**
+	 * 上次导出 / 应用时仓库的样子（`state.bundle.files`）。
+	 *
+	 * 现在它只用来记**中间版本**（`history`）：我上一次发出去的是哪一版要带上，
+	 * 对方停在其中某一版上时才认得出"这是对方发过的，不是我改的"（见下面 base 那段）。
+	 */
 	const previous = state.bundle?.files ?? {};
 	/**
-	 * 这次更新包**从哪一点往外导**（只读）。默认是**自动接在这条线的最新点后面**：
-	 * 我本来就是线头时与老行为完全一样（从我站的这一点往外导）；只有"我落在后面"
-	 * （回退过 / 没跟上）时才不同 —— 见 `resolveStart` 与 `anchor.ts` 的 `planAutoStart`。
+	 * 这次更新包**从哪一份完整包往外导**（只读）。默认 ＝ **我站的那一份**
+	 * （`state.bundle.fullHash`）—— 0.14 起没有"自动接线头"那回事了，见 `resolveStart`。
 	 */
 	const start = mode === 'changes' ? await resolveStart(options, state) : null;
-	const anchor = start?.anchor ?? null;
+	const anchor: BundleAnchor | null = start?.anchor ?? null;
 	/** 这次更新包到哪个状态为止（null ＝ 最新，也就是当前仓库） */
 	const target = mode === 'changes' ? await resolveTarget(options, state) : null;
-	/** 自上次完整包以来各文件经历过的中间版本 */
+	/** 自起点那份完整包以来、我发出去过的那些版本（每个文件一串，见下面 `nextHistory`） */
 	const history = state.bundle?.history ?? {};
 	/**
-	 * 条目 / 删除项的 `base` 从哪儿取：
-	 * - `anchor`：**明确指定了起点**（下拉里选的 / 自动接上的线头 / 合成的起点）—— 接收方就站在
-	 *   那一点上，它手里是这个文件的哪一版只有那份清单知道（拿"我上次导出的样子"当 base 会把
-	 *   对方正常的旧版本误判成"它也改过"，满屏冲突副本）；
-	 * - `previous`：默认那条路（起点就是我站的这一点）—— 接收方**最可能**停在我上次导出的那一版上。
+	 * 条目 / 删除项的 `base` **一律取起点那份完整包里的版本**：
+	 * 接收方就站在那份完整包上（`checkAncestor` 要求包的起点与本机基准点严格相等），
+	 * 它手里是这个文件的哪一版，只有那份清单知道。
+	 *
+	 * 拿"我上次导出的样子"当 base 会怎样（这个坑踩过）：对方正常的旧版本被判成"它也改过"，
+	 * 满屏冲突副本。至于它停在**我发过的某一版**上（应用过上一份更新包，这是新模型下的常态），
+	 * 由条目的 `history` 负责认出来 —— 见 `apply.ts` 的 `matchesHistory`，不靠 base。
 	 */
-	const baseFrom: 'anchor' | 'previous' = start?.fromAnchor === true ? 'anchor' : 'previous';
 	const anchorFiles = anchor?.files ?? null;
 
 	if (mode === 'changes' && !anchorFiles) {
@@ -577,20 +578,17 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 			pushDeleted(file, atAnchor);
 		}
 	} else {
-		// 成员：自**起点那一点**以来变过的 —— 默认起点就是"我站的这个基准点"，
-		// 于是这一环只装自上一环以来的新改动（链条就是这么一环一环往外长的）。
-		// 明确指定了老起点时，"变过"相对那份老清单算，这一份就把中间那几代一起带上（赶超包）。
+		// 成员：**自起点那份完整包以来变过的**（新模型下这一份就是累积的：
+		// 中间发过几份更新包也不会变薄，换基准靠"导一份新完整副本"来收口）。
 		for (const [file, record] of inventory.files) {
 			if (skip.has(file)) continue;
 			const atAnchor = anchorFiles?.[file];
 			if (!atAnchor || !sameRecord(record, atAnchor, DEFAULT_MTIME_TOLERANCE_MS)) picked.push(file);
 		}
-		// 删除清单同理：自起点以来"没了"的文件
+		// 删除清单同理：自起点那份完整包以来"没了"的文件（站在起点的接收方手里就是起点那一版）
 		for (const [file, atAnchor] of Object.entries(anchorFiles ?? {})) {
 			if (inventory.files.has(file)) continue;
-			// base：站在起点的接收方手里就是起点那一版；默认那条路仍用"上次导出时的样子"
-			// （更贴近接收方手里的版本），没有就用完整包时的
-			pushDeleted(file, baseFrom === 'anchor' ? atAnchor : (previous[file] ?? atAnchor));
+			pushDeleted(file, atAnchor);
 		}
 	}
 	picked.sort();
@@ -599,7 +597,7 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）
 	const existing = target ? await findExistingCheckpoint(options, state, anchor, target) : null;
 
-	return { state, inventory, previous, anchor, start: start?.info ?? null, target, baseFrom, history, picked, deleted, existing };
+	return { state, inventory, previous, anchor, start: start?.info ?? null, target, history, picked, deleted, existing };
 }
 
 /**
@@ -653,8 +651,13 @@ export interface BundleExportPreview {
 	targetName: string | null;
 	/** 这一份"从 a 到 b"的包已经导过了（同名文件还在）：不会重复生成 */
 	existing: string | null;
-	/** 起点是怎么定下来的（自动接线头 / 用户指定 / 从本机这一点） */
+	/** 起点是怎么定下来的（我站的那一份完整包 / 用户指定 / 合成的那一点） */
 	start: ExportStartInfo | null;
+	/**
+	 * **该立新完整包了**：这一份要搬的字节数已经超过阈值（见设置里的 `bundleSizeWarnLimit`）。
+	 * 引擎把整句算好，界面直接显示；没超过或关掉了提醒时是 null。
+	 */
+	advice: string | null;
 	/** 算不出来时的原因（例如"还没导过完整副本"）：预览照样打开，把原因写在界面上 */
 	problem?: string;
 }
@@ -686,6 +689,13 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			targetName: work.target?.name ?? null,
 			existing: work.existing,
 			start: work.start,
+			advice: baselineAdvice(
+				options.mode,
+				work.target !== null,
+				options.settings.bundleSizeWarnLimit,
+				bytes,
+				work.anchor?.generation ?? null,
+			),
 		};
 	} catch (error) {
 		return {
@@ -702,6 +712,7 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			targetName: null,
 			existing: null,
 			start: null,
+			advice: null,
 			problem: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -711,7 +722,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const started = Date.now();
 	const { mode } = options;
 	const work = await prepareBundle(options, mode);
-	const { state, inventory, previous, anchor, start, target, baseFrom, history, picked, deleted, existing } = work;
+	const { state, inventory, previous, anchor, start, target, history, picked, deleted, existing } = work;
 	/** 终点是一份完整副本（差量包）：内容取自那份包，结束时到达它的世代 */
 	const checkpoint = target !== null;
 	/**
@@ -757,57 +768,79 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		? stateIdInfo !== null && stateIdInfo.id !== state.stateId.id
 		: hasLocalChanges(state, inventory);
 	/**
-	 * **手里的包就是这个血脉的账本**：同一份内容报过的最小号 —— 状态里那个号被旧版本撑大了就照它改回来。
+	 * **手里的包就是这个血脉的账本**：同一份完整包报过的最小号 —— 状态里那个号被旧版本撑大了就照它改回来。
 	 */
 	const smallestForPoint = await smallestGenerationOf(options.outDir, state.lineage, state.bundle?.fullHash ?? null);
 	/**
-	 * **同一份内容只有一个世代号** —— 状态里那个号可能已经被旧版本撑大了，先照手里的包改回来。
+	 * **我站的那一份完整包只有一个世代号** —— 状态里那个号可能已经被旧版本撑大了，先照手里的包改回来。
 	 *
 	 * 为什么会撑大（用户报的）：他那边把「更新包从哪个状态开始」钉在第 39 代（对面还在 39），
 	 * 于是**每次自动留包都重导一遍同一份内容**，而更新包是无条件 `+1` 的 ——
 	 * 39→48 / 39→49 / 39→50 三份包状态编号一模一样、世代号却一路涨，
 	 * 对面应用完永远对不上（"内容没变代数就不应该变，但实际每次导出包就多一代"）。
 	 *
-	 * 手里这些包就是"内容 ↔ 世代号"的账本：谁报过**我这站这一点**（`fullHash`）、报的是几代，
-	 * 取最小的那个 —— 完整副本报的是它自己那一刻，更新包报的是它的落点，两边都算数。
+	 * **只改 `fullGeneration`（基准那一代），绝不动 `state.generation`（内容是第几版）**：
+	 * 0.14 起这两件事是分开的 —— 更新包不推进基准，所以"我站的完整包是第 1 代"与
+	 * "我这边的内容已经是第 40 版"完全可以同时成立。照旧代码把 `state.generation` 也拉回
+	 * 第 1 代，就等于把内容版本号改小了（实测会当场把两边的号搞乱）。
 	 */
 	if (!frozen && state.bundle?.fullHash) {
 		const known = smallestForPoint;
-		if (known !== null && known < state.generation) {
+		const mineBase = state.bundle.fullGeneration ?? state.generation;
+		if (known !== null && known < mineBase) {
 			options.log.debug(
-				`世代号改回第 ${known} 代：手里有包报过同一份内容（状态里记的是第 ${state.generation} 代；`
-				+ '同一份内容只能有一个号，见 export.ts 里那段）',
+				`基准世代号改回第 ${known} 代：手里有包报过同一份完整包（状态里记的是第 ${mineBase} 代；`
+				+ '同一份东西只能有一个号，见 export.ts 里那段）',
 			);
-			state.generation = known;
 			state.bundle.fullGeneration = known;
 			// 高水位也跟着回到真号（它只会被抬高，所以这里只能"不低过已知的真号"）——
 			// 旧版本留下的错号不该继续占着号段
 			raiseGeneration(state, known);
 		}
+		/**
+		 * **内容的号同理，但要拿"内容自己"的指纹去对账**（`landedPoint` ＝ 这一刻我这边的清单）。
+		 *
+		 * 0.14 起"基准的号"与"内容的号"是两回事（更新包不推进基准，"基准第 1 代、内容第 40 版"
+		 * 完全正常），所以**不能拿基准那份完整包的号来顶内容** —— 那会把内容版本号改小。
+		 * 该做的是：手里有包报过**同一个落点清单**（`targetBaselineHash`）时报的是几代，
+		 * 取最小的那个 —— 旧版本"导出更新包无条件 +1"留下的虚高号靠这一步归位
+		 * （用户报过："内容没变代数就不应该变，但实际每次导出包就多一代"）。
+		 */
+		const knownContent = await smallestGenerationOf(
+			options.outDir,
+			state.lineage,
+			listingHashOfFiles(landedPoint),
+		);
+		if (knownContent !== null && knownContent < state.generation) {
+			options.log.debug(
+				`内容的世代号改回第 ${knownContent} 代：手里有包报过同一份内容（状态里记的是第 ${state.generation} 代）`,
+			);
+			state.generation = knownContent;
+			raiseGeneration(state, knownContent);
+		}
 	}
 	/**
-	 * **新内容从第几号往后发**：手里的高水位 ＋ 当前这一点 ＋ **这次要接上去的起点**。
+	 * **新内容从第几号往后发**：手里的高水位 ＋ 当前这一代 ＋ **起点那份完整副本报的号**。
 	 *
 	 * 三样都要看：
 	 * - 高水位：这个血脉里发过的最大号（回退不会把它拉低，见 `sync/state.ts` 的 `maxGeneration`）；
-	 * - `state.generation`：我站的这一点（旧状态文件没有高水位时的兜底）；
-	 * - **`anchor.generation`**：这次接的那一点 —— 回退之后接在线头（第 54 代）后面导出时，
-	 *   新号从 54 往后，而不是从我这个老点（第 39 代）往后。
+	 * - `state.generation`：我这边的内容走到第几版；
+	 * - **`anchor.generation`**：起点那份完整副本的号 —— 我应用过一份更老的完整副本
+	 *   （内容版本往回走了）之后再导出时，新号仍然从高水位往后发，不会撞历史上用过的号。
 	 */
 	const highWater = Math.max(state.maxGeneration ?? 0, state.generation, anchor?.generation ?? 0);
 	/**
 	 * 这一份包结束时到达的世代：
 	 * - 差量包（终点是某份完整副本）＝**那份完整副本记着的那一代**（内容到它为止）；
-	 * - 合成的起点（"应用前存的改动"那一环）＝**它送到的那一点 + 1**（不低于高水位）；
+	 * - 合成的起点（"应用前存的改动"那一份）＝**它送到的那一点 + 1**（不低于高水位）；
 	 * - **仓库自上次导出以来没动过 → 沿用当前这一代**：内容与上次打包时一模一样，
 	 *   它就是同一版内容，一代都不该多占（完整副本如此，**更新包同样如此** ——
 	 *   把起点钉在老状态上时，每次自动留包都会重导同一份内容，见上面 `moved` 那段）。
 	 *   回退之后**什么都不改**就导出时也走这一条：那一份落到的是你已经站着的那个老点，
 	 *   号就是那个老点的号（"把大家带回第 39 代"），不是新占一个号；
-	 * - 其余（仓库动过）＝ **高水位 + 1**：正常情况（我就是线头）它就是"当前代 + 1"，与老行为一致；
-	 *   **回退之后再导出**时它保证两件事：不撞历史上用过的号、接在线头后面 ——
-	 *   回退到第 39 代、接在线头（第 54 代）后面导出的就是「54 → 55」，
-	 *   而不是从 39 分岔的「39 → 40」（用户报的："这样会搞乱更新顺序产生分支"）。
+	 * - 其余（仓库动过）＝ **高水位 + 1**：正常情况它就是"当前代 + 1"；
+	 *   **回退（应用过更老的完整副本）之后再导出**时它保证不撞历史上用过的号 ——
+	 *   用户报过的那一幕（"这样会搞乱更新顺序产生分支"）就是这么来的。
 	 */
 	const targetGeneration = checkpoint
 		? (target?.generation ?? highWater + 1)
@@ -825,7 +858,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			checkpoint,
 			targetGeneration,
 			targetHash: checkpoint ? (target?.hash ?? null) : null,
-			// 起点是怎么定下来的（自动接线头时界面要写清"为什么从这一点往外导"）
+			// 起点是怎么定下来的（我站的那一份完整副本时，界面要写清"这一份是从它算起的"）
 			...(start ? { start } : {}),
 		}
 		: null;
@@ -847,6 +880,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		fileBytes: 0,
 		superseded: [],
 		keptChanges: [],
+		advice: null,
 	});
 
 	if (mode === 'changes' && existing) {
@@ -866,47 +900,21 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	}
 
 	/**
-	 * **自动接线头时"什么都没改" → 不导**（用户拍板的"严格顺序"那条边上的一格）：
-	 * 回退本身不用发新包 —— 把那份完整副本发给对方应用就行（它自带完整清单）；
-	 * 而你这边"自上次导出 / 应用以来一个字都没动"，接在线头后面导只会写出
-	 * "把大家带回那个老点"的重复包，每导一次还重新生成一份。
-	 *
-	 * 只管**自动**选的那条路：用户在下拉里**明确钉住**一个老起点时照旧导出
-	 * （那是"给我一份从那个点到现在的差量"的明确要求，测试 45/48 守着这条）。
-	 */
-	if (mode === 'changes' && !checkpoint && !options.anchorOverride && !moved && start?.picked === 'auto') {
-		options.log.debug('更新包：自动接线头，但本机自上次导出以来没有改动 —— 不重复导出');
-		return emptyOutcome(
-			'你自上次导出以来没有改动：这一份接在线头后面也没新东西可发；'
-			+ '回退本身把那份完整副本发给对方应用就够了'
-			+ '（等你改出东西来再导，那一份会接在这条线的最新点后面）',
-		);
-	}
-
-	/**
-	 * 差量包（终点不是"最新"）：每个文件的内容**取终点那一刻的**，不是当前仓库的。
-	 *
-	 * 两个来源：
-	 * - 终点是**链条上的一个点**（`points.ts` 算出来的）：`sources` 已经逐文件算好
-	 *   "去哪份包的哪一段取" —— 改过的在那一环的包里，没动过的还在起点那份包里；
-	 * - 终点是一份**完整副本**：读一次它的头部拿到负载起点，再按条目的 offset 取。
+	 * 差量包（终点不是"最新"）：每个文件的内容**取终点那一刻的**，不是当前仓库的 ——
+	 * 读一次终点那份包的头部拿到负载起点，再按条目的 offset 取（0.14 起终点只可能是完整副本）。
 	 */
 	let checkpointInfo: BundleInfo | null = null;
 	const checkpointSources = new Map<string, { file: string; offset: number; size: number; mtime: number; hash?: string }>();
 	if (checkpoint && target) {
-		if (target.sources) {
-			for (const [file, where] of target.sources) checkpointSources.set(file, where);
-		} else {
-			checkpointInfo = await readBundleInfo(target.file);
-			for (const entry of checkpointInfo.header.entries) {
-				checkpointSources.set(entry.path, {
-					file: target.file,
-					offset: checkpointInfo.payloadOffset + entry.offset,
-					size: entry.size,
-					mtime: entry.mtime,
-					...(entry.hash ? { hash: entry.hash } : {}),
-				});
-			}
+		checkpointInfo = await readBundleInfo(target.file);
+		for (const entry of checkpointInfo.header.entries) {
+			checkpointSources.set(entry.path, {
+				file: target.file,
+				offset: checkpointInfo.payloadOffset + entry.offset,
+				size: entry.size,
+				mtime: entry.mtime,
+				...(entry.hash ? { hash: entry.hash } : {}),
+			});
 		}
 	}
 
@@ -930,10 +938,9 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		// 循环本身是纯 CPU 的（命中缓存时一个 I/O 都没有），按时间让一帧，界面别僵住。
 		lastYieldAt = await yieldIfDue(lastYieldAt);
 
-		// base：**站在起点的接收方**手里是这一版。默认那条路取"我上次导出时的样子"
-		// （接收方最可能停在那儿）；明确指定了起点时只能取那份清单里的版本 ——
-		// 拿我上次导出的（更新的）那一版当 base，会把对方正常的旧版本误判成"它也改过"。
-		const base = baseFrom === 'anchor' ? anchor?.files[file] : previous[file];
+		// base：**站在起点那份完整包上的接收方**手里就是这一版（新模型下只有这一种）。
+		// 至于它停在我发过的某一版上 —— 由 `history` 认（见 apply.ts 的 matchesHistory）。
+		const base = anchor?.files[file];
 		const baseHash = base ? cachedHash(state, file, base) : null;
 		// 中间版本：更早的那些（跳过包的人停在其中一个）
 		const carried = nextHistory[file] ?? [];
@@ -971,9 +978,16 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			...baseFields,
 		});
 
-		// 这一版导出去之后，它就成了"以前的版本"，记进历史供下一个包使用
-		if (mode === 'changes' && base && !carried.some(item => sameRecord(item, base, DEFAULT_MTIME_TOLERANCE_MS))) {
-			nextHistory[file] = [...carried, { ...base }];
+		// **我上一次发出去的是哪一版**：记进中间版本，下一个包把它带上。
+		//
+		// 带的是 `previous`（我上次导出 / 应用时的样子），**不是 `base`**：
+		// 起点那一版人人都知道（它就在那份完整包里），记它没有意义；
+		// 要认的是"对方手里这一版是我发出去的中间某一版"——新模型下这是常态
+		// （他应用过我从同一份完整包导出的上一份更新包），见 `apply.ts` 的 `matchesHistory`。
+		const sent = previous[file];
+		if (mode === 'changes' && sent && !carried.some(item => sameRecord(item, sent, DEFAULT_MTIME_TOLERANCE_MS))) {
+			const grown = [...carried, { ...sent }];
+			nextHistory[file] = grown.length > HISTORY_LIMIT ? grown.slice(grown.length - HISTORY_LIMIT) : grown;
 		}
 	}
 
@@ -1043,21 +1057,6 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		+ `-${stateLabel}-${bundleId.slice(0, 6)}${BUNDLE_EXT}`,
 	);
 
-	/**
-	 * **这个包一路上经过哪几个基准点**（不含起点与落点）：站在它们上面的机器照样收得下这个包
-	 * （见 `BundleHeader.viaHashes` 与 `apply.ts` 的 `checkAncestor`）。
-	 */
-	const viaHashes = target?.hash && anchor?.hash && target.hash !== anchor.hash
-		? await viaPointsFor(
-			options,
-			state,
-			{ hash: anchor.hash, generation: anchor.generation },
-			targetGeneration,
-			landedPoint,
-			new Set<string>([...sources.map(source => source.path), ...deleted.map(item => item.path)]),
-		)
-		: [];
-
 	const { header } = await writeBundle(
 		file,
 		{
@@ -1077,14 +1076,14 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			baseGeneration: mode === 'changes' ? (anchor?.generation ?? state.generation) : null,
 			targetGeneration,
 			...(baselineHash ? { baselineHash } : {}),
-			// 这个包**送到**哪一点（＝接收方应用完站到的那一点，也是我这次导完站到的那一点）。
-			// 普通更新包与差量包都带上：链条就是靠"上一点的指纹 ＝ 下一个包的 baselineHash +
-			// 每个包的 targetBaselineHash"首尾相接认出来的（`bundle/chain.ts`）。
+			// 这个包**送到**哪个状态（＝接收方应用完该有的样子）。
+			// 差量包：终点那份完整副本的指纹（`targetFullBundle` 告诉接收方"落到的是一份真基准"）；
+			// 普通更新包：落点的清单指纹（`landedPoint`——它不是基准点，只是一个状态）。
+			// 接收方拿它做两件事：认出"这包要送到的地方正好就是我站的这一点"（白跑一趟），
+			// 以及"算一遍落点"那条放行判据（见 `apply.ts` 的 `checkAncestor`）。
 			...(checkpoint
-				? (target?.hash ? { targetBaselineHash: target.hash } : {})
+				? (target?.hash ? { targetBaselineHash: target.hash, targetFullBundle: true } : {})
 				: { targetBaselineHash: freshBaseline }),
-			// **这个包一路上经过哪几个基准点**：站在中间某一点的机器也能收它（见 `BundleHeader.viaHashes`）
-			...(viaHashes.length > 0 ? { viaHashes } : {}),
 			...(stateIdInfo ? { stateId: stateIdInfo } : {}),
 			deleted,
 			emptyDirs,
@@ -1095,36 +1094,48 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	);
 
 	/**
+	 * **该立新完整包了** 的提醒：这一份要搬多少字节自己是知道的（`payloadBytes`）——
+	 * 超过阈值就把整句算好交给界面（导出预览、导出结果、自动留包的状态栏都用它）。
+	 */
+	const advice = baselineAdvice(
+		mode,
+		checkpoint,
+		options.settings.bundleSizeWarnLimit,
+		header.payloadBytes,
+		anchor?.generation ?? null,
+	);
+
+	/**
 	 * 包写成功了才推进世代与基准。
 	 *
 	 * **不推进本机（`frozen`）的两趟**：差量包（它代表的不是我现在的仓库 —— 内容是 b 那一刻的），
-	 * 以及"应用前先把本机改动存成包"那一趟（存完还要去应用对方的包，落点是对方那一点）。
+	 * 以及"应用前先把本机改动存成包"那一趟（存完还要去应用对方的包，落点由那份包决定）。
 	 * 这两趟都是：世代不动、基准不动、状态编号不动、欠对方的那笔回传也不结清。
 	 */
 	if (!frozen) {
 		/**
-		 * **基准点跟着这次导出往前走**（见 `landedPoint`）：我手里现在就是这一点，
-		 * 下一个包自然"从这一点往外延伸"（＝只有我上次导出之后的新改动）。
+		 * **点只在完整包上动**（0.14 的硬规矩，见 `docs/只有完整包才算基准点-实施计划.md`）：
+		 * 更新包**不产生新点** —— 导完它，我照样站在起点那份完整包上，
+		 * 下一份包还是从那份完整包往外算（所以它是累积的：想收口就导一份新完整包）。
 		 *
-		 * 这一点的身份是 **"可能的基准点"**：包还没被对方合并，链条上还不能算数
-		 * （`pointConfirmed: false`）。对方应用之后，它下次发来的包会把这一点报成自己的基准
-		 * （`baselineHash`）—— 那一刻它就成了**确认的基准点**（`apply.ts` 里翻成 true）。
+		 * 内容那一半照旧每次都前进：`files`（两边都见过的那一份）、`history`（我发过哪几版）、
+		 * `dirs`、世代号与状态编号 —— 只有"我站的那一份完整包"这几样不跟着更新包走。
 		 *
-		 * 为什么不能像以前那样"导出更新包不动基准"：那样下一个包又从头累积一遍，
-		 * 包只会越滚越大（用户报的就是这个），链条也就永远长不出来。
+		 * 为什么不能像链条时代那样"导出更新包也把点往前推"：那样点就不再是完整包，
+		 * 又会冒出一堆没有包文件的"中间点"，正是这次要砍掉的东西。
 		 *
-		 * 导完整包 ＝ 重新立一个点：更新包的中间版本记录一起清零
+		 * 导完整包 ＝ 重新立一个点：中间版本记录一起清零
 		 * （这正是"包会越滚越大"的节制阀，所以完整包不是可有可无的）。
 		 */
+		const keepBase = mode === 'full' ? null : state.bundle;
 		state.bundle = {
 			lastExport: now,
 			files: landedPoint,
-			fullFiles: landedPoint,
-			fullGeneration: targetGeneration,
-			fullHash: freshBaseline,
-			// 界面上要能说清"我站在哪一点上"：刚写的这份包就是那一点的来处
-			fullFile: path.basename(file),
-			pointConfirmed: false,
+			fullFiles: keepBase?.fullFiles ?? landedPoint,
+			fullGeneration: keepBase?.fullGeneration ?? targetGeneration,
+			fullHash: keepBase?.fullHash ?? freshBaseline,
+			// 界面上要能说清"我站在哪一份完整包上"
+			fullFile: keepBase?.fullFile ?? path.basename(file),
 			history: mode === 'full' ? {} : nextHistory,
 			// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
 			dirs: [...inventory.dirs],
@@ -1195,6 +1206,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		anchor: anchorReport,
 		superseded,
 		keptChanges: prune.kept,
+		advice,
 	};
 }
 
@@ -1228,66 +1240,6 @@ function landedPointOf(
 }
 
 /**
- * **哪些点"在这个包的覆盖范围里"** —— 站在它们上面的机器收得下这个包（填进头部 `viaHashes`）。
- *
- * 判据是**内容**，不是世代号、也不只是来路（踩过：中间隔了一份完整副本之后，来路就断了 ——
- * 用户实测"39→53，再导一份完整副本成了 54，重导 39→54 给站在 53 的机器，被拒"）：
- *
- * > 候选点 P 里凡是"P 与落点不一样"的路径，都必须是**这一包裹住的**路径（进包的条目或点名的删除）。
- *
- * 那样 P 应用完正好落成落点（不一样的那些都被包换掉了，一样的一个没动）。反过来：
- * - **兄弟包**（同一个起点、另一条支路）过不了：它动过的路径不在这一包的名单里；
- * - 候选只取**世代夹在起点与落点之间**的点，而且只读清单（`materializePointSync` 不读负载），
- *   所以这一步只是几次头部叠加，不慢。
- */
-async function viaPointsFor(
-	options: ExportOptions,
-	state: PluginState,
-	anchor: { hash: string; generation: number },
-	targetGeneration: number,
-	/** 落点清单（＝接收方应用完该有的样子） */
-	landedPoint: Record<string, FileRecord>,
-	/** 这一包裹住的路径：进包的条目 ＋ 点名的删除 */
-	covered: ReadonlySet<string>,
-): Promise<string[]> {
-	const via: string[] = [];
-	const seen = new Set<string>();
-	for (const ref of listPointRefsSync(options.outDir, state.lineage)) {
-		if (ref.hash === anchor.hash || seen.has(ref.hash)) continue;
-		seen.add(ref.hash);
-		// 先按世代筛一道（读清单不便宜）：只有夹在起点与落点之间的才可能是"路上"的点
-		if (!(ref.generation > anchor.generation && ref.generation < targetGeneration)) continue;
-		const point = materializePointSync(options.outDir, state.lineage, ref.hash);
-		if (!point) continue;
-		if (isOnTheWay(point.files, landedPoint, covered)) via.push(ref.hash);
-	}
-	return via;
-}
-
-/**
- * **P 是不是"在这一包的覆盖范围里"**：P 与落点不一样的每一条路径，都必须是这一包裹住的。
- *
- * 一样的不必动；不一样的必须进包（条目）或点名删掉 —— 这样 P 应用完正好落成落点，
- * 严格镜像的前提（"送到的状态是确定的"）才成立。
- */
-function isOnTheWay(
-	point: Record<string, FileRecord>,
-	landed: Record<string, FileRecord>,
-	covered: ReadonlySet<string>,
-): boolean {
-	for (const [path, record] of Object.entries(point)) {
-		const atTarget = landed[path];
-		if (atTarget && sameRecord(record, atTarget, DEFAULT_MTIME_TOLERANCE_MS)) continue;
-		if (!covered.has(path)) return false;
-	}
-	for (const path of Object.keys(landed)) {
-		if (point[path]) continue; // 上面比过了
-		if (!covered.has(path)) return false;
-	}
-	return true;
-}
-
-/**
  * **同一份内容，手里的包报的是第几代**（取最小的那个）；说不出就是 `null`。
  *
  * 用在哪：`exportBundle` 开头那段"世代号被撑大了就改回来"。判据是**内容本身**：
@@ -1295,7 +1247,7 @@ function isOnTheWay(
  * - **更新包**：头部写着"我落到哪一点"（`targetBaselineHash`）与那一代 → 同一个落点就是同一份内容。
  *
  * 只认**同一条血脉**的包（别的机器导的不算账）；读不出头部的一律跳过（不是我们的包 / 传坏了）。
- * 包目录里通常只有几份（清理规则会去掉多余的环），所以这一步就是读几个文件的尾部，不慢。
+ * 包目录里通常只有几份（清理规则会把同一份起点的旧包去掉），所以这一步就是读几个文件的尾部，不慢。
  *
  * （"新内容发第几号"是另一件事，看 `maxGeneration` 那条高水位 —— 别混在一起：
  *   乱塞外部包的数字会让本机的号虚高，把"比我新的包不删"那道闸门顶穿。）
@@ -1420,26 +1372,29 @@ export async function parkLocalChangesFor(
 /**
  * 删掉被新包**完全取代**的旧更新包。
  *
- * **链条模型（0.11 起）**：更新包是**基准点链条上的一环**（"从哪一点 → 落到哪一点"），
- * 所以默认**一环都不删** —— 删了它，还站在那一环起点的机器就接不上来了（"中间断了"）。
- * 只有下面这两种情况才算真的被取代：
+ * **0.14 的"只留"规则**（用户拍板："更新包只留从完整包到完整包，或从完整包到最新状态的，
+ * 防止出错"）：一份更新包永远是**相对某一份完整副本**算出来的累积差量，所以
+ * **同一份起点、同一形态**的旧包被新包完全说尽了 —— 留着只会让人犯迷糊（"我该发哪一份？"），
+ * 也正是"要管理一堆包"的来源。于是：
  *
- * - **完整副本**：它是完整清单，谁都能取代（换基准那条路；站在老点上的机器直接应用它就行）；
- * - **同一环**（起点与落点两个指纹都一样：同一段区间重导了一遍）→ 旧的留着没有意义。
+ * - **完整副本**：它是完整清单，谁都能取代（换基准那条路；站在老起点上的机器直接应用它就行）；
+ * - **同一份起点 ＋ 同一形态（都是"到最新状态"）＋ 我自己导的** → 旧的退休；
+ * - **同一份起点 ＋ 同一个终点完整副本**（同一段区间重导了一遍）→ 旧的退休。
  *
  * 其余一律留着，并说明为什么（`kept`）：悄悄留着会让人以为"清理没生效"，
- * 或者当成偶发 bug（用户报过：同一个操作第一遍没清、第二遍清了）。
+ * 或者当成偶发 bug（用户报过：同一个操作第一遍没清、第二遍清了）。特别是
+ * **另一台机器从同一份完整副本导出来的那一份**：那装的是**它那一半改动**，删了就丢数据。
  *
  * 只删**确定**能删的，条件缺一不可：
  * - 同一个 `changes` 目录里的 `.lsave`（别的目录不碰）；
  * - 是**更新包**（完整包不碰：那是你的还原点）；
- * - 同一条血脉（`lineage` 一致）—— 别的机器导的包不动；
+ * - 同一条血脉（`lineage` 一致）—— 别的血脉的包不动；
  * - 世代**严格更小**；而且不是刚写出来的那个。
  *
  * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导完整包、再导更新包，
  * 不排除它的话，用户明明要了两个，最后只剩完整包一个。
  *
- * 内容安全性：删掉的那一份，内容必定还在别处（完整清单里，或同一环的新包里）；
+ * 内容安全性：删掉的那一份，内容必定还在别处（完整清单里，或同一份起点的新包里）；
  * 读不出头部、或者任何一条对不上的，一律留着（宁可多留，不可误删）。
  */
 async function removeSupersededChanges(
@@ -1452,9 +1407,9 @@ async function removeSupersededChanges(
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
 	keepPaths.add(path.resolve(keep));
-	/** 这一环：我从哪一点来（完整副本免这一条：它是完整清单，谁都能取代） */
+	/** 这一份从哪一份完整副本来（完整包免这一条：它是完整清单，谁都能取代） */
 	const myBase = header.mode === 'full' ? null : baselineOfBundle(header);
-	/** 落到哪一点（旧版更新包没记 → null，那就只按"起点 ＋ 世代"认同一环） */
+	/** 送到哪个状态（旧版更新包没记 → null，那就只按"起点 ＋ 世代"认同一份） */
 	const myTarget = header.mode === 'full' ? null : (header.targetBaselineHash ?? null);
 	const removed: string[] = [];
 	const kept: { name: string; why: string }[] = [];
@@ -1471,26 +1426,78 @@ async function removeSupersededChanges(
 		if (other.mode !== 'changes') continue;
 		// 到这儿它就是一个"看着该被取代"的更新包了：没删就得说清为什么
 		if (other.lineage !== header.lineage) {
-			kept.push({ name: item.name, why: '不是同一份基准线上的包（多半是另一台机器导的）' });
+			kept.push({ name: item.name, why: '不是同一条血脉的包（多半是另一台机器另立的基准）' });
 			continue;
 		}
 		/**
-		 * **链条模型（0.11 起）：更新包不再"越攒越大的那一份"，而是链条上的一环一环。**
-		 *
-		 * 每一环都是"从某一个基准点 → 落到下一个基准点"，所以**不同环之间谁也取代不了谁** ——
-		 * 删了它，还站在那一环起点的机器就接不上来了（那正是"中间断了"）。
-		 * 只有**同一环**（起点与落点都一样，也就是同一段区间重导了一遍）才算旧的那份多余。
-		 *
-		 * 完整副本仍然免这一条：它是完整清单，谁都能取代它（换基准那条路）。
+		 * 到这儿它就是一份"看着该被取代"的更新包 —— 但**取代只在同一份起点上成立**（见下面那几段）：
+		 * 更新包是"相对某一份完整副本"算出来的累积差量，换了起点就是另一条线上的东西。
 		 */
 		if (header.mode !== 'full') {
 			const otherBase = baselineOfBundle(other);
 			const otherTarget = other.targetBaselineHash ?? null;
-			if (otherBase !== myBase || otherTarget !== myTarget) {
+			// **不是同一份起点 → 留着**：换一份完整副本当起点算出来的更新包是另一条线上的东西，
+			// 还站在那份完整副本上的机器要用它
+			if (otherBase !== myBase) {
 				kept.push({
 					name: item.name,
-					why: `链条上的另一环（第 ${other.baseGeneration ?? '?'} → ${other.targetGeneration} 代）—— 还站在那一点上的机器要用它`,
+					why: `另一份起点的包（第 ${other.baseGeneration ?? '?'} → ${other.targetGeneration} 代）`
+						+ '—— 还站在那份完整副本上的机器要用它',
 				});
+				continue;
+			}
+			/**
+			 * **同一份起点、同一形态 → 新的把旧的全说了，旧的可以退休**（0.14 起的"只留"规则）。
+			 *
+			 * 因为新模型下一份更新包是**相对同一份完整清单**算的累积差量：新那份装的是
+			 * "自起点以来所有变过的"，旧那份装的是其中一个子集，内容还更旧。留着只会让人犯迷糊
+			 * （"我该发哪一份？"），也正是用户说的"要管理一堆包"。
+			 *
+			 * 两条不能省：
+			 * - **只限同一形态**："到另一份完整副本"的差量包与"到最新状态"的更新包终点不一样，各自有用；
+			 * - **只限我自己导的**：另一台机器从同一份完整包导出来的那一份装的是**它那一半改动**，
+			 *   删了就丢数据（这台机器只有我导的东西，对方那半还没收到）。
+			 */
+			const mineIsCheckpoint = header.targetFullBundle === true;
+			const otherIsCheckpoint = other.targetFullBundle === true;
+			if (mineIsCheckpoint !== otherIsCheckpoint) {
+				kept.push({
+					name: item.name,
+					why: '终点形态不一样（一份送到另一份完整副本、一份送到最新状态）—— 两种各自有用',
+				});
+				continue;
+			}
+			if (mineIsCheckpoint) {
+				if (otherTarget !== myTarget) {
+					kept.push({
+						name: item.name,
+						why: `同一份起点、但送到的是另一份完整副本（第 ${other.targetGeneration} 代）`,
+					});
+					continue;
+				}
+			} else {
+				const otherCopy = other.source?.copyId;
+				const myCopy = header.source?.copyId;
+				if (!otherCopy || !myCopy || otherCopy !== myCopy) {
+					kept.push({
+						name: item.name,
+						why: '认不出是不是我这台机器导的（另一台从同一份完整副本导的包装的是它那一半改动）—— 留着',
+					});
+					continue;
+				}
+			}
+		} else {
+			/**
+			 * **完整副本取代更新包**：它是完整清单，换基准那条路上谁都能直接应用它。
+			 *
+			 * **但只取代我自己导的那些** —— 别的机器从同一血脉导出来的更新包装的是
+			 * **它那一半改动**，我这份完整副本里根本没有那些内容。凭"我这份是完整的"就把它删了，
+			 * 那半边数据就只能靠对方重导一次（0.14 起的规矩：不同源头的东西一律留着）。
+			 */
+			const otherCopy = other.source?.copyId;
+			const myCopy = header.source?.copyId;
+			if (!otherCopy || !myCopy || otherCopy !== myCopy) {
+				kept.push({ name: item.name, why: '别的机器导的（装的是它那一半改动）—— 留着' });
 				continue;
 			}
 		}

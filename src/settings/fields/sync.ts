@@ -1,12 +1,13 @@
 import {
 	DEFAULT_SETTINGS,
+	SIZE_WARN_OPTIONS,
 	coerceBoolean,
 	coerceAnchorFingerprint,
+	coerceNumberChoice,
 	coerceText,
 } from '../model';
 import type { PluginSettings } from '../model';
 import { anchorOptions, listFullAnchorsSync, LATEST_STATE } from '../../bundle/anchor';
-import { listPointRefsSync } from '../../bundle/points';
 import { bundleBaseDir } from '../../bundle/paths';
 import { loadStateSync } from '../../sync/state';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
@@ -29,7 +30,7 @@ import type { FieldSection } from './types';
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '同步包',
-	desc: '把仓库打包成单个 .lsave 文件来回搬：先立一份完整副本当基准点，之后只导从基准点往外延伸的更新包',
+	desc: '把仓库打包成单个 .lsave 文件来回搬：先立一份完整副本当基准，之后只导"从那份完整副本到现在"的更新包',
 	groups: [
 		{
 			heading: '包放在哪',
@@ -76,26 +77,37 @@ export const SYNC_SECTION: FieldSection = {
 			],
 		},
 		{
-			heading: '更新包从哪个状态到哪个状态',
-			// 本地有几份完整包，就有几个"状态"，再加上「最新」这一项 ——
+			heading: '更新包',
+			// 本地有几份完整包，就有几个"状态"，再加上默认那一项 ——
 			// 选项是在渲染那一刻扫包目录算出来的（见 bundle/anchor.ts）
 			fields: [
 				{
 					key: 'changesFromState',
 					name: '从哪个状态开始',
-					desc: '更新包接着哪一份完整副本往后算。默认「自动」：你就是这条线的最新点就从你这一点往外导；'
-						+ '你落在后面（比如应用完整副本回退过）就自动接在这条线的最新点后面 —— '
-						+ '顺序不会乱、号也不会跟历史上用过的撞上。'
-						+ '对方还停在更老的一份上时，照它「更新记录」里的基准指纹选',
+					desc: '更新包从一份**完整副本**往外算，默认是你现在站的那一份。'
+						+ '对方还停在更老的一份上时，照它「更新记录」里那个基准指纹选那一份',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
 				{
 					key: 'changesToState',
 					name: '到哪个状态为止',
-					desc: '默认「最新（当前仓库）」；选一个更早的状态则导到那一刻为止（内容取自那些包，不是你现在的仓库）',
+					desc: '默认「最新（当前仓库）」；选另一份完整副本则导一份"从起点到那一份"的差量包'
+						+ '（内容取自那份包，不是你现在的仓库）',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
 					coerce: value => coerceAnchorFingerprint(value),
+				},
+				{
+					key: 'bundleSizeWarnLimit',
+					name: '攒大了提醒立新基准',
+					desc: '更新包是自起点那份完整副本累积的：超过这个大小就提醒你导一份新的完整副本换基准，'
+						+ '之后的更新包会从它重新算起',
+					control: { type: 'dropdown', options: SIZE_WARN_OPTIONS },
+					coerce: value => coerceNumberChoice(
+						value,
+						Object.keys(SIZE_WARN_OPTIONS).map(Number),
+						DEFAULT_SETTINGS.bundleSizeWarnLimit,
+					),
 				},
 			],
 		},
@@ -194,27 +206,27 @@ function hasBundleDir(settings: PluginSettings): boolean {
 }
 
 /**
- * 「从哪个状态 / 到哪个状态」的选项：**完整副本 ＋ 链条上的每一个点**（每份更新包
- * 落出的那一点，见 `bundle/points.ts`），外加「最新」。
+ * 「从哪个状态 / 到哪个状态」的选项：**只有完整副本**，外加"默认"那一项
+ * （起点端＝我站的那一份完整副本；终点端＝最新状态）。
  *
- * 设置面板是同步渲染的，所以这里用的是同步那套读法（`listFullAnchorsSync` /
- * `listPointRefsSync` / `loadStateSync`）—— 只读包头部，很便宜。
- * 读不出来（没填包目录、状态文件还没建）也要给出一张表：至少留着「最新」那一项，
- * 否则下拉框会空着，用户以为这个设置坏了。
+ * 0.14 起"链条上的中间点"（每份更新包落出的那一点）**不再是状态** ——
+ * 它们没有自己的包文件、还得沿链条叠加才算得出来，正是"自由度太高、用户容易出错"的来源
+ * （见 `docs/只有完整包才算基准点-实施计划.md`）。那个模块（`bundle/points.ts`）已经删了。
+ *
+ * 设置面板是同步渲染的，所以这里用的是同步那套读法（`listFullAnchorsSync` / `loadStateSync`）——
+ * 只读包头部，很便宜。读不出来（没填包目录、状态文件还没建）也要给出一张表：
+ * 至少留着默认那一项，否则下拉框会空着，用户以为这个设置坏了。
  */
 function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
 	const fallback = end === 'from'
-		? { [LATEST_STATE]: '自动：接在这条线的最新点后面' }
+		? { [LATEST_STATE]: '自动：我站的那一份完整副本（还没立过基准）' }
 		: { [LATEST_STATE]: '最新（当前仓库，现在这一刻）' };
 	/** 现在存着的值（一个基准指纹）：那一份要是找不到了，也得把它列出来（否则下拉框会显示成别的项） */
 	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
 	try {
 		const base = bundleBaseDir(plugin.settings);
 		const state = loadStateSync(plugin.stateFile());
-		const anchors = [
-			...listFullAnchorsSync(base, state.lineage),
-			...listPointRefsSync(base, state.lineage),
-		];
+		const anchors = listFullAnchorsSync(base, state.lineage);
 		const options = anchorOptions(anchors, end, {
 			generation: state.bundle?.fullGeneration ?? null,
 			hash: state.bundle?.fullHash ?? null,

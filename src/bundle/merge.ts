@@ -5,35 +5,39 @@ import type { BundleDeletedEntry, BundleEntry, BundleHeader, BundleSource, Bundl
 import { bundleDirForMode } from './paths';
 import { listFiles } from '../sync/disk';
 import { listFullAnchors } from './anchor';
-import { listPointRefsSync } from './points';
-import { trashBundles } from './manage';
+import { baselineOfBundle } from './baseline';
+import { listBundles, trashBundles } from './manage';
 import { appendBundleLog } from './log';
 import { copyRef, loadState, saveState } from '../sync/state';
 import type { Logger } from '../utils/log';
 
 /**
- * **把相邻的更新包合并成一环**（用户要的："防止基准点太多、更新太碎"）。
+ * **把首尾相接的几份更新包合并成一份**（用户要的："防止基准点太多、更新太碎"）。
  *
- * 链条模型下每份更新包是"从哪一点 → 落到哪一点"的一环。导出几次就攒出好几环：
+ * 0.14 起"点"只有完整包，但**包与包之间照样能首尾相接**：一份差量包送到的是一份完整副本
+ * （F1），下一份从 F1 往外算的包起点就是它 —— 导出几次就攒出这么一串：
  *
  * ```
- *   39 ──L1──► 54 ──L2──► 55        两环、三个点
- *   39 ────────── M ──────────► 55  合并后：一环、两个点
+ *   F0 ──L1──► F1 ──L2──► F2        两份包、三个完整副本
+ *   F0 ────────── M ──────────► F2  合并后：一份包，站在 F0 上的机器一步到位
  * ```
  *
- * **合并 ＝ 把那几环的负载接起来**：顺着链条把每一环的条目叠上去（后面的环覆盖前面的），
- * 段首那一环记的 `base` 就是段首那一点的版本，删除项取"最后一次提到它时是删"的那些。
- * 头部两端照旧：起点＝段首那一环的起点、落点＝段末那一环的落点（所以**基准点重新算过**，
- * 中间那几个点不再有自己的包）。
+ * **合并 ＝ 把那几份包的负载接起来**：顺着链条把每份的条目叠上去（后面的覆盖前面的），
+ * 段首那份记的 `base` 就是段首那份完整副本里的版本，删除项取"最后一次提到它时是删"的那些。
+ * 头部两端照旧：起点＝段首那份的起点、终点＝段末那份的终点。
+ *
+ * 它现在是个**清历史遗留**的工具：新模型下同一份起点 + 同一形态 + 同一台机器导的包
+ * 会被自动取代（`removeSupersededChanges`），所以一般攒不出长串；真正还会串起来的，
+ * 是"一台机器站在 F1 上、另一台站在 F0 上"这种多机器场景。
  *
  * 为什么是"拼装"而不是"重新导一遍"（**用户报的「39 到 54、54 到 55 合不上」之后改的**）：
- * 重新导要先把**段首那一点**算出来，而它得从一份完整副本起步 —— 用户把第 39 代那份完整副本
- * 删了（几百 MB，太占地方），于是"算不出起点"就什么都合不了。可合并要的东西其实**全在这几环里**：
+ * 重新导要先把**段首那一份**算出来，而它得从一份完整副本起步 —— 用户把第 39 代那份完整副本
+ * 删了（几百 MB，太占地方），于是"算不出起点"就什么都合不了。可合并要的东西其实**全在这几份包里**：
  * 内容在它们的负载里、版本关系在它们的 `base` 里。拼装这条路**一份完整副本都不需要**，
- * 也不读仓库 —— 手头只有这几环，照样合得成。
+ * 也不读仓库 —— 手头只有这几份，照样合得成。
  *
  * 顺带：拼装出来的包**跟"重新导一份"给接收方的东西是一样的**（同样的两个端点、同样的内容），
- * 而且中间版本的记录（`history`）也一并带上 —— 站在被吞掉的那一点上的机器照样收得下
+ * 而且中间版本的记录（`history`）也一并带上 —— 站在被吞掉的那一份上的机器照样收得下
  * （见 `apply.ts` 的 `checkAncestor`：起点相等，或者"算一遍落点"正好对得上）。
  */
 
@@ -53,12 +57,56 @@ export interface MergePlan {
 	middlePoints: string[];
 }
 
+/** 一条"边"：某份包从哪个指纹 → 落到哪个指纹（合并只用到这几个字段） */
+interface RingRef {
+	/** 落点指纹（完整包 ＝ 它自己的清单指纹；更新包 ＝ 头部报的落点） */
+	hash: string;
+	generation: number;
+	/** 从哪一份完整副本来（完整包 ＝ null，它不是"一环"） */
+	from: string | null;
+	/** 这一环基于的那一代（头部 `baseGeneration`）——起点那份包不在文件夹里时，区间还得靠它报出来 */
+	baseGeneration: number | null;
+	file: string;
+	name: string;
+	mtime: number;
+}
+
+/**
+ * 扫一遍包目录，把每份能读出头部的包变成一条"边"。
+ *
+ * 从前这一步由 `bundle/points.ts` 提供（它还会把"链条上的点"物化出来）。
+ * 0.14 起点只有完整副本了，合并要的只是**包与包之间的首尾关系**（谁的落点 ＝ 谁的起点），
+ * 就地扫一遍就够 —— 同一个指纹只留一份（两台机器可能各导过一份一模一样的落点）：留最近写的那份。
+ */
+async function listRings(baseDir: string, lineage: string): Promise<RingRef[]> {
+	const byHash = new Map<string, RingRef>();
+	for (const item of await listBundles(baseDir)) {
+		const header = item.header;
+		if (!header || header.lineage !== lineage) continue;
+		const from = baselineOfBundle(header);
+		const hash = header.mode === 'full' ? from : (header.targetBaselineHash ?? null);
+		if (!hash) continue; // 旧版更新包没记落点：接不出下一环，不能当边
+		const ref: RingRef = {
+			hash,
+			generation: header.targetGeneration,
+			from: header.mode === 'full' ? null : from,
+			baseGeneration: header.baseGeneration ?? null,
+			file: item.file,
+			name: item.name,
+			mtime: item.mtime,
+		};
+		const old = byHash.get(hash);
+		if (!old || ref.mtime >= old.mtime) byHash.set(hash, ref);
+	}
+	return [...byHash.values()].sort((a, b) => b.generation - a.generation || b.mtime - a.mtime);
+}
+
 /** 扫包目录、算出现在能合并哪几段（只读） */
 export async function planBundleMerges(
 	baseDir: string,
 	lineage: string,
 ): Promise<{ plans: MergePlan[]; forks: number }> {
-	const refs = listPointRefsSync(baseDir, lineage);
+	const refs = await listRings(baseDir, lineage);
 	const sizes = new Map<string, number>();
 	for (const item of await listFiles(bundleDirForMode(baseDir, 'changes'))) {
 		if (item.name.toLowerCase().endsWith(BUNDLE_EXT)) sizes.set(item.name, item.size ?? 0);
@@ -299,6 +347,11 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 				targetGeneration,
 				...(first.header.baselineHash ? { baselineHash: first.header.baselineHash } : {}),
 				...(plan.targetHash ? { targetBaselineHash: plan.targetHash } : {}),
+				// **段末那一环送到的是"一份完整副本"时，合并出来的这一份也一样**：
+				// 接收方应用它就该把基准推到那一份（否则它还站在老基准上，下一步导出的包
+				// 对方收不下，报"基准对不上"）。标记**从段末那一环继承** ——
+				// 段末是"→最新状态"的包时天然没有它。
+				...(last.header.targetFullBundle === true ? { targetFullBundle: true } : {}),
 				...(viaHashes.length > 0 ? { viaHashes } : {}),
 				...(stateId ? { stateId } : {}),
 				deleted,
