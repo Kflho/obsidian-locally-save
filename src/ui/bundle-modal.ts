@@ -4,14 +4,10 @@ import type LocallySavePlugin from '../main';
 import { executeBundlePlan, isDestructivePlan, planBundleApply } from '../bundle/apply';
 import type { ApplyPlan, ApplyResult } from '../bundle/apply';
 import type { StateIdInfo } from '../sync/state';
-import { describeStateId } from '../bundle/log';
+import { describeStateId, describeExportRange, describeExportStart } from '../bundle/log';
 import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle/export';
-import { baselineOfFullBundle, listingHashOfFiles } from '../bundle/baseline';
-import type { BundleAnchor } from '../bundle/anchor';
-import type { FileRecord } from '../sync/types';
-import { anchorOptions, listFullAnchorsSync, planAutoStart } from '../bundle/anchor';
-import type { AnchorRef, AutoStartPlan, LatestInfo } from '../bundle/anchor';
-import { listPointRefsSync } from '../bundle/points';
+import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
+import type { AnchorRef, LatestInfo } from '../bundle/anchor';
 import { bundleBaseDir, bundleDirForMode } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
 import { loadStateSync } from '../sync/state';
@@ -20,7 +16,6 @@ import type { DropdownComponent, TextComponent } from 'obsidian';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
 import { focusWindow, markDestructive } from './modal-layout';
-import { describeExportRange, describeExportStart } from '../bundle/log';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
 /** 确认框里最多列多少个会被删的文件 */
@@ -51,13 +46,6 @@ export class ExportBundleModal extends Modal {
 	 */
 	private fromState: string;
 	private toState: string;
-	/**
-	 * 「这条线的最新点」——起点留空（默认）时，引擎会自动接在它后面导出。
-	 *
-	 * 与引擎**共用同一个判断**（`planAutoStart`）：窗口里那句"本次：第 N 代 → 最新"
-	 * 就是照它写的，所以不会出现"界面说接线头、实际从本机这一点导"这种对不上的情况。
-	 */
-	private autoStart: AutoStartPlan | null = null;
 	private fromDropdown: DropdownComponent | null = null;
 	private toDropdown: DropdownComponent | null = null;
 	private statusEl!: HTMLElement;
@@ -87,6 +75,10 @@ export class ExportBundleModal extends Modal {
 	/**
 	 * 把"本地有哪些状态"填进两个下拉：**有几份完整包就有几个状态**，外加「最新」。
 	 *
+	 * 0.14 起候选**只有完整副本**（`listFullAnchorsSync`）：更新包只有"完整包 → 另一份完整包"
+	 * 与"完整包 → 最新状态"两种，任何一端都不是"链条上的某个中间点"
+	 * （那种点随链条模型一起删掉了，见 `docs/只有完整包才算基准点-实施计划.md`）。
+	 *
 	 * 用同步那套读法（设置面板里那两个下拉也是它），当场就能列出来 ——
 	 * 在窗口里换了包目录也会重新列一遍。读不出来时至少留着「最新」，
 	 * 真的选了找不到的状态，导出时引擎会明确报错并列出"现在有哪些"。
@@ -96,11 +88,7 @@ export class ExportBundleModal extends Modal {
 		let latest: LatestInfo = { generation: null, hash: null, file: null };
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
-			// 完整副本 ＋ **链条上的点**（每份更新包落出的那一点）：都能当起点 / 终点
-			anchors = [
-				...listFullAnchorsSync(this.effectiveDir(), state.lineage),
-				...listPointRefsSync(this.effectiveDir(), state.lineage),
-			];
+			anchors = listFullAnchorsSync(this.effectiveDir(), state.lineage);
 			latest = {
 				generation: state.bundle?.fullGeneration ?? null,
 				hash: state.bundle?.fullHash ?? null,
@@ -118,7 +106,7 @@ export class ExportBundleModal extends Modal {
 			// 选中的那份包已经不在目录里了：照样列出来并标一下 ——
 			// 悄悄跳回「最新」的话，用户会以为选的还是那一份
 			if (value !== '' && !(value in options)) {
-				dropdown.addOption(value, `基准 ${value}（这个目录里找不到这一个状态）`);
+				dropdown.addOption(value, `基准 ${value}（这个目录里找不到这一个完整副本）`);
 			}
 			dropdown.setValue(value);
 		};
@@ -137,65 +125,55 @@ export class ExportBundleModal extends Modal {
 		}
 	}
 
-	/**
-	 * 看一眼"这条线的最新点"（起点留空 ＝ 自动接在它后面）。
-	 *
-	 * 与引擎共用 `planAutoStart`：它走一遍包目录里的环，得出"从我站的这一点往后能走到哪一点"。
-	 * 我本来就是线头 → `head` 为 null（跟老行为一样，从本机这一点往外导）；
-	 * 我落在后面（回退过 / 没跟上）→ 接上线头，界面里那句"本次：第 N 代 → 最新"照它写。
-	 */
-	private async refreshAutoStart(): Promise<void> {
-		if (!this.wantChanges || this.fromState !== '') {
-			this.autoStart = null;
-			this.renderWhere();
-			return;
-		}
+	/** 我站的那一份完整副本是第几代（`state.bundle`）：默认起点就是它，还没有时返回 null */
+	private mineGeneration(): number | null {
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
-			this.autoStart = await planAutoStart(this.effectiveDir(), state);
+			return state.bundle?.fullGeneration ?? null;
 		} catch {
-			this.autoStart = null;
+			// 状态文件读不到：当成"还没有起点"，导出时引擎会如实报错
+			return null;
 		}
-		this.renderWhere();
 	}
 
-	/** 选中的那一个状态（完整副本或链条上的点），找不到就是 null —— 只用来显示第几代 */
+	/** 选中的那一份完整副本，找不到就是 null —— 只用来显示第几代 */
 	private pickedAnchor(fingerprint: string): AnchorRef | null {
 		if (fingerprint === '') return null;
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
-			const refs: AnchorRef[] = [
-				...listFullAnchorsSync(this.effectiveDir(), state.lineage),
-				...listPointRefsSync(this.effectiveDir(), state.lineage),
-			];
+			const refs = listFullAnchorsSync(this.effectiveDir(), state.lineage);
 			return refs.find(anchor => anchor.hash === fingerprint) ?? null;
 		} catch {
 			return null;
 		}
 	}
 
-	/** 这次更新包「从哪一份到哪一份」那句话（没勾更新包时不显示） */
+	/**
+	 * 这次更新包「从哪一份到哪一份」那句话（没勾更新包时不显示）。
+	 *
+	 * 0.14 起起点只有两种：**你站的那一份完整副本**（默认），或者你在这个窗口里明确选的那一份；
+	 * 终点默认是**最新**（当前仓库），也可以是另一份完整副本（那样导的是"完整包 → 完整包"的差量包，
+	 * 内容取自那份包，不是你现在的仓库）。没有"接在这条线的最新点后面"这回事了。
+	 */
 	private describeRange(): string {
 		if (!this.wantChanges) return '';
-		// 起点是自动选的时候（我落在后面）：说清"接在这条线的最新点后面"
-		if (this.fromState === '' && this.autoStart?.head) {
-			const head = this.autoStart.head;
-			const mine = this.autoStart.mine;
-			return `本次：第 ${head.generation} 代 → 最新（自动接在这条线的最新点后面`
-				+ `${mine ? `：你站在第 ${mine.generation} 代` : ''}）`;
-		}
-		const from = this.pickedAnchor(this.fromState);
-		const fromText = this.fromState === ''
-			? '我站的这个基准点'
-			: `第 ${from?.generation ?? '?'} 代（${this.fromState}）`;
 		const to = this.pickedAnchor(this.toState);
 		const toText = this.toState === ''
 			? '最新'
 			: `第 ${to?.generation ?? '?'} 代`;
-		const note = this.toState !== ''
-			? '内容到那一份为止'
-			: (this.fromState !== '' ? '只对站在这一个基准点上的机器是确定的' : '');
-		return `本次：${fromText} → ${toText}${note ? `（${note}）` : ''}`;
+		/** 终点选了另一份完整副本时要说清：内容取自那份包，不是你现在的仓库 */
+		const tail = this.toState === '' ? '' : '，内容取自终点那份';
+		if (this.fromState === '') {
+			const generation = this.mineGeneration();
+			if (generation === null) {
+				// 没有完整副本就没有起点：引擎会在导出时明确报错，这里先说一句
+				return '本次：还没有起点 —— 更新包要从一份完整副本算起，先导一份完整副本';
+			}
+			return `本次：第 ${generation} 代 → ${toText}（从你站的那份完整副本算起${tail}）`;
+		}
+		const from = this.pickedAnchor(this.fromState);
+		const fromText = `第 ${from?.generation ?? '?'} 代`;
+		return `本次：${fromText} → ${toText}（起点是你指定的那一份完整副本${tail}）`;
 	}
 
 	onOpen(): void {
@@ -211,18 +189,17 @@ export class ExportBundleModal extends Modal {
 		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整副本、再导更新包**）
 		new Setting(contentEl)
 			.setName('导出更新包')
-			.setDesc('只装自上一个基准点以来的新改动（链条上的新一环）。对方站在那一点上就能直接收下')
+			.setDesc('只装自起点那份完整副本以来变过的文件。对方站在同一份完整副本上就能直接收下')
 			.addToggle(toggle => toggle
 				.setValue(this.wantChanges)
 				.onChange(value => {
 					this.wantChanges = value;
 					this.renderWhere();
-					void this.refreshAutoStart();
 				}));
 
 		new Setting(contentEl)
 			.setName('导出完整副本')
-			.setDesc('整个仓库，也是更新包的基准（对方要先应用它）。体积大、每次都重写一遍')
+			.setDesc('整个仓库，也是更新包的起点（对方要先应用它）。体积大、每次都重写一遍')
 			.addToggle(toggle => toggle
 				.setValue(this.wantFull)
 				.onChange(value => {
@@ -241,24 +218,21 @@ export class ExportBundleModal extends Modal {
 					this.renderWhere();
 					// 换了目录 → 可选的"状态"（＝那个目录里的完整包）也跟着换
 					this.fillStateOptions();
-					void this.refreshAutoStart();
 					this.list?.schedule();
 				}));
 
 		// ---------------------------------------------------------- 更新包的起点与终点
-		// 两个下拉的选项＝本机那几份完整包（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
+		// 两个下拉的选项＝那个目录里的完整副本（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
 		new Setting(contentEl)
 			.setName('更新包：从哪个状态')
-			.setDesc('接着哪一份完整副本往后算。默认「自动」：你就是线头就从你这一点往外导，'
-				+ '你落在后面（比如回退过）就自动接在这条线的最新点后面；对方还停在更老的一份上时，'
-				+ '照它「更新记录」里的基准指纹选')
+			.setDesc('从哪一份完整副本开始算。默认「自动」＝ 你站的那一份；'
+				+ '对方还停在更老的一份上时，照他「更新记录」里的基准指纹选那一项')
 			.addDropdown(dropdown => {
 				this.fromDropdown = dropdown;
 				dropdown.onChange(value => {
 					this.fromState = value;
 					void this.persistStates();
 					this.renderWhere();
-					void this.refreshAutoStart();
 				});
 			});
 
@@ -279,7 +253,6 @@ export class ExportBundleModal extends Modal {
 		this.whereEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.statusEl = contentEl.createEl('p', { cls: 'locally-save-hint' });
 		this.renderWhere();
-		void this.refreshAutoStart();
 
 		// 顺手就能管理：包攒多了、看到过时的，不用关掉这个窗再去导入弹窗里删
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -318,11 +291,7 @@ export class ExportBundleModal extends Modal {
 			.map(mode => `${mode === 'full' ? '完整副本' : '更新包'} → ${bundleDirForMode(base, mode)}`)
 			.join('；');
 		const range = this.describeRange();
-		// 线头算不出来（缺环 / 缺那份完整副本）时把原因也写出来：这一份会从本机这一点往外导
-		const problem = this.wantChanges && this.fromState === '' && this.autoStart?.problem
-			? ` ｜ ${this.autoStart.problem}`
-			: '';
-		this.whereEl.setText(`会写到：${targets}${range ? ` ｜ ${range}` : ''}${problem}`);
+		this.whereEl.setText(`会写到：${targets}${range ? ` ｜ ${range}` : ''}`);
 	}
 
 	/** 勾了哪几种，以及导出顺序：**先完整副本、后更新包**（见 plannedExportModes） */
@@ -393,25 +362,26 @@ export class ExportBundleModal extends Modal {
 				anySuccess = true;
 				// 没清掉的老更新包要说清为什么 —— 不然用户以为"清理开关没生效"，
 				// 或者当成偶发 bug（报过：同一个操作第一遍没清、第二遍清了）
-				// 链条上的每一环都要留着（删了，站在那一环上的机器就接不上）——
+				// 别的机器发来的更新包要留着（那是它那一半改动，删了就丢）——
 				// 所以这里不是"没清掉"，而是"本来就要留"，如实列一下让用户心里有数
 				const keptNote = outcome.keptChanges.length > 0
 					? `；changes 里另有 ${outcome.keptChanges.length} 个包留着（`
 						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}）`
 					: '';
-				// 起点是自动接线头时说明一句（"你站在第 39 代、这一份接在第 54 代后面"）——
-				// 用户最想确认的就是"顺序没乱、没从老点分岔"
+				// 起点平时就是你站的那份完整副本：说明一句，用户拿着那个号就能跟对方手里的对上
 				const startNote = describeExportStart(outcome.anchor?.start);
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
 					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
 					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）`
-					+ `${describeExportRange(outcome)}${startNote ? `（${startNote}）` : ''} → ${outcome.file}`
+					+ `${describeExportRange(outcome)}${startNote ? ` · ${startNote}` : ''} → ${outcome.file}`
 					+ (outcome.superseded.length > 0
 						? `；顺手清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
 						: '')
 					+ keptNote,
 				);
+				// 「该立新完整包了」：引擎按这一份自起点以来要搬的字节数算好，到阈值才给一句
+				if (outcome.advice) notes.push(outcome.advice);
 			} catch (error) {
 				this.plugin.reportProgress(null);
 				const message = describe(error);
@@ -446,7 +416,7 @@ export class ExportBundleModal extends Modal {
  *
  * 报告里的"同步程度"就是接收方最想知道的那件事：
  * 这个包跟本地差多少、里面有多少是本地也改过的（会留冲突副本）、
- * 会不会删东西、走的是快速通道还是逐文件合并。
+ * 会不会删东西、应用完这个仓库会变成什么样。
  */
 export class ApplyBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
@@ -460,7 +430,7 @@ export class ApplyBundleModal extends Modal {
 	 * **应用方式没得选**（0.11 起）：完整副本与更新包都走**严格同步** ——
 	 * 包里点名的文件一律用包里的版本、`header.deleted` 点名的照删、
 	 * 本地多出来的文件也挪进回收目录，应用完**仓库 == 包送到的状态**。
-	 * 想"合着来"的旧档位（按设置 / 以我为准 / 两边都留）在链条模型下只会合出一个
+	 * 想"合着来"的旧档位（按设置 / 以我为准 / 两边都留）只会合出一个
 	 * 谁都不是的状态，界面不再提供（引擎里还剩 `normal` 给自动收包那条保守的路用）。
 	 */
 	private pathInput: TextComponent | null = null;
@@ -699,11 +669,11 @@ export class ApplyBundleModal extends Modal {
 			+ `${report.bundleDirsUnknown ? '（旧版包没记空文件夹，只能数到有文件的那些）' : ''}`);
 
 		// 两种包都说清"应用完会变成什么样"：严格档下这是确定的
-		// （更新包的起点必须与本机站的基准点完全相等，`checkAncestor` 拦在前面）
+		// （更新包的起点必须与本机站的那份完整副本完全相等，`checkAncestor` 拦在前面）
 		if (report.bundle.mode !== 'full') {
 			this.reportEl.createEl('p', {
-				text: '更新包：只装自起点那一点以来变过的文件。应用方式是严格同步 —— '
-					+ '包里点名的用包里的版本、点名的删除照删，其余按"你站的基准点 ＋ 这些条目 − 这些删除"补全'
+				text: '更新包：只装自它起点那份完整副本以来变过的文件。应用方式是严格同步 —— '
+					+ '包里点名的用包里的版本、点名的删除照删，其余按"你站的那份完整副本 ＋ 这些条目 − 这些删除"补全'
 					+ '（不在这份状态里的本地文件挪进回收目录）。',
 				cls: 'locally-save-hint',
 			});
@@ -723,15 +693,15 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
-		// 基准：两台机器互相发包时，"是不是接着同一份完整副本"决定了这次应用确不确定。
+		// 基准：两台机器互相发包时，"是不是从同一份完整副本算起"决定了这次应用确不确定。
 		const baseGen = plan.info.header.baseGeneration;
 		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 代`;
 		if (report.bundle.mode !== 'full') {
 			if (report.viaMine) {
-				// 合并相邻更新包之后常见：链条上只剩两端的点，而我站在被吞掉的某一个点上
+				// 合并过历史遗留的小包之后常见：我站在被并掉的那个状态上，而这个包正好从那儿经过
 				this.reportEl.createEl('p', {
 					text: `✓ 这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
-						+ '你站的这一点正好在它的路线上：应用它会直接把你送到终点（中间那几环不用补）。',
+						+ '你站的那份完整副本正好在它的路线上：应用它会直接把你送到它送到的状态。',
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'match') {
@@ -740,19 +710,19 @@ export class ApplyBundleModal extends Modal {
 					cls: 'locally-save-hint',
 				});
 			} else if (report.targetIsMine) {
-				// 这个包要送到的地方**正好就是我现在的基准**：它点名要送的东西我全都有。
+				// 这个包要送到的地方**正好就是我站的那份完整副本**：它点名要送的东西我全都有。
 				// 实测遇到过：对方把"32 → 36"的包发给一台已经站在 36 上的机器，
 				// 那边只看到"基准对不上"，看不出其实是白跑一趟 —— 这里说清并给出下一步。
 				this.reportEl.createEl('p', {
 					text: `✓ 这个包要送到的那份完整副本（第 ${plan.info.header.targetGeneration} 代 · 基准 ${report.targetBaseline}）`
-						+ '就是你这边的基准：里面没有你缺的内容，应用它不会改动任何文件。'
+						+ '就是你站的那一份：里面没有你缺的内容，应用它不会改动任何文件。'
 						+ `要拿对方后来的改动，让他按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重新导一份`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'mismatch') {
 				this.reportEl.createEl('p', {
-					text: `⚠ 基准对不上：包基于「${report.bundleBaseline}」，你这边是「${report.myBaseline}」。`
-						+ '应用完你会落到这个包送到的状态，而不是从你现在的基准往外延伸。'
+					text: `⚠ 基准对不上：这个包从「${report.bundleBaseline}」这份完整副本算起，你站的是「${report.myBaseline}」。`
+						+ '应用完你会落到这个包送到的状态，不是从你这份往外延伸的结果。'
 						+ `让对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份（认指纹，别只看第几代）`,
 					cls: 'locally-save-warn',
 				});
@@ -773,16 +743,16 @@ export class ApplyBundleModal extends Modal {
 				});
 			} else {
 				this.reportEl.createEl('p', {
-					text: '基准：说不清（旧版包没记指纹，或本机还没应用过完整副本）—— 这次逐文件合并',
+					text: '基准：这个包没记基准指纹（旧版本导的）—— 应用时按它送到的状态严格同步',
 					cls: 'locally-save-hint',
 				});
 			}
 		} else {
 			this.reportEl.createEl('p', {
-				text: `基准：应用之后，你这台就以这份完整副本为基准（第 ${plan.info.header.targetGeneration} 代）。`
+				text: `基准：应用之后，你这台就站在第 ${plan.info.header.targetGeneration} 代那份完整副本上。`
 					+ '完整副本是镜像，不合并：包里没有的本地文件会挪进回收目录（捞得回来），'
 					+ '本机改过的会被包里那一版覆盖（旧的同样进回收目录）—— 应用完这个仓库就是那个包。'
-					+ '这样两边的基准是同一份东西，之后互发更新包才不会对不上。',
+					+ '两边站的完整副本是同一份，之后互发更新包才不会对不上。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -885,7 +855,7 @@ export class ApplyBundleModal extends Modal {
 
 		const mode = this.reportEl.createEl('p');
 		if (report.mode === 'fast') {
-			mode.setText('方式：按包直接写入（你与这个包站在同一份基准上）');
+			mode.setText('方式：按包直接写入（你与这个包站在同一份完整副本上）');
 		} else {
 			mode.setText('方式：逐文件比对（逐个确认本地那一份是不是还停在包所基于的版本上）');
 		}
@@ -893,21 +863,23 @@ export class ApplyBundleModal extends Modal {
 
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
-				text: '注意：这个包不是接着你现在的基准点长的（多半来自另一台独立打包的机器）。'
-					+ '应用它之后，你会以它为准。',
+				text: '注意：这个包不是从你站的那份完整副本算起的（多半来自另一台独立打包的机器）。'
+					+ '应用它之后，你会以它送到的状态为准。',
 				cls: 'locally-save-warn',
 			});
 		}
 		if (!report.parentMatches && report.bundle.mode === 'changes') {
 			this.reportEl.createEl('p', {
-				text: '这个包不是接在你上次应用的那一点后面（中间少了那几环）。链条断了插件不猜着合 —— 先把缺的包补齐。',
+				text: '这个包不是接着你上次应用的那一份算的（中间多半还有一份包没到）。'
+					+ '插件不猜着合 —— 先把缺的那一份拷过来，或者让对方从你站的那份完整副本重导一份。',
 				cls: 'locally-save-hint',
 			});
 		}
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
-				text: `⚠ 本机还没站到这个包所基于的那个基准点上（差 ${report.generationGap} 代）。`
-					+ '链条中间断了插件会直接拒绝；请对方把中间缺的那几环一起发过来（或从本机这个点重导一份）。',
+				text: `⚠ 你还没站到这个包所基于的那份完整副本上（差 ${report.generationGap} 代）。`
+					+ '插件不猜着合：请对方从你站的那份完整副本重导一份，'
+					+ '或者把这份包所基于的那份完整副本发过来（应用它会镜像覆盖本机内容）。',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -951,11 +923,11 @@ export class ApplyBundleModal extends Modal {
 	 * **动手前先把"我这边的东西"存成一个包**（用户要的："本地最新更新保存为一个更新包"）。
 	 *
 	 * 引擎那边负责起点与内容（`export.ts` 的 `parkLocalChangesFor`）：
-	 * 起点＝**这份包送到的那一点**，内容＝我现在的仓库，并且不推进我这边 ——
-	 * 于是这一环就是「**新点 → 新点 ＋ 我的东西**」：本地改过/删过/新建而在包里没提到的那些，
-	 * 全在里面。我自己应用它＝在新点上把东西加回来，发给对方（他正站在同一点上）＝同理。
+	 * 起点＝**这份包送到的状态**，内容＝我现在的仓库，并且不推进我这边 ——
+	 * 于是这一份就是「**送到的状态 → 送到的状态 ＋ 我的东西**」：本地改过/删过/新建而在包里
+	 * 没提到的那些，全在里面。我自己应用它＝把东西加回来，发给对方（他站在同一状态上）＝同理。
 	 *
-	 * **返回 null ＝ 我这边跟那个点没有任何差别，没什么可存的**（不是失败）。
+	 * **返回 null ＝ 我这边跟那份状态没有任何差别，没什么可存的**（不是失败）。
 	 */
 	private async parkLocalChanges(plan: ApplyPlan): Promise<string | null> {
 		const outcome = await parkLocalChangesFor({
@@ -981,7 +953,7 @@ export class ApplyBundleModal extends Modal {
 			/**
 			 * 严格档会覆盖 / 挪走我这边的东西 → 先把"我这一半"存成一个包。
 			 *
-			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己的点"算的，
+			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己站的完整副本"算的，
 			 * 完整副本那一趟会漏（见 `parkLocalChanges`）；真没什么可存时这一趟只是白扫一遍，
 			 * 会直接告诉我们"没有差别"（返回 null），不写空包。
 			 */
@@ -1032,13 +1004,14 @@ export class ApplyBundleModal extends Modal {
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
 			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
 
-			// 我这一半的去处：存下来的那一环**起点就是刚应用到的这个点**，
-			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一点上）应用＝同理
+			// 我这一半的去处：存下来的那一份**起点就是这份包送到的状态**，
+			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一个状态上）应用＝同理。
+			// 注意别说成"接在刚应用到的基准点上"：**应用更新包不动基准**（0.14 起只有完整包会动它）
 			if (parked) {
-				parts.push(`你这边的改动已存成 ${parked}（接在刚应用到的这个基准点上：`
-					+ '你自己应用它就加回来，发给对方、他站在同一点上应用也一样）');
+				parts.push(`你这边的改动已存成 ${parked}（从这份包送到的状态算起：`
+					+ '你自己应用它就把改动加回来，发给对方、他站在同一个状态上应用也一样）');
 			} else if (strict) {
-				parts.push('你这边跟那个点本来就没有差别，所以没有另存包');
+				parts.push('你这边跟那份状态本来就没有差别，所以没有另存包');
 			}
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——

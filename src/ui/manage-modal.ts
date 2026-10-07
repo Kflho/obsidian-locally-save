@@ -24,11 +24,12 @@ import { formatBytes } from '../utils/format';
  * （比如攒了七八个包要清一清、上个月那个包到底放哪儿了）；
  * 但两边**共用同一个列表组件**，不会出现"这边能删、那边不能"的错位。
  *
- * 这里还剩一件跟"基准点"有关的事：**把某一份完整副本设成本机的基准点**（完整副本那一行的按钮）——
+ * 这里还剩一件跟"基准"有关的事：**把某一份完整副本应用成本机的基准**（完整副本那一行的按钮）——
  * 拿到别人发来的完整副本时用它，走的是应用那条路（先算报告再动手），
- * 本机已有的改动会留在原地成为"相对新基准点的改动"。
+ * 本机已有的改动会先存成一个包，之后自己应用或发给对方都行。
  *
- * （0.11 删掉了原来的「立新基准…」按钮：基准点现在**自己往前走**，手动换基准这件事没有了。
+ * （0.11 删掉了原来的「立新基准…」按钮，0.14 起只有完整包会改变你站的那一份：
+ * 导出 / 应用完整包之后你站到它上面，更新包怎么导怎么应用都不动它。
  * 想留一个还原点就走「导出同步包…」勾「完整副本」—— 同一件事，不必两个入口。）
  */
 export class BundleManagerModal extends Modal {
@@ -102,7 +103,7 @@ export class BundleManagerModal extends Modal {
 		new Setting(contentEl)
 			.addButton(button => button
 				.setButtonText('合并相邻的更新包…')
-				.setTooltip('把连着的一串小环并成一份大的（链条上少几个基准点，搬起来也省事）')
+				.setTooltip('把连着的一串小更新包并成一份大的（手里还留着以前那些小包时用：少几个文件，搬起来省事）')
 				.onClick(() => { void this.mergeAdjacent(); }))
 			.addButton(button => button
 				.setButtonText('更新记录…')
@@ -114,9 +115,9 @@ export class BundleManagerModal extends Modal {
 	}
 
 	/**
-	 * **合并相邻的更新包**：把连着的一串小环并成一份大的。
+	 * **合并相邻的更新包**：把连着的一串小包并成一份大的（历史遗留的那些小包）。
 	 *
-	 * 一进一出都是"先算后做"：先把"哪几份并成哪一份、少掉几个基准点、省多少"摊开给用户看，
+	 * 一进一出都是"先算后做"：先把"哪几份并成哪一份、省多少"摊开给用户看，
 	 * 确认了才动手（`mergeBundleGroup`：先写新的、写成了才把那几份小的挪进回收站）。
 	 */
 	private async mergeAdjacent(): Promise<void> {
@@ -124,7 +125,7 @@ export class BundleManagerModal extends Modal {
 		const { plans, forks } = await planBundleMerges(this.effectiveDir(), state.lineage);
 		if (plans.length === 0) {
 			new Notice(forks > 0
-				? '没有可以合并的：同一个点往外分了岔（有好几份不同落点的包），哪条是正路只有你清楚，插件不替你猜'
+				? '没有可以合并的：同一个起点往外分了几份不同落点的包，哪条是正路只有你清楚，插件不替你猜'
 				: '没有可以合并的：这里没有"连着两份以上、首尾相接"的更新包');
 			return;
 		}
@@ -159,10 +160,10 @@ export class BundleManagerModal extends Modal {
 	}
 
 	/**
-	 * 顶上那句：**本机现在有多少改动是基准里没有的**。
+	 * 顶上那句：**本机现在有多少改动是完整副本里没有的**。
 	 *
-	 * 这句话是"下次留包会装多少"的依据 —— 也就是"我现在站在哪一点上"。
-	 * 还没有基准时如实说"算不出来"，不硬凑一个数。
+	 * 这句话是"下次留包会装多少"的依据 —— 也就是"我现在站的那一份是哪一个"。
+	 * 还没有完整副本时如实说"算不出来"，不硬凑一个数。
 	 */
 	private async renderPosition(): Promise<void> {
 		if (!this.positionEl) return;
@@ -174,11 +175,11 @@ export class BundleManagerModal extends Modal {
 			});
 			const changes = describeLocalChanges(state, inventory);
 			if (!changes) {
-				this.positionEl.setText('本机还没有基准点（没导过、也没应用过完整副本）：先导一份完整副本，更新包才有起点');
+				this.positionEl.setText('本机还没站上过完整副本（没导过、也没应用过）：先导一份完整副本，更新包才有起点');
 				return;
 			}
 			this.positionEl.setText(`本机现在：第 ${state.generation} 代`
-				+ `，自基准点以来改了 ${changes.changed} 个文件`
+				+ `，自你站的那份完整副本以来改了 ${changes.changed} 个文件`
 				+ `${changes.deleted > 0 ? `、删了 ${changes.deleted} 个` : ''}`
 				+ '（这些就是下次更新包会装的内容）');
 		} catch (error) {
@@ -197,8 +198,8 @@ function describe(error: unknown): string {
 }
 
 /**
- * 合并前的确认框：**把账摊开**（哪几份并成哪一份、少掉几个基准点、省多少），
- * 并说清"原来那几份去回收站"与"站在中间点上的机器照样接得上"。
+ * 合并前的确认框：**把账摊开**（哪几份并成哪一份、省多少），
+ * 并说清"原来那几份去回收站"与"站在这些包送到的状态上的机器照样收得下"。
  */
 class ConfirmMergeModal extends Modal {
 	private plans: MergePlan[];
@@ -216,8 +217,9 @@ class ConfirmMergeModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '合并相邻的更新包' });
 		contentEl.createEl('p', {
-			text: '把连着的一串小更新包并成一份大的：链条上少几个基准点，搬起来也省事。'
-				+ '合并后那份的起点还是这一串的开头、落点还是这一串的末尾，中间那几个点不再有自己的包。',
+			text: '把连着的一串小更新包并成一份大的：几份并成一份，少几个文件要搬。'
+				+ '合并后那份的起点还是这一串的开头、终点还是这一串的末尾，内容一份都不少。'
+				+ '手里还留着以前那些小包时用它，日常新留的包不用管。',
 			cls: 'locally-save-hint',
 		});
 
@@ -225,13 +227,14 @@ class ConfirmMergeModal extends Modal {
 		for (const plan of this.plans) {
 			facts.createEl('li', {
 				text: `第 ${plan.anchorGeneration} → ${plan.targetGeneration} 代：`
-					+ `${plan.links.length} 份并成 1 份，少掉 ${plan.middlePoints.length} 个基准点，`
+					+ `${plan.links.length} 份并成 1 份，`
 					+ `原来那几份一共 ${formatBytes(plan.bytes)}`,
 			});
 		}
 		contentEl.createEl('p', {
 			text: '原来那几份会挪进回收站（不是真删，捞得回来）。'
-				+ '站在中间那几个点上的机器照样收得下合并后的这一份：应用它会直接把你送到这一串的末尾。',
+				+ '已经站在这些包送到的某个状态上的机器照样收得下合并后的这一份：'
+				+ '应用它会直接把你送到这一串的末尾。',
 			cls: 'locally-save-hint',
 		});
 

@@ -28,7 +28,8 @@ export class BundleLogModal extends Modal {
 		contentEl.createEl('h2', { text: '同步包更新记录' });
 		contentEl.createEl('p', {
 			text: '每次导出 / 应用记一笔，最近的在上。「状态」编号相同 ＝ 两边内容一致'
-				+ '（「第 N 代」说的是内容走到第几版；要认"是不是同一份基准"得看指纹）。',
+				+ '（「第 N 代」说的是内容走到第几版；要认"是不是同一份完整副本"得看指纹）。'
+				+ '你站的那份完整副本只有导出 / 应用完整副本时会变，更新包不会动它。',
 			cls: 'locally-save-hint',
 		});
 

@@ -14,6 +14,7 @@ import path from 'node:path';
 import { App, Notice } from 'obsidian';
 import type { PluginManifest } from 'obsidian';
 import LocallySavePlugin from '../src/main';
+import { readBundleInfo } from '../src/bundle/format';
 import { loadState } from '../src/sync/state';
 import { exportBundlesNow } from '../src/ui/actions';
 
@@ -113,11 +114,33 @@ checkTrue('状态栏照样写着上次的结果', barText(plugin).includes('上�
 
 // 4. 改一个文件（内容长度也变，免得落在 2 秒容差里被当成没动过）→ 留更新包
 plugin.settings.autoExportFull = false;
+const baseBeforeChanges = await loadState(plugin.stateFile());
 fs.writeFileSync(path.join(VAULT, 'notes', 'a.md'), 'AAAA 改过了');
 noticeLog.length = 0;
 await exportBundlesNow(plugin);
 check('更新包写出来了', bundleFiles('changes').length, 1);
 checkTrue('通知说清留的是更新包', noticeLog.some(m => m.includes('已留更新包')), noticeLog.join(' / '));
+
+// 4b. **导出更新包不推进基准**（0.14 的硬规矩：只有完整包才算基准点）——
+//     内容那一半照旧前进（世代更大），"我站的那一份完整包"一个都不动
+const afterChanges = await loadState(plugin.stateFile());
+check('基准指纹没动', afterChanges.bundle?.fullHash, baseBeforeChanges.bundle?.fullHash);
+check('基准世代没动', afterChanges.bundle?.fullGeneration, baseBeforeChanges.bundle?.fullGeneration);
+check('基准还是那份完整包', afterChanges.bundle?.fullFile, baseBeforeChanges.bundle?.fullFile);
+checkTrue(
+	'内容那一半前进了（世代更大）',
+	(afterChanges.generation ?? 0) > (baseBeforeChanges.generation ?? 0),
+	`${baseBeforeChanges.generation} → ${afterChanges.generation}`,
+);
+
+// 4c. 再改一次 → 第二份更新包的起点**仍然是那份完整副本**（不是上一份的落点），
+//     旧的那一份被它取代（"只留从完整包到最新状态"的那一份）
+fs.writeFileSync(path.join(VAULT, 'notes', 'a.md'), 'AAAA 又改了一次，更长');
+await exportBundlesNow(plugin, '定时留包', { quiet: true });
+const bothChanges = bundleFiles('changes');
+check('同一份基准上只留最新那一份更新包', bothChanges.length, 1);
+const secondHeader = (await readBundleInfo(path.join(OUT, 'changes', bothChanges[0] as string))).header;
+check('第二份的起点还是那份完整副本', secondHeader.baselineHash, baseBeforeChanges.bundle?.fullHash);
 
 // 5. 全程没有出现"目标文件夹"这类设置：字段本身已经随副本通道删掉了
 checkTrue(

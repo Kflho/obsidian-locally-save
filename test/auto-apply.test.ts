@@ -6,7 +6,9 @@
  * - 要删文件 / 覆盖本地改动的 → 只提示，绝不动手；
  * - 完整包 → 只提示，从不自动应用；
  * - 同一个包只处理一次（不会每 30 秒重复弹）；
- * - 比最新那个旧的、还没处理的包 → 记成"被更新的包取代"，不重复劳动。
+ * - **按基准收**（0.14）：同一份基准上、**同一个源头**只取最新那一份
+ *   （更新包是自那份完整副本累积的，先应用旧的就等于往回退一格）；
+ *   **不同源头**的各自都要应用 —— 那装的是各自那一半改动，漏一份就丢数据。
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -170,28 +172,24 @@ const afterRisky = await loadState(plugin.stateFile());
 check('要删文件的包：记了一笔"要人看"', afterRisky.incoming.at(-1)?.note, 'needs-review');
 check('要删文件的包：本地基准没被改坏', read(VAULT, 'notes/a.md'), 'AAA 改过了');
 
-// 5b. 对方把那个文件放回来了：那一环接在**本机没走到的那一点**后面
-//     （"删"的那一环没自动应用 → 本机还停在前一点上）→ 直接搁着等缺的环到齐，绝不猜着合
+// 5b. 对方把那个文件放回来了：**新的一份把旧的取代了**（同一份基准、同一个源头、同一形态，
+//     而且它不删任何东西）→ 直接自动应用，不必先"补上"那一环
 write(OTHER, 'notes/b.md', 'BBB 回来了');
 await exportFromOther('changes');
 noticeLog.length = 0;
-check('撤回之后那一环也接不上（前一环没走到）', await checkIncomingBundles(plugin), false);
-check('本地那个文件没被动', read(VAULT, 'notes/b.md'), 'BBB');
-checkTrue(
-	'提示里说清"接在本机还没走到的那一环后面"',
-	noticeLog.some(m => m.includes('还没走到')),
-	noticeLog.join(' / '),
-);
+check('撤回之后：新那一份不删东西 → 自动应用', await checkIncomingBundles(plugin), true);
+check('本地那个文件回来了', read(VAULT, 'notes/b.md'), 'BBB 回来了');
+checkTrue('提示里说清"已自动应用"', noticeLog.some(m => m.includes('已自动应用')), noticeLog.join(' / '));
 
-// 6. **链条中间断了一环、后来补上**：接得上的先接、接不上的搁着；缺的那环到了就一路接到底
-//    （这是链条模型下自动应用真正要干的事 —— 以前"只看最新那一个"是累积语义的产物）
+// 6. **同一份基准、同一个源头先后导过两份**：只有最新那一份留在目录里
+//    （更新包是"自那份完整副本累积"的，新的把旧的说的全说了 —— 旧的是它的子集）
 const SND = path.join(ROOT, 'sender-chain');
 const STATE_SND = path.join(ROOT, 'state-sender.json');
 const RECV2 = path.join(ROOT, 'recv-chain');
-// 单独的包目录：这一组的两环不能被别的机器的包搅进来
+// 单独的包目录：这一组的包不能被别的机器的包搅进来
 const OUT_CHAIN = path.join(ROOT, 'bundles-chain');
 for (const dir of [SND, RECV2, OUT_CHAIN]) fs.mkdirSync(dir, { recursive: true });
-// 发送方：照第一份完整副本铺一遍（认祖 = 同血脉、站在那一点上），连导两环
+// 发送方：照第一份完整副本铺一遍（认祖 = 同血脉、站在同一份完整副本上），连导两份更新包
 await applyBundle({
 	settings: { ...DEFAULT_SETTINGS },
 	log,
@@ -210,33 +208,59 @@ const linkTwo = await exportBundle({
 	settings: { ...DEFAULT_SETTINGS }, log, vaultRoot: SND, vaultName: '链条机器',
 	stateFile: STATE_SND, mode: 'changes', outDir: OUT_CHAIN,
 });
-checkTrue('两环都导出来了', linkOne.file !== null && linkTwo.file !== null, `${linkOne.file} / ${linkTwo.file}`);
+checkTrue('两份都导出来了', linkOne.file !== null && linkTwo.file !== null, `${linkOne.file} / ${linkTwo.file}`);
+check(
+	'同一份基准 + 同一个源头：旧的那一份被新的取代（目录里只剩最新那份）',
+	fs.existsSync(linkOne.file as string),
+	false,
+);
+check(
+	'新那一份的起点仍然是那份完整副本（不是上一份的落点）',
+	linkTwo.header?.baselineHash,
+	firstFull.header?.baselineHash,
+);
+check('新那一份也没把自己算成基准点（targetFullBundle 不存在）', linkTwo.header?.targetFullBundle, undefined);
 
-// 接收方：也站在第一份完整副本那一点上（所以只有 linkOne 接得上）
+// 接收方：也站在第一份完整副本那一份上 → 最新那一份直接收得下
 const plugin2 = createPlugin({ logLevel: 'silent', bundleDir: OUT_CHAIN, autoApplyIncoming: true }, RECV2);
 await plugin2.onload();
 await seedBaseline(plugin2, firstFull.file as string, RECV2);
-// 先把**后一环**放进去：它接在前一环的落点上，本机还没走到那儿 → 搁着
-const hideOne = `${linkOne.file}.tmp-hold`;
-fs.renameSync(linkOne.file as string, hideOne);
 noticeLog.length = 0;
-check('只有后一环时：接不上，什么都不动', await checkIncomingBundles(plugin2), false);
-check('内容没变', read(RECV2, 'notes/a.md'), 'AAA');
-checkTrue('提示里说清"接在本机还没走到的那一环后面"', noticeLog.some(m => m.includes('还没走到')), noticeLog.join(' / '));
-const beforeFill = await loadState(plugin2.stateFile());
-checkTrue(
-	'接不上的那一份**不记账**（缺的环到了还要自动接）',
-	beforeFill.incoming.every(item => item.id !== linkTwo.header?.bundleId),
-	JSON.stringify(beforeFill.incoming),
+check('最新那一份：自动接上', await checkIncomingBundles(plugin2), true);
+check('接完就是最新那一版', read(RECV2, 'notes/a.md'), '第二环 — 更长一点的改动');
+check(
+	'应用更新包之后基准没动（还是那份完整副本）',
+	(await loadState(plugin2.stateFile())).bundle?.fullHash,
+	firstFull.header?.baselineHash,
 );
-
-// 缺的那一环到了：一路接到底（两环一口气接完）
-fs.renameSync(hideOne, linkOne.file as string);
-noticeLog.length = 0;
-check('缺的环到了：自动接上（两环一起）', await checkIncomingBundles(plugin2), true);
-check('接完就是链条末端那一版', read(RECV2, 'notes/a.md'), '第二环 — 更长一点的改动');
-check('两环各记一笔"已应用"', (await loadState(plugin2.stateFile())).incoming.filter(item => item.note === 'applied').length, 2);
+check('只记一笔"已应用"', (await loadState(plugin2.stateFile())).incoming.filter(item => item.note === 'applied').length, 1);
 check('再扫一遍：不会重复劳动', await checkIncomingBundles(plugin2), false);
+
+// 7. **同一份基准、两个源头各导一份**：两份都要应用 ——
+//    各装着自己那一半改动，只收最新那一份会丢另一台机器的数据
+const SND_B = path.join(ROOT, 'sender-b');
+const STATE_SND_B = path.join(ROOT, 'state-sender-b.json');
+fs.mkdirSync(SND_B, { recursive: true });
+await applyBundle({
+	settings: { ...DEFAULT_SETTINGS },
+	log,
+	vaultRoot: SND_B,
+	stateFile: STATE_SND_B,
+	file: firstFull.file as string,
+});
+write(SND_B, 'notes/b.md', 'B 机器改的');
+const packB = await exportBundle({
+	settings: { ...DEFAULT_SETTINGS }, log, vaultRoot: SND_B, vaultName: 'B 机器',
+	stateFile: STATE_SND_B, mode: 'changes', outDir: OUT_CHAIN,
+});
+checkTrue('另一台机器的包也导出来了', packB.file !== null, packB.reason ?? '（没给原因）');
+noticeLog.length = 0;
+check('另一个源头的包：也自动接上', await checkIncomingBundles(plugin2), true);
+check(
+	'两台机器的改动都在（各一半，谁都没丢）',
+	[read(RECV2, 'notes/a.md'), read(RECV2, 'notes/b.md')],
+	['第二环 — 更长一点的改动', 'B 机器改的'],
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

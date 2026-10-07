@@ -93,9 +93,13 @@ async function runExport(plugin: LocallySavePlugin, label: string, quiet: boolea
 			plugin.log.debug(`${label}：${text}`);
 			return;
 		}
-		new Notice(result.wrote ? `${label}完成：${text}` : `${label}：${text}`, 6000);
-		await refreshStatusBar(plugin);
-		plugin.log.debug(`${label}：${text}`);
+		// 「该立新完整包了」这句提醒：顺手留包（自动触发）时**只写状态栏与日志、不弹通知** ——
+		// 提醒不是"出事了"，没必要在用户眼前闪一条；手动留包时连着结果一起说。
+		// 状态栏那句是常驻的（最近一次留包干了什么），两种触发都写进去，抬眼就能看到。
+		const said = !quiet && result.advice ? `${text}、${result.advice}` : text;
+		new Notice(result.wrote ? `${label}完成：${said}` : `${label}：${said}`, 6000);
+		await refreshStatusBar(plugin, result.advice);
+		plugin.log.debug(`${label}：${text}${result.advice ? `；${result.advice}` : ''}`);
 	} catch (error) {
 		new Notice(`${label}失败：${describe(error)}`, 9000);
 		plugin.log.error(`${label}失败`, error);
@@ -109,16 +113,20 @@ async function runExport(plugin: LocallySavePlugin, label: string, quiet: boolea
  * - 整库**只扫一次**，两个包共用同一份清单；
  * - 自上次留包以来没有任何变化时**一个包都不写** —— 完整包一写就是整库重写；
  * - 完整包刚留过的话，更新包按它算必然是空的，那就不写空包，只说明一句。
+ *
+ * `advice` 单独拎出来（不塞进 `notes`）：调用方要按"手动 / 自动触发"决定它去哪儿 ——
+ * 自动触发只写状态栏与日志，不弹通知（见 `runExport`）。
  */
 async function writePlannedBundles(
 	plugin: LocallySavePlugin,
 	base: string,
-): Promise<{ notes: string[]; wrote: boolean; noChanges: boolean }> {
+): Promise<{ notes: string[]; advice: string | null; wrote: boolean; noChanges: boolean }> {
 	const inventory = await scanVault(plugin);
 	const state = await loadState(plugin.stateFile());
 	if (!hasChanges(state, inventory)) {
 		return {
 			notes: ['自上次留包以来没有变化，没有生成包（要强行导一份完整副本：用「导出同步包…」）'],
+			advice: null,
 			wrote: false,
 			noChanges: true,
 		};
@@ -131,12 +139,15 @@ async function writePlannedBundles(
 	/** 这一轮留过完整包：紧随其后的更新包必然是空的 */
 	let fullWritten = false;
 	let wrote = false;
+	/** 「该立新完整包了」（引擎按这份包自起点以来要搬的字节数算好，没到阈值时是 null） */
+	let advice: string | null = null;
 
 	for (const mode of plannedExportModes({ changes: autoExportChanges, full: autoExportFull })) {
 		const result = await writeBundleFile(plugin, base, mode, inventory, written);
 		if (result.kind === 'written') {
 			wrote = true;
 			if (mode === 'full') fullWritten = true;
+			if (result.outcome.advice) advice = result.outcome.advice;
 			notes.push(mode === 'full'
 				? `已留完整副本（${result.outcome.entryCount} 个文件）`
 				: `已留更新包（${result.outcome.entryCount} 个文件`
@@ -155,7 +166,7 @@ async function writePlannedBundles(
 			notes.push(mode === 'full' ? `完整包没导成（${result.error}）` : `更新包没导成（${result.error}）`);
 		}
 	}
-	return { notes, wrote, noChanges: false };
+	return { notes, advice, wrote, noChanges: false };
 }
 
 /** 扫一遍仓库（用户的排除规则与运行时才知道的配置目录都在这里生效） */
@@ -245,10 +256,16 @@ function exportOptions(
 	};
 }
 
-/** 状态栏那句"上次留包 / 上次应用"：真相在更新记录里，这里只是把它读回来 */
-async function refreshStatusBar(plugin: LocallySavePlugin): Promise<void> {
+/**
+ * 状态栏那句"上次留包 / 上次应用"：真相在更新记录里，这里只是把它读回来。
+ *
+ * `advice`（「该立新完整包了」）跟在后头：状态栏是常驻的那一格，
+ * 顺手留包（自动触发）不弹通知，这句提醒就靠它让用户看得见。
+ */
+async function refreshStatusBar(plugin: LocallySavePlugin, advice?: string | null): Promise<void> {
 	try {
-		plugin.statusBar.setSummary(describeLastActivity(await loadState(plugin.stateFile())));
+		const summary = describeLastActivity(await loadState(plugin.stateFile()));
+		plugin.statusBar.setSummary(advice ? `${summary} · ${advice}` : summary);
 	} catch (error) {
 		plugin.log.debug('刷新状态栏失败', error);
 	}
@@ -271,7 +288,7 @@ function applyOptionsFor(plugin: LocallySavePlugin, file: string): ApplyOptions 
  *
  * 由 `main.tick()` 每 30 秒调一次。安全边界全在 `bundle/incoming.ts` 里：
  * **只有完全不会动到本地已有东西的更新包**才会自己应用，其余一律只提示一句；
- * 而且**按链条顺序接**（起点正好是本机基准点的那一环才收得下，缺环就搁着等）。
+ * 而且必须**从本机站的那份完整副本算起**（不是那份起点的包收不下，搁着等它到）。
  * 这里只负责通知、状态栏与"这一拍干了活没有"。
  *
  * 返回 true ＝ 这一拍动过东西（调用方据此跳过同拍的留包：刚应用完不该立刻回礼）。
@@ -304,9 +321,9 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 }
 
 /**
- * 链条没接上的那几份：**同一个包只提示一次**（内存里记着）。
+ * 收下了但还接不上的那几份：**同一个包只提示一次**（内存里记着）。
  *
- * 为什么不落盘：它们随时可能因为"缺的那一环到了"就能接上 —— 落盘记成"处理过了"
+ * 为什么不落盘：它们随时可能因为"缺的那一份起点到了"就能应用 —— 落盘记成"处理过了"
  * 就再也自动接不上了（得用户手动去点）。而每 30 秒重提示一遍又太吵，
  * 所以只在内存里记一笔：重启后再提示一次，可以接受。
  */
@@ -344,8 +361,8 @@ async function reportIncomingSweep(plugin: LocallySavePlugin, sweep: IncomingSwe
 	for (const name of fresh) waitingNotified.add(name);
 	if (fresh.length > 0) {
 		new Notice(
-			`收到 ${fresh.length} 个更新包，但它们接在本机还没走到的那一点后面 —— `
-			+ '先把缺的那几份包也拷进来（或者让对方从本机这个基准点重导一份），到齐了会自动接上',
+			`收到 ${fresh.length} 个更新包，但它们不是从你站的那份完整副本算起的 —— `
+			+ '先让对方把他用的那份完整副本（或者从你这份起点的更新包）发过来，到齐了会自动应用',
 			15000,
 		);
 	}

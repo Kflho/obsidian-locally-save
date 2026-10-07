@@ -52,6 +52,21 @@ export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
 	changes: '仅改动（自上次导出后变过的文件）',
 };
 
+/**
+ * 「更新包攒到多大就提醒立新基准」的可选值：**0 ＝ 不提醒**（键是存进 data.json 的 MB 数）。
+ *
+ * 更新包是"自起点那份完整包累积"的，攒大了就该导一份新的完整副本换基准 ——
+ * 这是新模型里唯一需要用户做的维护动作（0.14 起；0.11 删过这一项，现在它又有前提了）。
+ */
+export const SIZE_WARN_OPTIONS: Record<string, string> = {
+	'0': '不提醒',
+	'10': '超过 10 MB 时提醒',
+	'20': '超过 20 MB 时提醒',
+	'50': '超过 50 MB 时提醒',
+	'100': '超过 100 MB 时提醒',
+	'200': '超过 200 MB 时提醒',
+};
+
 /** 同步包文件的后缀由格式模块定义，这里只用于界面提示 */
 export const BUNDLE_EXTENSION = '.lsave';
 
@@ -101,13 +116,17 @@ export interface PluginSettings {
 	/** 留包时导一份完整包（每次都重写整个仓库，慢，默认关） */
 	autoExportFull: boolean;
 	/**
-	 * 更新包**从哪个状态**开始：留空 ＝ 我最新那份完整副本（默认）；否则是**基准指纹**
+	 * 更新包**从哪个状态**开始：留空 ＝ **我站的那一份完整副本**（默认）；否则是**基准指纹**
 	 * （16 位十六进制，见 `bundle/baseline.ts`）。
 	 *
 	 * 为什么存指纹而不是世代号：世代号说的是"内容走到第几版"，
 	 * 两边的"第 32 代"完全可能是**两份不同的完整副本**。用户实测踩过：按"第 32 代"
 	 * 选起点，对方回「基准对不上」—— 选中的那份根本不是对方手里那份。
 	 * 指纹是内容的直接证据，也是对方「更新记录」顶上那行「基准：… · 指纹 xxxx」里的值。
+	 *
+	 * （0.14 起"留空"的含义从"自动接在这条线的最新点后面"变成"我站的那一份完整副本"：
+	 * 点只有完整包了，没有线头可接。日常完全一样 —— 只有在"我落在后面"时才会不同，
+	 * 而那正是这次要砍掉的那种隐式行为。）
 	 */
 	changesFromState: string;
 	/**
@@ -115,6 +134,14 @@ export interface PluginSettings {
 	 * **基准指纹** —— 导一份"从起点到那一刻"的**差量包**（内容取自那份包的负载）。
 	 */
 	changesToState: string;
+	/**
+	 * **更新包攒到多大就提醒立新基准**（MB，`0` ＝ 不提醒）。
+	 *
+	 * 0.11 删过这一项（那会儿是链条模型：更新包只装一环，不存在"越攒越大"）；
+	 * 0.14 更新包又回到"自起点那份完整包累积"，这个提醒重新有了前提 ——
+	 * **字段名沿用老的**，老 `data.json` 里存过的值正好接着生效。
+	 */
+	bundleSizeWarnLimit: number;
 
 	// ------------------------------------------------------------ 界面
 	/** 左侧栏：立即留包（按两个「自动留包」开关留一次） */
@@ -146,9 +173,11 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
-	// 留空 ＝ 从"我站的这个基准点"到"最新（当前仓库）"
+	// 留空 ＝ 从"我站的那一份完整副本"到"最新（当前仓库）"
 	changesFromState: '',
 	changesToState: '',
+	// 更新包搬过 20 MB 就提醒"该立新完整包了"；0 ＝ 不提醒
+	bundleSizeWarnLimit: 20,
 
 	ribbonSyncIcon: true,
 	ribbonExportIcon: true,
@@ -261,6 +290,11 @@ export function settingsFrom(data: unknown): PluginSettings {
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 		changesFromState: coerceAnchorFingerprint(raw.changesFromState),
 		changesToState: coerceAnchorFingerprint(raw.changesToState),
+		bundleSizeWarnLimit: coerceNumberChoice(
+			raw.bundleSizeWarnLimit,
+			Object.keys(SIZE_WARN_OPTIONS).map(Number),
+			DEFAULT_SETTINGS.bundleSizeWarnLimit,
+		),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
 		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),

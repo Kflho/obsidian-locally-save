@@ -437,43 +437,45 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		/**
 		 * **算一遍"应用完我会落到哪一点"，跟包里报的落点比一比。**
 		 *
-		 * 怎么算：我站的这一点 ＋ 包里的条目 − 包里点名的删除 —— 这就是接收方应用完真正会落到的
+		 * 怎么算：我这边现在的样子 ＋ 包里的条目 − 包里点名的删除 —— 这就是接收方应用完真正会落到的
 		 * 那一份清单（严格镜像就是这么算的，见执行阶段那个 `nextFullFiles`）。它等于包头部报的
 		 * `targetBaselineHash`，就说明**应用完正好落到对方那一点**：跟落点不一样的那些路径全在包里，
 		 * 一样的一条没动。那跟"起点严格相等"是一回事，收下它是确定的。
 		 *
+		 * 用 `files`（我这边现在的样子）而不是 `fullFiles`（我站的那份完整包）：0.14 起两者会不一样 ——
+		 * 我可能应用过对方从同一份完整包导出的上一份更新包，内容已经往前走了，
+		 * 而严格档算"送到什么状态"用的正是 `files` 那一份（见上面 `baseline` 那段）。两边要一致。
+		 *
 		 * 为什么光有 `viaHashes` 还不够（用户实测）：**中间隔了一份完整副本**之后，
 		 * 旧的那些环会被那份完整副本清掉（`removeSupersededChanges`：完整清单取代老环），
 		 * 于是"沿来路认点"就认不出对方站在哪 —— 而内容上他确实在路线上，算一遍就能证明。
+		 * （0.14 起新包不再写 `viaHashes` 了，这一条判据是主力。）
 		 */
-		const landed: Record<string, FileRecord> = { ...(state.bundle?.fullFiles ?? {}) };
+		const landed: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
 		for (const entry of header.entries) landed[entry.path] = { size: entry.size, mtime: entry.mtime };
 		for (const item of header.deleted) delete landed[item.path];
 		if (header.targetBaselineHash !== undefined && listingHashOfFiles(landed) === header.targetBaselineHash) {
 			return { ok: true, kind: 'update', viaLanding: true };
 		}
 		/**
-		 * **链条中间断了：拒绝，并把"从哪个基准点开始"指出来。**
+		 * **链条中间断了：拒绝，并把"该从哪一份完整副本开始"指出来。**
 		 *
-		 * 更新包是从**某一个基准点**往外延伸的差分，"起点里有、包里没提到"不算被删 ——
-		 * 可一旦起点跟本机站的不是同一个点，这条前提就没了：本机一大批文件会被当成
+		 * 更新包是从**某一份完整副本**往外延伸的累积差分，"起点里有、包里没提到"不算被删 ——
+		 * 可一旦起点跟本机站的不是同一份，这条前提就没了：本机一大批文件会被当成
 		 * "对方删过它们"（用户报过的"删除一万个"）。所以不猜着合。
-		 *
-		 * 出路按**成功率**排：让对方从本机这一点重导（最省事，前提是对方手里有这个点）；
-		 * 把中间缺的那几份包一起发过来按顺序应用（链本身就在文件夹里）；完整副本兜底。
 		 */
 		const at = state.bundle?.fullGeneration !== null && state.bundle?.fullGeneration !== undefined
 			? `（第 ${state.bundle.fullGeneration} 代${state.bundle.fullFile ? ` · 来自 ${state.bundle.fullFile}` : ''}）`
 			: '';
 		return {
 			ok: false,
-			message: `接不上，不合并：这个更新包从「${theirs}」这个基准点往外延伸，本机站在「${mine}」上${at} —— `
-				+ '不是同一个点，插件不猜着合（起点对不上时，本机一大批文件会被当成"对方删过它们"）。\n'
-				+ '按顺序往下走，二选一：\n'
-				+ `① 让对方从本机这个基准点重导一份更新包：导出时把「更新包：从哪个状态」选成`
-				+ `「第 ${state.bundle?.fullGeneration ?? '?'} 代 · 基准 ${mine}」；\n`
-				+ '② 或者让对方把中间缺的那几份包一起发过来，按顺序应用（本机站在链条上某一点，缺的是它后面那几步）。\n'
-				+ '都不行就让对方导一份完整副本：完整清单自带基准，可以直接应用（但它会镜像覆盖本机内容）。',
+			message: `接不上，不合并：这个更新包是从「${theirs}」这份完整副本往外算的，本机站在「${mine}」上${at} —— `
+				+ '不是同一份基准，插件不猜着合（基准不是同一份时，本机一大批文件会被当成"对方删过它们"）。\n'
+				+ '二选一：\n'
+				+ `① 让对方按本机这份基准重导一份更新包：导出时把「更新包：从哪个状态开始」选成`
+				+ `「第 ${state.bundle?.fullGeneration ?? '?'} 代 · 基准 ${mine}」（那份完整副本得在对方的包目录里）；\n`
+				+ '② 或者让对方直接导一份**完整副本**发过来：完整清单自带基准，谁都能应用'
+				+ '（代价是它按镜像覆盖本机内容，本机独有的文件会进回收目录）。',
 		};
 	}
 	return { ok: true, kind: 'update' };
@@ -514,9 +516,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * **更新包也开放"严格同步"**（0.11 起：完整副本与更新包一样，应用完就是包）。
 	 *
 	 * 旧版本把更新包上的"以包为准 / 完全镜像"降级成按设置，理由是"包里没提到的文件会被当成该删，
-	 * 一次清空仓库"。**那条理由在链条模型下不成立了**：更新包的起点必须与本机站的基准点**完全相等**
+	 * 一次清空仓库"。**那条理由不成立了**：更新包的起点必须与本机站的**那一份完整副本完全相等**
 	 * （`checkAncestor` 拦在前面），所以"包送到的状态"是确定的 ——
-	 * ＝ 我站的那一点 ＋ 包里点名的条目 − 包里点名的删除。镜像它就是"变成那份状态"，不会清空。
+	 * ＝ 我站的那一份完整副本 ＋ 包里点名的条目 − 包里点名的删除。镜像它就是"变成那份状态"，不会清空。
 	 */
 	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : requested;
 	/** 严格档：应用完**仓库 == 包送到的状态**（完整副本自带完整清单；更新包按起点清单补全） */
@@ -536,7 +538,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
-	// 更新包是链条上的一环：接收方只要**站在它声明的那一点上**（基准指纹相等）就能收
+	// 更新包是从**某一份完整副本**往外算的：接收方只要站在那份上（基准指纹相等）就能收
 	const sameGeneration = header.baseGeneration === null
 		|| (sameLineage && state.generation >= header.baseGeneration);
 	const fastPath = sameGeneration;
@@ -651,8 +653,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			if (here.size === entry.size && Math.abs(here.mtime - entry.mtime) <= TOLERANCE) continue;
 
 			const base = baseline[entry.path];
+			/**
+			 * "本地动过没有"：跟**我站的那份完整包**比。停在我自己发过的某一版上**不算**本地改动 ——
+			 * 新模型下这是常态（对方站在同一份完整包上，我多半刚应用过他上一份更新包，
+			 * 那些文件相对这份完整包当然"变过"）。判据就是条目带的 `history`（见 `export.ts`），
+			 * 不认它的话每应用一份累积包都会把对方自己发来的东西当成本地改动备份一遍。
+			 */
 			const localChanged = base
-				? here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE
+				? (here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE)
+					&& !matchesHistory(here, entry)
 				: false;
 			if (localChanged) forcedOverwrites++;
 			overwrites++;
@@ -1288,40 +1297,33 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	}
 	keepDirs.sort();
 	/**
-	 * **基准点跟着应用往前走**（0.11 起的链条模型）：
+	 * **只有落到一份真基准点上时，"我站的那一份完整包"才往前走**（0.14，用户拍板，
+	 * 见 `docs/只有完整包才算基准点-实施计划.md`）：
 	 *
-	 * 应用任何包之后，本机站到**这个包送到的那一点**上 —— 完整副本是它自己的清单，
-	 * 更新包是"起点那份清单 ＋ 包里写成了一致的条目 − 包里点名的删除"（＝对方导出时站的
-	 * 那一点，对方头部 `targetBaselineHash` 报的就是它的指纹）。
-	 *
-	 * 为什么必须与对方算得一模一样：两边的点对不上，下一个包就会报"基准对不上"，
-	 * 而链条本来要的就是"**点与点之间严格镜像、链条上每个节点内容都确定**"——
-	 * 谁也不必去猜、去合，文件也就不会冲突。
-	 *
-	 * 应用是"**确认的**基准点"（`pointConfirmed: true`）：对方导出时手里就是这一点，
-	 * 我这边也到了，两边都有。自己导出的那一点只算"可能的"（见 `export.ts`），
-	 * 等对方应用、并把这一点报成它的基准时再翻成确认。
-	 *
-	 * 收益（用户的原话：一台机器常导包、另一台常应用包，两边互相不知道对方在哪）：
-	 * 接收方应用完自动站到链条末端，下次它导出的更新包就"从末端往外延伸"（只有新改动），
-	 * 回传对方直接收 —— 不必再手动重导一份几百 MB 的完整副本。
-	 * 开销：状态文件里的 `fullFiles` 从"只有完整副本时才有"变成"每次都写"
-	 * （一万文件约 +0.7–1 MB）；**读盘与 CPU 零额外开销**（复用这次本来就做过的扫描与编号计算）。
+	 * - **完整副本**：它自己就是一份新基准（`freshAnchor` ＝ 真的写成了一致的那些条目）；
+	 * - **差量包**（头部 `targetFullBundle`）：它送到的是**另一份完整副本** ——
+	 *   清单 ＝ 应用前我站的那份 ＋ 包里的条目 − 点名的删除，正好是终点那份完整副本的样子
+	 *   （对方头部 `targetBaselineHash` 报的就是它的指纹，必须算得一模一样）；
+	 * - **更新包**（送到"最新状态"）：**基准点不动** —— 它只是"从我站的这份完整包往外长的一层"。
+	 *   内容那一半照旧前进（`files` / `history` / `dirs` / 世代 / 状态编号），
+	 *   所以下一个包还是从同一份完整包往外算（累积语义），这一点是"回传对方直接收得下"的关键。
 	 */
+	const landedOnBaseline = isFull || plan.info.header.targetFullBundle === true;
 	const nextFullFiles: Record<string, FileRecord> = isFull
 		? { ...freshAnchor }
 		: { ...anchorBefore, ...freshAnchor };
+	const landedHash = listingHashOfFiles(nextFullFiles);
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
-		// 三方比对的祖先与"我站的那一点"是同一份东西（都是"两边都见过的那一份"）
 		files: nextFullFiles,
-		fullFiles: nextFullFiles,
-		fullGeneration: plan.info.header.targetGeneration,
-		// 令牌按新基准点重算：对方下一个包一比就知道我站在哪一点上
-		fullHash: listingHashOfFiles(nextFullFiles),
-		// 界面上要能说清"我站在哪一点上"：就是刚应用完的这一份包
-		fullFile: path.basename(options.file),
-		pointConfirmed: true,
+		fullFiles: landedOnBaseline ? nextFullFiles : (state.bundle?.fullFiles ?? nextFullFiles),
+		fullGeneration: landedOnBaseline
+			? plan.info.header.targetGeneration
+			: (state.bundle?.fullGeneration ?? plan.info.header.targetGeneration),
+		// 令牌：站在哪一份完整包上，对方下一个包一比就知道
+		fullHash: landedOnBaseline ? landedHash : (state.bundle?.fullHash ?? landedHash),
+		// 界面上要能说清"我站在哪一份完整包上"
+		fullFile: landedOnBaseline ? path.basename(options.file) : (state.bundle?.fullFile ?? path.basename(options.file)),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
 		dirs: keepDirs,
 	};

@@ -53,11 +53,17 @@ export class ExportPreviewModal extends Modal {
 			}
 			contentEl.createEl('p', { text: parts.join(' · '), cls: 'locally-save-summary' });
 
-			// 起点是自动接线头时说明一句（"你站在第 39 代、这一份接在第 54 代后面"）——
-			// 与导出结果、导出对话框共用同一句话（见 bundle/log.ts 的 describeExportStart）
+			// 起点是"你站的那份完整副本"时说明一句（与导出对话框、导出结果共用同一句话，
+			// 见 bundle/log.ts 的 describeExportStart）
 			const startNote = describeExportStart(preview.start);
 			if (startNote) {
 				contentEl.createEl('p', { text: startNote, cls: 'locally-save-hint' });
+			}
+
+			// 「该立新完整包了」：引擎按这份包自起点以来要搬的字节数算好，到阈值才给一句。
+			// **预览里也要提前说** —— 用户看到这一句就能先导一份完整副本，把累积截断在这里
+			if (preview.advice) {
+				contentEl.createEl('p', { text: preview.advice, cls: 'locally-save-warn' });
 			}
 
 			if (preview.existing) {
