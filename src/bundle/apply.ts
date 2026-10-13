@@ -266,6 +266,11 @@ export interface ApplyReport {
 	foldersToRemove: number;
 	/** 想删却删不掉的本地文件夹：清单里看不到东西、磁盘上还有（被排除规则挡住的文件） */
 	foldersKept: number;
+	/**
+	 * **应用完我站的基准会跟着落到这儿**（见 `ApplyPlan.adoptBaseline`）—— `null` ＝ 基准不动。
+	 * 界面上说一句：用户盯着"我站在第几代"这个数，它动了就得让他知道。
+	 */
+	baselineAdopted: { generation: number; hash: string } | null;
 	/** 包里一共有多少个文件夹（含空文件夹，以及"有文件的"那些目录） */
 	bundleDirCount: number;
 	/** 本地仓库现在有多少个文件夹 */
@@ -297,15 +302,38 @@ export interface ApplyPlan {
 	/** 要删掉的本地空文件夹（包里没有它；`mirror` 档会连"本机新建的"一起删） */
 	foldersToRemove: string[];
 	/**
-	 * **应用之前**那一刻的基准点清单（计划时定下：`state.bundle.fullFiles` 当时的样子）。
+	 * **应用之前我这边内容的样子**（计划时定下：`state.bundle.files` 当时的样子）。
 	 *
-	 * 执行阶段照它算新点，**不能再去读状态文件**：计划与执行之间状态可能已经往前走了 ——
-	 * 最典型的就是"应用前先把本机改动存成一个包"（`ui/bundle-modal.ts` 的 `parkLocalChanges`），
-	 * 那一步导出之后 `fullFiles` 变成"旧点 ＋ 我的改动"。照它算出来的新点就不等于
-	 * 包送到的那一点（对方头部 `targetBaselineHash` 报的那个），两边从此对不上 ——
-	 * 链条模型下这是硬伤：下一个包会被判"接不上"。
+	 * 包里的条目就是**接在它上面**的 —— 严格镜像算"包送到的状态"（`kept`）、
+	 * `checkAncestor` 那条"算一遍落点"、以及"应用前先把我这边的改动存成包"
+	 * （`parkLocalChangesFor` 的起点），用的都是这一份。
+	 *
+	 * **不是我站的那份完整副本**（`fullFiles`）：0.14 起两者会不一样 ——
+	 * 更新包不推进基准，"我站的那份完整副本"因此会比我的内容旧。拿旧的那一份当底，
+	 * 落点整个算错：早先几份更新包带来的那些文件全成了"我这边改过的"。用户报过现场：
+	 * 对面明明跟上一代一字不差，应用时却导出一份「第 88 → 89 代」的"我的改动"包。
+	 *
+	 * 执行阶段照这份快照算，**不能再去读状态文件**：计划与执行之间状态可能已经往前走了 ——
+	 * 最典型的就是"应用前先把本机改动存成一个包"，照它算出来的落点就不等于包送到的那一点。
 	 */
-	pointBefore: Record<string, FileRecord>;
+	contentBefore: Record<string, FileRecord>;
+	/**
+	 * **应用完我就接在这个包的起点上**（它头部报的那一份完整副本）—— `null` ＝ 基准不动。
+	 *
+	 * 什么时候要动：这个包的起点**不是我站的那一份**（`checkAncestor` 里"算一遍落点对得上"
+	 * 那条例外放行的），而我的新内容确实就是"它那份起点 ＋ 这个包"。内容既然是从它长出来的，
+	 * 那才是我该站的点 —— 两边这才回到同一份完整副本上，下一次互发的包直接收得下，
+	 * 不必每次都靠"算一遍落点"兜着。
+	 *
+	 * **两道闸**（少一道就会记上一个假点）：
+	 * - 头部得写着 `baseFullBundle`：起点**真是一份完整副本**。合成出来的那种不算 ——
+	 *   "应用前先把本机改动存成包"那一份的起点是"对方那份包送到的那一点"（一个状态），
+	 *   谁手里都没有它的包文件，接上去两边就再也说不清站在哪一份上了；
+	 * - 清单是**倒推**出来的（落点里包点名的路径换回它带的 `base` 版本），
+	 *   并且要用头部那个 `baselineHash` **验一遍**；验不过（旧包没带 base、有条目没写成）
+	 *   就是 `null`，宁可不动。
+	 */
+	adoptBaseline: { files: Record<string, FileRecord>; generation: number; hash: string } | null;
 	/**
 	 * **这一趟送到的那一点上有哪些目录**（严格镜像的收尾照它办：那一点上没有的目录都清掉，
 	 * 有的一个不少）。空目录也是内容的一部分，所以这份名单必须与那一点完全一致。
@@ -813,6 +841,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// 这里先算清楚"属于我的那部分"有多少，界面上应用前就告诉用户 ——
 	// 不然用户只能对着两边都是"各半"的文件夹猜（用户问过：数据会不会缺）。
 	const anchor = state.bundle?.fullFiles ?? null;
+	/**
+	 * **我这边内容的样子**（`state.bundle.files`）＝ 上次跟对方交换之后两边的样子。
+	 *
+	 * 它才是"包里的条目接在哪儿"的答案（见 `ApplyPlan.contentBefore` 那段）：
+	 * "我自基准以来改了什么""我这边对方还没有的改动"都得跟**它**比，不能跟我站的那份
+	 * 完整副本比 —— 更新包不推进基准，那份完整副本会比我的内容旧，早先几份更新包
+	 * 带来的文件会被整片当成"我改过的"（用户报过的"对面明明一致、却导出我的改动包"）。
+	 */
+	const contentBefore: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
 	let pendingChanges = 0;
 	let pendingDeletes = 0;
 	/**
@@ -838,15 +875,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		}
 	} else if (anchor) {
 		for (const [file, record] of local.files) {
-			// 跟基准一模一样 → 不是改动
-			const atAnchor = anchor[file];
-			if (atAnchor && sameRecord(record, atAnchor, TOLERANCE)) continue;
+			// 跟"我上次交换完的样子"一模一样 → 不是我改的
+			const at = contentBefore[file];
+			if (at && sameRecord(record, at, TOLERANCE)) continue;
 			// 包里刚带来的那一版也不算"我的"：对方本来就有
 			const entry = entriesByPath.get(file);
 			if (entry && sameRecord(record, entry, TOLERANCE)) continue;
 			pendingChanges++;
 		}
-		for (const file of Object.keys(anchor)) {
+		for (const file of Object.keys(contentBefore)) {
 			if (local.files.has(file)) continue;
 			// 这个删除是包里点名的（对方删的），不是我这边删的
 			if (localDeleted.has(file)) continue;
@@ -890,13 +927,39 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * - 那一点上**还留着的文件**的上级目录 —— 那些文件自基准以来没动过、不在包条目的名单里，
 	 *   但它们的目录同样是那一点的内容（本地也就有）。
 	 * - 被点名的删除要划掉：它的目录要是空了、导出方也没留着，那这一点上就没有它了。
+	 *
+	 * 底稿是**我这边内容的样子**（`contentBefore`），不是"我站的那份完整副本" ——
+	 * 同一件事只能有一份算法（跟 `checkAncestor` 那条"算一遍落点"、严格档的 `kept` 对齐），
+	 * 否则早先几份更新包带来的文件会从"这一点"上凭空消失、它们的目录会被当成多余的去删。
 	 */
-	const deliveredFiles = new Set<string>(Object.keys(anchor ?? {}));
-	for (const item of header.deleted) deliveredFiles.delete(item.path);
-	for (const entry of header.entries) deliveredFiles.add(entry.path);
+	const deliveredFiles: Record<string, FileRecord> = header.mode === 'full'
+		// 完整副本自带完整清单：应用完仓库就是它，不接在本地清单上
+		? Object.fromEntries(header.entries.map(entry => [entry.path, { size: entry.size, mtime: entry.mtime }]))
+		: { ...contentBefore };
+	if (header.mode !== 'full') {
+		for (const entry of header.entries) deliveredFiles[entry.path] = { size: entry.size, mtime: entry.mtime };
+		for (const item of header.deleted) delete deliveredFiles[item.path];
+	}
 	const deliveredDirs = new Set<string>(header.emptyDirs ?? []);
-	for (const file of deliveredFiles) deliveredDirs.add(dirnameRel(file));
+	for (const file of Object.keys(deliveredFiles)) deliveredDirs.add(dirnameRel(file));
 	deliveredDirs.delete('');
+
+	/**
+	 * **应用完我就接在这个包的起点上**（见 `ApplyPlan.adoptBaseline`）——
+	 * 只在这个包的起点**确实不是我站的那一份**、而且它**真是一份完整副本**时才算
+	 * （头部 `baseFullBundle`：合成出来的起点不是"点"，谁手里都没有它的包文件；
+	 * "送到我站的这一点"那种白跑一趟也不算 —— 我手里那一点比它更靠前，留着更好）。
+	 */
+	const declaredStart = header.mode === 'changes' ? baselineOfBundle(header) : null;
+	const myFullHash = state.bundle?.fullHash ?? null;
+	const adoptBaseline = declaredStart !== null
+		&& header.targetFullBundle !== true
+		&& header.baseFullBundle === true
+		&& myFullHash !== null
+		&& declaredStart !== myFullHash
+		&& header.targetBaselineHash !== myFullHash
+		? startPointOf(header, deliveredFiles, state.generation)
+		: null;
 
 	const foldersToRemove: string[] = [];
 	/** 想删却删不掉的：清单里看着是空的，磁盘上还有东西（被排除规则挡住的文件） */
@@ -979,6 +1042,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		foldersToCreate: [...bundleDirs].filter(dir => !local.dirs.has(dir)).length,
 		foldersToRemove: foldersToRemove.length,
 		foldersKept: foldersKept.length,
+		baselineAdopted: adoptBaseline
+			? { generation: adoptBaseline.generation, hash: adoptBaseline.hash }
+			: null,
 		bundleDirCount: bundleDirs.size,
 		localDirCount: local.dirs.size,
 		foldersInSync: [...bundleDirs].filter(dir => local.dirs.has(dir)).length,
@@ -990,10 +1056,52 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		report,
 		actions,
 		foldersToRemove,
-		pointBefore: { ...(state.bundle?.fullFiles ?? {}) },
+		contentBefore,
+		adoptBaseline,
 		deliveredDirs: [...deliveredDirs].sort(),
 		options: { conflictStrategy, propagateDeletions, keepBackup },
 	};
+}
+
+/**
+ * **把包声明的起点倒推出来**（清单层面）—— 见 `ApplyPlan.adoptBaseline`。
+ *
+ * 怎么倒推：拿"应用完我这边该有的样子"（落点），把包里**点名过**的路径换回它自己带的
+ * `base` 版本（条目与点名删除都带着）、点名的删除按 `base` 加回来 —— 得到的正是
+ * **对方导出时站的那一点**（更新包的每个 `base` 一律取自那份完整副本的清单，见 `export.ts`）。
+ *
+ * **必须用头部那个 `baselineHash` 验一遍**才对得上号：差一条都不认。
+ * 验不过（旧包没带 base / 有些条目没写成 / 落点里混进了起点上没有的东西）就返回 `null` ——
+ * 宁可不动基准，也不能把一个假点记上去（那会让两边的"站在同一份完整副本上"变成谎话）。
+ */
+function startPointOf(
+	header: BundleHeader,
+	landed: Record<string, FileRecord>,
+	/** 头部没给起点世代时的兜底（正常的新包一定带着 `baseGeneration`） */
+	fallbackGeneration: number,
+): { files: Record<string, FileRecord>; generation: number; hash: string } | null {
+	const declared = baselineOfBundle(header);
+	if (!declared) return null;
+	const start: Record<string, FileRecord> = { ...landed };
+	for (const entry of header.entries) {
+		const hasSize = entry.baseSize !== undefined;
+		const hasMtime = entry.baseMtime !== undefined;
+		// 记了一半的说不清（不猜）
+		if (hasSize !== hasMtime) return null;
+		if (hasSize) {
+			start[entry.path] = { size: entry.baseSize as number, mtime: entry.baseMtime as number };
+			continue;
+		}
+		// 没带 base ＝ 起点那份清单里**没有**它（新文件）—— 导出方就是这么记的（`export.ts` 的 `baseFields`）
+		delete start[entry.path];
+	}
+	for (const item of header.deleted) {
+		// 点名删除的路径在起点上一定存在（它就是从那一点上没的），没带 base 就没法倒推
+		if (item.baseSize === undefined || item.baseMtime === undefined) return null;
+		start[item.path] = { size: item.baseSize, mtime: item.baseMtime };
+	}
+	if (listingHashOfFiles(start) !== declared) return null;
+	return { files: start, generation: header.baseGeneration ?? fallbackGeneration, hash: declared };
 }
 
 /**
@@ -1267,14 +1375,14 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * 本机那一份相对基准就是一处改动，下次导更新包会带上它（`base` 由更新包自己说）。
 	 */
 	/**
-	 * 应用**之前**那个基准点的清单（见下面 `nextFullFiles`）。
+	 * 应用**之前**我这边内容的样子（见下面 `nextFullFiles`）。
 	 *
 	 * **照计划里那份快照算，不读现在的状态**：计划与执行之间可能已经导出过一次
-	 * （"应用前先把本机改动存成一个包"），那一步会让状态里的点往前走 ——
-	 * 照它算出来的新点就不是包送到的那一点了（见 `ApplyPlan.pointBefore`）。
+	 * （"应用前先把本机改动存成一个包"），那一步会让状态里的东西往前走 ——
+	 * 照它算出来的新清单就不是包送到的那一份了（见 `ApplyPlan.contentBefore`）。
 	 */
-	const anchorBefore: Record<string, FileRecord> = { ...plan.pointBefore };
-	/** 这次**真的写成了一致**的那些条目（新基准点由它拼出来） */
+	const contentBefore: Record<string, FileRecord> = { ...plan.contentBefore };
+	/** 这次**真的写成了一致**的那些条目（新清单由它拼出来） */
 	const freshAnchor: Record<string, FileRecord> = {};
 	for (const entry of plan.info.header.entries) {
 		const current = await statFile(toNative(options.vaultRoot, entry.path));
@@ -1282,12 +1390,12 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			&& current.size === entry.size
 			&& Math.abs(current.mtime - entry.mtime) <= TOLERANCE;
 		// 这一个路径先按"没成一致"算：一致的话下面再补回来
-		delete anchorBefore[entry.path];
+		delete contentBefore[entry.path];
 		if (!agreed) continue;
 		freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
 	}
 	for (const item of plan.info.header.deleted) {
-		delete anchorBefore[item.path];
+		delete contentBefore[item.path];
 	}
 
 	// 目录基准同理：只记**两边都见过**的目录（包里点了名的，且这次真的在本地）
@@ -1302,31 +1410,47 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *
 	 * - **完整副本**：它自己就是一份新基准（`freshAnchor` ＝ 真的写成了一致的那些条目）；
 	 * - **差量包**（头部 `targetFullBundle`）：它送到的是**另一份完整副本** ——
-	 *   清单 ＝ 应用前我站的那份 ＋ 包里的条目 − 点名的删除，正好是终点那份完整副本的样子
+	 *   清单 ＝ 应用前我这边的内容 ＋ 包里的条目 − 点名的删除，正好是终点那份完整副本的样子
 	 *   （对方头部 `targetBaselineHash` 报的就是它的指纹，必须算得一模一样）；
 	 * - **更新包**（送到"最新状态"）：**基准点不动** —— 它只是"从我站的这份完整包往外长的一层"。
 	 *   内容那一半照旧前进（`files` / `history` / `dirs` / 世代 / 状态编号），
 	 *   所以下一个包还是从同一份完整包往外算（累积语义），这一点是"回传对方直接收得下"的关键。
+	 * - **例外：这个包的起点不是我站的那一份**（`plan.adoptBaseline`，`checkAncestor` 那条
+	 *   "算一遍落点对得上"放行的）→ 基准跟着它走。内容上我的新状态就是"它那份起点 ＋ 这个包"，
+	 *   再把我留在一个它没有的旧点上，两边就永远对不上（下一次还要靠"算一遍落点"兜着），
+	 *   我一导出更新包又变成"从我那个旧点算起的整库回声"。
 	 */
 	const landedOnBaseline = isFull || plan.info.header.targetFullBundle === true;
+	const adopt = landedOnBaseline ? null : plan.adoptBaseline;
 	const nextFullFiles: Record<string, FileRecord> = isFull
 		? { ...freshAnchor }
-		: { ...anchorBefore, ...freshAnchor };
+		: { ...contentBefore, ...freshAnchor };
 	const landedHash = listingHashOfFiles(nextFullFiles);
 	state.bundle = {
 		lastExport: state.bundle?.lastExport ?? 0,
 		files: nextFullFiles,
-		fullFiles: landedOnBaseline ? nextFullFiles : (state.bundle?.fullFiles ?? nextFullFiles),
+		fullFiles: landedOnBaseline
+			? nextFullFiles
+			: (adopt?.files ?? state.bundle?.fullFiles ?? nextFullFiles),
 		fullGeneration: landedOnBaseline
 			? plan.info.header.targetGeneration
-			: (state.bundle?.fullGeneration ?? plan.info.header.targetGeneration),
+			: (adopt?.generation ?? state.bundle?.fullGeneration ?? plan.info.header.targetGeneration),
 		// 令牌：站在哪一份完整包上，对方下一个包一比就知道
-		fullHash: landedOnBaseline ? landedHash : (state.bundle?.fullHash ?? landedHash),
-		// 界面上要能说清"我站在哪一份完整包上"
-		fullFile: landedOnBaseline ? path.basename(options.file) : (state.bundle?.fullFile ?? path.basename(options.file)),
+		fullHash: landedOnBaseline ? landedHash : (adopt?.hash ?? state.bundle?.fullHash ?? landedHash),
+		// 界面上要能说清"我站在哪一份完整包上"。
+		// 接过别人的起点时那份包**不在本机**（我是从包头部与 base 倒推出来的）→ 如实留空
+		fullFile: landedOnBaseline
+			? path.basename(options.file)
+			: (adopt ? null : (state.bundle?.fullFile ?? path.basename(options.file))),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
 		dirs: keepDirs,
 	};
+	if (adopt) {
+		options.log.debug(
+			`基准跟着这个包落到第 ${adopt.generation} 代（${adopt.hash}）：这个包的起点不是我原来站的那一份，`
+			+ '而我的内容就是它 ＋ 这个包 —— 接上它，两边才回到同一份完整副本上',
+		);
+	}
 	// 记一笔"我收过什么"（界面上的「更新记录」）
 	appendBundleLog(state, {
 		at: Date.now(),

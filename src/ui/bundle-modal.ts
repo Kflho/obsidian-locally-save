@@ -843,6 +843,11 @@ export class ApplyBundleModal extends Modal {
 				+ `${(report.pendingDeletes ?? 0) > 0 ? `、${report.pendingDeletes} 个删除` : ''}`
 				+ '是对方没有的 —— 下次导出更新包会一起带过去');
 		}
+		// 这个包的起点不是我站的那一份（但内容上我正好在它的路线上）：应用完我就接在它那份起点上
+		if (report.baselineAdopted) {
+			line(`应用完你站的完整副本会落到第 ${report.baselineAdopted.generation} 代`
+				+ `（${report.baselineAdopted.hash}）—— 这个包就是从它算起的，接上它两边才在同一份完整副本上`);
+		}
 
 		// 走哪条路、按什么规则处理
 		this.reportEl.createEl('h3', { text: '会怎么处理' });
@@ -940,7 +945,7 @@ export class ApplyBundleModal extends Modal {
 			outDir: this.effectiveDir(),
 			configDir: this.plugin.configDir(),
 			onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '导出中' }),
-		}, { header: plan.info.header, pointBefore: plan.pointBefore });
+		}, { header: plan.info.header, contentBefore: plan.contentBefore });
 		return outcome.file;
 	}
 

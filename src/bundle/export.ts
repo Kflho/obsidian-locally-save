@@ -1076,6 +1076,10 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			baseGeneration: mode === 'changes' ? (anchor?.generation ?? state.generation) : null,
 			targetGeneration,
 			...(baselineHash ? { baselineHash } : {}),
+			// 起点是不是**真的一份完整副本**（见 `BundleHeader.baseFullBundle`）：
+			// 只有"我站的那一份 / 用户在下拉里指的那一份"才算（磁盘上有它的包、是个真点）；
+			// "应用前先把本机改动存成包"那一趟的起点是合成出来的（对方那份包送到的那一点），不算
+			...(mode === 'changes' && !options.anchorOverride && anchor?.hash ? { baseFullBundle: true } : {}),
 			// 这个包**送到**哪个状态（＝接收方应用完该有的样子）。
 			// 差量包：终点那份完整副本的指纹（`targetFullBundle` 告诉接收方"落到的是一份真基准"）；
 			// 普通更新包：落点的清单指纹（`landedPoint`——它不是基准点，只是一个状态）。
@@ -1278,8 +1282,12 @@ async function smallestGenerationOf(outDir: string, lineage: string, pointHash: 
  *
  * 为什么不是"我现在站的这一点"：
  * - **完整副本**：它自己的清单就是那个点；
- * - **更新包**：我应用前站的这一点（计划时那份快照）＋ 它的条目 − 它点名的删除
- *   （对方头部 `targetBaselineHash` 报的就是它，见 `apply.ts` 的 `nextFullFiles`）。
+ * - **更新包**：我应用前**手里内容的样子**（`ApplyPlan.contentBefore` 那份快照）
+ *   ＋ 它的条目 − 它点名的删除（对方头部 `targetBaselineHash` 报的就是它，
+ *   见 `apply.ts` 的 `nextFullFiles`）。**不能拿"我站的那份完整副本"顶替** ——
+ *   更新包不推进基准，那一份会比我的内容旧：早先几份更新包带来的文件全成了"我改过的"，
+ *   存出来的包把对方自己的改动又回敬一遍（用户报过：对面明明跟上一代一字不差，
+ *   应用时却导出一份「88 → 89 代」的"我的改动"包）。
  *
  * 拿它当起点存出来的就是「**新点 → 新点 ＋ 我的东西**」：我自己应用它＝在新点上把东西加回来，
  * 发给对方（他导出那个包之后正站在同一个新点上）应用＝同理。
@@ -1288,12 +1296,12 @@ async function smallestGenerationOf(outDir: string, lineage: string, pointHash: 
  */
 export function landedAnchorOf(
 	header: BundleHeader,
-	/** 应用**之前**我站的那一点（`ApplyPlan.pointBefore` 那份快照，不是现读的状态） */
-	pointBefore: Record<string, FileRecord>,
+	/** 应用**之前**我这边内容的样子（`ApplyPlan.contentBefore` 那份快照，不是现读的状态） */
+	contentBefore: Record<string, FileRecord>,
 ): BundleAnchor {
 	const files: Record<string, FileRecord> = header.mode === 'full'
 		? Object.fromEntries(header.entries.map(entry => [entry.path, { size: entry.size, mtime: entry.mtime }]))
-		: { ...pointBefore };
+		: { ...contentBefore };
 	if (header.mode !== 'full') {
 		for (const entry of header.entries) files[entry.path] = { size: entry.size, mtime: entry.mtime };
 		for (const item of header.deleted) delete files[item.path];
@@ -1338,10 +1346,10 @@ function landedDirsOf(anchor: BundleAnchor, landedPoint: Record<string, FileReco
  */
 export async function parkLocalChangesFor(
 	options: ExportOptions,
-	/** 这次要应用的那份包（计划里的头部）与"应用前我站的那一点" */
-	incoming: { header: BundleHeader; pointBefore: Record<string, FileRecord> },
+	/** 这次要应用的那份包（计划里的头部）与"应用前我这边内容的样子" */
+	incoming: { header: BundleHeader; contentBefore: Record<string, FileRecord> },
 ): Promise<ExportOutcome> {
-	const landed = landedAnchorOf(incoming.header, incoming.pointBefore);
+	const landed = landedAnchorOf(incoming.header, incoming.contentBefore);
 	/**
 	 * 被对方那份包覆盖的路径上，落点是**对方那一版**（我仓库里还是改动前的旧版本）——
 	 * 那些版本的指纹就在包条目里带着，交给导出那头算编号用（见 `ExportOptions.stateIdHashes`）。
