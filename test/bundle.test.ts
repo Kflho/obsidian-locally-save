@@ -2659,7 +2659,7 @@ const rbxPlan = await planBundleApply(rbxApply(RBX_M, STATE_RBX_M, rbxChanges.fi
 check('应用前就看得出"我这边还有 2 个改动、1 个删除"', [rbxPlan.report.pendingChanges, rbxPlan.report.pendingDeletes], [2, 1]);
 const rbxParked = await parkLocalChangesFor(
 	{ ...rbxExport(RBX_M, STATE_RBX_M), mode: 'changes' },
-	{ header: rbxPlan.info.header, pointBefore: rbxPlan.pointBefore },
+	{ header: rbxPlan.info.header, contentBefore: rbxPlan.contentBefore },
 );
 checkTrue('动手前把我这边的东西存成了一个包', rbxParked.file !== null, rbxParked.reason ?? '没存出来');
 const rbxParkedInfo = await readBundleInfo(rbxParked.file as string);
@@ -3312,7 +3312,7 @@ write(SQ2_B, 'y.md', 'B 自己的东西', T0 + 30_000);
 const sq2Plan = await planBundleApply(sq2Apply(SQ2_B, STATE_SQ2_B, sq2Ra.file as string));
 const sq2Parked = await parkLocalChangesFor(sq2Export(SQ2_B, STATE_SQ2_B), {
 	header: sq2Plan.info.header,
-	pointBefore: sq2Plan.pointBefore,
+	contentBefore: sq2Plan.contentBefore,
 });
 checkTrue('B 的那一半存成了包', typeof sq2Parked.file === 'string' && sq2Parked.file.length > 0, sq2Parked.reason ?? '');
 const sq2ParkedInfo = await readBundleInfo(sq2Parked.file as string);
@@ -3320,6 +3320,11 @@ check(
 	'存下来的那一环是「a56 → a56 ＋ 我的东西」（第 2 → 3 代）',
 	[sq2ParkedInfo.header.baseGeneration, sq2ParkedInfo.header.targetGeneration],
 	[2, 3],
+);
+check(
+	'它的起点是**合成出来的**（对方那份包送到的那一点）→ 不带「起点是真点」标记',
+	sq2ParkedInfo.header.baseFullBundle ?? null,
+	null,
 );
 check(
 	'起点＝A 那份包送到的那一点（站在 A56 上的机器直接能收）',
@@ -3359,6 +3364,161 @@ check(
 );
 check('两台站在同一个点上', sq2StateA.bundle?.fullHash, sq2StateB.bundle?.fullHash);
 check('状态编号也一致（两边内容一模一样）', sq2StateA.stateId?.id, sq2StateB.stateId?.id);
+
+// 52. 对面明明跟上一代一字不差，应用「87 → 88」时**不许**存出"我的改动"（用户报的现场）
+//
+// 现场原话："我留了 54 到 87 代，对面电脑应用后完全一致，然后再应用 87 到 88，
+// 显然对面不应该留自己改动，因为和 87 代完全一致，但实际会导出一个 88 到 89 代的改动包"。
+//
+// 病根是**"我站的那份完整副本"与"我这边内容的样子"被当成了一回事**：更新包不推进基准，
+// 所以 B 一路应用更新包跟到第 3 代之后，它状态里那份完整副本还停在第 1 代；
+// 而 A 新立的基准（第 3 代）＋ 这份「3 → 4」，条目是接在**第 3 代**（＝B 手里的内容）上的。
+// 拿第 1 代当底去算落点，A 自己早先几份包带来的 b.md / c.md 全成了"我这边改过的" ——
+// 于是存出一份「4 → 5 代」的包（用户的 88 → 89），把对方的改动原样回敬一遍。
+const LK = path.join(ROOT, 'landing');
+const LK_A = path.join(LK, 'a');
+const LK_B = path.join(LK, 'b');
+const LK_OUT = path.join(LK, 'transfer');
+const STATE_LK_A = path.join(LK, 'state-a.json');
+const STATE_LK_B = path.join(LK, 'state-b.json');
+for (const dir of [LK_A, LK_B, LK_OUT]) fs.mkdirSync(dir, { recursive: true });
+const lkExport = (root: string, stateFile: string, mode: 'full' | 'changes' = 'changes'): ExportOptions =>
+	({ ...exportOptions(root, stateFile, mode), outDir: LK_OUT });
+const lkApply = (root: string, stateFile: string, file: string): ApplyOptions =>
+	applyOptions(root, stateFile, file, { strictness: 'mirror' });
+const lkRun = async (root: string, stateFile: string, file: string): Promise<void> => {
+	await executeBundlePlan(await planBundleApply(lkApply(root, stateFile, file)), lkApply(root, stateFile, file));
+};
+
+// ① 两台站在同一份完整副本（第 1 代）上
+write(LK_A, 'a.md', 'A1', T0);
+write(LK_A, 'b.md', 'B1', T0);
+const lkFull1 = await exportBundle(lkExport(LK_A, STATE_LK_A, 'full'));
+await lkRun(LK_B, STATE_LK_B, lkFull1.file as string);
+
+// ② A 连导两份更新包（都从第 1 代算起），B 一份份应用 → 内容跟到第 3 代，基准却还在第 1 代。
+// C 机（留给 ⑧ 的差量包用）跟着 B 走同一套：现在就得跟着应用 —— 后一份更新包一导出来，
+// 前一份就被"同一份起点、同一形态"的规则清了（`removeSupersededChanges`），到时再找就没了。
+const LK_C = path.join(LK, 'c');
+const STATE_LK_C = path.join(LK, 'state-c.json');
+fs.mkdirSync(LK_C, { recursive: true });
+await lkRun(LK_C, STATE_LK_C, lkFull1.file as string);
+write(LK_A, 'b.md', 'B1 改长一点', T0 + 20_000);
+const lkUp1 = await exportBundle(lkExport(LK_A, STATE_LK_A));
+await lkRun(LK_B, STATE_LK_B, lkUp1.file as string);
+await lkRun(LK_C, STATE_LK_C, lkUp1.file as string);
+write(LK_A, 'c.md', 'C 新建的', T0 + 40_000);
+const lkUp2 = await exportBundle(lkExport(LK_A, STATE_LK_A));
+await lkRun(LK_B, STATE_LK_B, lkUp2.file as string);
+await lkRun(LK_C, STATE_LK_C, lkUp2.file as string);
+const lkBeforeB = await loadState(STATE_LK_B);
+check(
+	'B 的内容跟到第 3 代，但**从没应用过** A 后面立的那份完整副本（基准还在第 1 代）',
+	[lkBeforeB.generation, lkBeforeB.bundle?.fullGeneration],
+	[3, 1],
+);
+
+// C 机：同一套经历（内容第 3 代、基准第 1 代），留给 ⑧ 的差量包用
+const lkBeforeC = await loadState(STATE_LK_C);
+check(
+	'C 跟 B 一样：内容第 3 代、基准还停在第 1 代',
+	[lkBeforeC.generation, lkBeforeC.bundle?.fullGeneration],
+	[3, 1],
+);
+
+// ③ A 立一份新的完整副本当基准（第 3 代），再改一处 → 导「第 3 → 4 代」那一份
+const lkFull3 = await exportBundle(lkExport(LK_A, STATE_LK_A, 'full'));
+const lkAnchor3 = baselineOfBundle((await readBundleInfo(lkFull3.file as string)).header) as string;
+write(LK_A, 'd.md', 'D 又新建的', T0 + 60_000);
+const lkNext = await exportBundle(lkExport(LK_A, STATE_LK_A));
+const lkNextInfo = await readBundleInfo(lkNext.file as string);
+check(
+	'A 导的是「第 3 → 4 代」（起点是它刚立的那份完整副本）',
+	[lkNextInfo.header.baseGeneration, lkNextInfo.header.targetGeneration],
+	[3, 4],
+);
+check('这一份的起点是**真的一份完整副本**（磁盘上有它的包）', lkNextInfo.header.baseFullBundle, true);
+
+// ④ B 算一遍：它跟第 3 代一字不差 → **没有"我的改动"**，也不许存包
+const lkPlan = await planBundleApply(lkApply(LK_B, STATE_LK_B, lkNext.file as string));
+check('包送到的落点对得上，收得下（"算一遍落点"那条路）', lkPlan.report.viaMine, true);
+check(
+	'[回归] 不报"我这边还有改动"（那几个是 A 自己早先几份包带来的，不是我改的）',
+	[lkPlan.report.pendingChanges, lkPlan.report.pendingDeletes],
+	[0, 0],
+);
+const lkParked = await parkLocalChangesFor(lkExport(LK_B, STATE_LK_B), {
+	header: lkPlan.info.header,
+	contentBefore: lkPlan.contentBefore,
+});
+check('[回归] 应用前**没有**存出"我的改动"包（用户报的现场：导出了一份 88 → 89 代）', lkParked.file, null);
+checkTrue('并说清为什么', (lkParked.reason ?? '').includes('没有任何变化'), lkParked.reason ?? '');
+
+// ⑤ 应用完：**基准跟着落到第 3 代**（我的内容就是从它长出来的），记录也要如实跟上
+check('计划里就写着"基准会落到第 3 代"', lkPlan.report.baselineAdopted, { generation: 3, hash: lkAnchor3 });
+await executeBundlePlan(lkPlan, lkApply(LK_B, STATE_LK_B, lkNext.file as string));
+const lkAfterB = await loadState(STATE_LK_B);
+check('B 的世代跟到第 4 代', lkAfterB.generation, 4);
+check(
+	'B 站的那份完整副本＝A 立的那一份（第 3 代）—— 两边又回到同一份完整副本上',
+	[lkAfterB.bundle?.fullGeneration, lkAfterB.bundle?.fullHash],
+	[3, lkAnchor3],
+);
+check(
+	'[回归] 记录里 a/b/c/d 全在（以前会算成"第 1 代 ＋ 这一份"，把 c.md 丢掉）',
+	Object.keys(lkAfterB.bundle?.files ?? {}).sort(),
+	['a.md', 'b.md', 'c.md', 'd.md'],
+);
+
+// ⑥ B 自己改一处再导：只装"自第 3 代以来变过的"，不是"从第 1 代算起的整库回声"
+write(LK_B, 'mine.md', 'B 自己的东西', T0 + 80_000);
+const lkBack = await exportBundle(lkExport(LK_B, STATE_LK_B));
+const lkBackInfo = await readBundleInfo(lkBack.file as string);
+check('B 导的包从第 3 代算起（跟 A 站的是同一份）', lkBackInfo.header.baseGeneration, 3);
+check(
+	'条目只有"自第 3 代以来变过的"（B 自己那份 ＋ A 刚加的 d），不是 b.md / c.md 那些老改动',
+	lkBackInfo.header.entries.map(entry => entry.path).sort(),
+	['d.md', 'mine.md'],
+);
+
+// ⑦ A 直接收得下（两边基准一致，不必再靠"算一遍落点"兜着）
+await lkRun(LK_A, STATE_LK_A, lkBack.file as string);
+check('A 应用之后两边的改动都在', [read(LK_A, 'mine.md'), read(LK_A, 'd.md')], ['B 自己的东西', 'D 又新建的']);
+check(
+	'两台又站在同一份完整副本上',
+	(await loadState(STATE_LK_A)).bundle?.fullHash,
+	(await loadState(STATE_LK_B)).bundle?.fullHash,
+);
+
+// ⑧ 同一件事的另一条正路：**差量包**（"对方还站在老完整副本上时把它一次带过去"）。
+// C 机（上面那台）停在"内容第 3 代、基准第 1 代"；A 再改一处、立一份新完整副本（第 6 代），
+// 再导「3 → 6」的差量包。应用完 C 的基准要**正好落到第 6 代那份完整副本上** —— 以前会算成
+// "第 1 代 ＋ 这一份"，记下一个谁手里都没有包文件的假点（然后 C 的每一次导出都成了整库回声）。
+write(LK_A, 'n.md', 'N 又一处的改动', T0 + 100_000);
+const lkFull6 = await exportBundle(lkExport(LK_A, STATE_LK_A, 'full'));
+const lkFull6Info = await readBundleInfo(lkFull6.file as string);
+const lkAnchor6 = baselineOfBundle(lkFull6Info.header) as string;
+const lkDiff = await exportBundle({
+	...lkExport(LK_A, STATE_LK_A),
+	baseFingerprint: lkAnchor3,
+	toFingerprint: lkAnchor6,
+});
+checkTrue('差量包导出来了（「第 3 → 6 代」那一段）', lkDiff.file !== null, lkDiff.reason ?? '没导出来');
+check('导的是差量包（送到另一份完整副本）', (await readBundleInfo(lkDiff.file as string)).header.targetFullBundle, true);
+const lkDiffPlan = await planBundleApply(lkApply(LK_C, STATE_LK_C, lkDiff.file as string));
+check('它不是"送到我站的这一点"（C 站的还是第 1 代）', lkDiffPlan.report.targetIsMine, false);
+await executeBundlePlan(lkDiffPlan, lkApply(LK_C, STATE_LK_C, lkDiff.file as string));
+const lkAfterC = await loadState(STATE_LK_C);
+check(
+	'[回归] 差量包应用完基准＝第 6 代那份完整副本（以前会记成"第 1 代 ＋ 这一份"）',
+	[lkAfterC.bundle?.fullGeneration, lkAfterC.bundle?.fullHash],
+	[6, lkAnchor6],
+);
+check(
+	'内容记录也跟全了（a/b/c/d ＋ 对方那份 mine.md ＋ A 刚加的 n.md 都在）',
+	Object.keys(lkAfterC.bundle?.files ?? {}).sort(),
+	['a.md', 'b.md', 'c.md', 'd.md', 'mine.md', 'n.md'],
+);
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);

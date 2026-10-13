@@ -346,6 +346,10 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 				baseGeneration,
 				targetGeneration,
 				...(first.header.baselineHash ? { baselineHash: first.header.baselineHash } : {}),
+				// 起点是不是"真的一份完整副本"也**从段首那一环继承**（见 `BundleHeader.baseFullBundle`）：
+				// 段首那一环的起点要是合成的（"应用前先把本机改动存成包"那一份），
+				// 合出来的这一份也不能自称起点是真点 —— 接收方据此决定"要不要把基准接到它上面"
+				...(first.header.baseFullBundle === true ? { baseFullBundle: true } : {}),
 				...(plan.targetHash ? { targetBaselineHash: plan.targetHash } : {}),
 				// **段末那一环送到的是"一份完整副本"时，合并出来的这一份也一样**：
 				// 接收方应用它就该把基准推到那一份（否则它还站在老基准上，下一步导出的包

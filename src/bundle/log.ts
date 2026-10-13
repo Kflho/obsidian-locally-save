@@ -138,7 +138,7 @@ export function describeBundlePosition(state: PluginState): string[] {
 		lines.push('还没有站上过完整副本：先导出一份完整副本，或者应用对方发来的完整副本。');
 		return lines;
 	}
-	const name = bundle.fullFile ?? '（不知道是哪份包，旧版本留下的记录）';
+	const name = bundle.fullFile ?? '（磁盘上没有它的包文件：清单记在状态里）';
 	lines.push(
 		`你站的那份完整副本：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}`,
 	);
