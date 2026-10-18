@@ -2,8 +2,7 @@ import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { executeBundlePlan, isDestructivePlan, planBundleApply } from '../bundle/apply';
-import type { ApplyPlan, ApplyResult } from '../bundle/apply';
-import type { StateIdInfo } from '../sync/state';
+import type { ApplyOptions, ApplyPlan } from '../bundle/apply';
 import { describeStateId, describeExportRange, describeExportStart } from '../bundle/log';
 import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle/export';
 import { anchorOptions, listFullAnchorsSync } from '../bundle/anchor';
@@ -15,6 +14,8 @@ import { anchorFingerprintOf, coerceAnchorFingerprint } from '../settings/model'
 import type { DropdownComponent, TextComponent } from 'obsidian';
 import { BundleListView } from './bundle-list';
 import { pickBundleFromDrop } from './drop';
+import { syncGitNow } from './git';
+import { refreshStatusBar } from './status';
 import { focusWindow, markDestructive } from './modal-layout';
 import { formatBytes, formatDuration, formatTime } from '../utils/format';
 
@@ -372,6 +373,7 @@ export class ExportBundleModal extends Modal {
 				const startNote = describeExportStart(outcome.anchor?.start);
 				notes.push(
 					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
+					+ (outcome.moveCount > 0 ? `、${outcome.moveCount} 处移动/改名` : '')
 					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
 					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）`
 					+ `${describeExportRange(outcome)}${startNote ? ` · ${startNote}` : ''} → ${outcome.file}`
@@ -393,7 +395,7 @@ export class ExportBundleModal extends Modal {
 		this.statusEl.setText(notes.join('；'));
 		await this.list?.refresh();
 		if (!anySuccess) return;
-		new Notice(`导出完成：${notes.join('；')}`, 12000);
+		new Notice('导出完成', 5000);
 		/**
 		 * **不关这个窗口**（用户要的）。
 		 *
@@ -628,20 +630,34 @@ export class ApplyBundleModal extends Modal {
 	 * 应用方式固定严格同步（`strictness: 'mirror'`）：包的类型这会儿才知道，
 	 * 但两种类型走同一套语义 —— 应用完仓库就是包送到的状态。
 	 */
+	/**
+	 * 应用这个包要的参数（只算 / 真应用两处共用，免得"报告按只拉算、执行按双向跑"）。
+	 *
+	 * **只拉不推**时多带两样：`alignToPeer`（目标是对方那一点）与 `bundleDir`
+	 * （恢复本机误改时要找到基准完整副本）。其余方向保持普通语义：本机改动是我这一半。
+	 */
+	private optionsFor(file: string): ApplyOptions {
+		const receiveOnly = this.plugin.settings.gitEnabled
+			&& this.plugin.settings.syncDirection === 'download';
+		return {
+			settings: this.plugin.settings,
+			log: this.plugin.log,
+			vaultRoot: this.plugin.vaultRoot(),
+			stateFile: this.plugin.stateFile(),
+			file,
+			configDir: this.plugin.configDir(),
+			bundleDir: bundleBaseDir(this.plugin.settings),
+			strictness: 'mirror',
+			...(receiveOnly ? { alignToPeer: true } : {}),
+		};
+	}
+
 	private async replan(): Promise<void> {
 		const file = this.current;
 		if (!file) return;
 		this.applyButton?.setDisabled(true);
 		try {
-			const plan = await planBundleApply({
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				stateFile: this.plugin.stateFile(),
-				file,
-				configDir: this.plugin.configDir(),
-				strictness: 'mirror',
-			});
+			const plan = await planBundleApply(this.optionsFor(file));
 			this.plan = plan;
 			this.renderReport(plan);
 			this.applyButton?.setDisabled(false);
@@ -662,6 +678,7 @@ export class ApplyBundleModal extends Modal {
 		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '更新包'}`
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
+		if (report.moves > 0) add(`包里带了 ${report.moves} 处移动/改名`);
 		// 文件夹也要说清楚：只报文件的话，用户永远不知道目录这边差多少
 		add(`文件夹：包里 ${report.bundleDirCount} 个 · 本地 ${report.localDirCount} 个`
 			+ ` · 两边都有 ${report.foldersInSync} 个`
@@ -753,6 +770,19 @@ export class ApplyBundleModal extends Modal {
 					+ '完整副本是镜像，不合并：包里没有的本地文件会挪进回收目录（捞得回来），'
 					+ '本机改过的会被包里那一版覆盖（旧的同样进回收目录）—— 应用完这个仓库就是那个包。'
 					+ '两边站的完整副本是同一份，之后互发更新包才不会对不上。',
+				cls: 'locally-save-hint',
+			});
+		}
+
+		// 只拉不推：规则是"跟对面严格相等"。本机在包里没点名的文件上误改的，这次会被恢复，
+		// 不能让用户以为是"合并"（双向那条路才是保留本地改动、等回传）。
+		if (plan.alignToPeer) {
+			this.reportEl.createEl('p', {
+				text: report.restored > 0
+					? `只拉不推：这次会把本机误改的 ${report.restored} 个文件恢复成基准那一版`
+						+ '（你改的那份挪进回收目录）—— 应用完与对方严格相等。'
+					: '只拉不推：应用完与对方严格相等；本机在包里没点名的文件上一旦有改动，'
+						+ '会从基准完整副本恢复（你改的那份挪进回收目录），不会当成"我这一半"留着。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -904,25 +934,10 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	/**
-	 * 应用完的一句话：**我这台的状态编号 vs 包里记的那个**。
-	 *
-	 * 相同 ＝ 两边的文件内容一致（用户要的就是这个结论）；不同 ＝ 多半是我这边还有对方没有的
-	 * 改动（那笔"欠回传"，报告里也列了）；旧包没记 → 如实说"比不了"，不硬下结论。
+	 * 应用完的那句话已经缩到一句（"已应用同步包 · 两边一致"）；
+	 * 编号差的细节在更新记录里，不在通知里讲小作文。
 	 */
-	private stateIdSentence(result: ApplyResult, peer: StateIdInfo | null): string {
-		const mine = `状态 ${result.stateId.id}`;
-		switch (result.stateIdCompare) {
-			case 'match':
-				return `✓ 跟对方完全一致（${mine}）`;
-			case 'mismatch':
-				// 严格档下"差"的原因很具体：包没提到、而你又改过的那些文件（包里没有它们的字节）
-				// —— 它们会随你下次导出的更新包过去，对方应用完两边就一致了
-				return `${mine}，跟对方导出时的 ${peer?.id ?? '?'} 还差一点`
-					+ '（包没提到、而你又改过的那些文件；下次导出更新包会带上，对方应用完就一致了）';
-			default:
-				return `${mine}（对方那个包没记编号，比不了）`;
-		}
-	}
+
 
 	/**
 	 * **动手前先把"我这边的东西"存成一个包**（用户要的："本地最新更新保存为一个更新包"）。
@@ -964,26 +979,27 @@ export class ApplyBundleModal extends Modal {
 			 */
 			const strict = plan.report.strictness === 'mirror' || plan.report.strictness === 'bundle-wins';
 			let parked: string | null = null;
-			if (strict) {
+			/**
+			 * **只拉不推不存"我这一半"**：目标是跟对面严格相等，本机误改会被 `restore`
+			 * 从基准完整副本恢复进回收目录；再存一份回传包等于把误改当成要发出去的东西。
+			 */
+			if (strict && !plan.alignToPeer) {
 				this.reportEl.setText('正在把你这边的东西先存成一个包……');
 				parked = await this.parkLocalChanges(plan);
 				this.reportEl.setText('正在应用……');
 			}
 			const result = await executeBundlePlan(plan, {
-				settings: this.plugin.settings,
-				log: this.plugin.log,
-				vaultRoot: this.plugin.vaultRoot(),
-				stateFile: this.plugin.stateFile(),
-				file,
-				configDir: this.plugin.configDir(),
+				...this.optionsFor(file),
 				keepBackup: plan.options.keepBackup,
 				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '应用中' }),
 			});
 			this.plugin.reportProgress(null);
-			this.plugin.statusBar.setSummary(
-				`同步包已应用（写入 ${result.written}`
-				+ `${result.foldersCreated > 0 ? `、文件夹 ${result.foldersCreated}` : ''}）`,
-			);
+			/**
+			 * 状态栏重新按"统一的那一套"算：git 推拉结果 + 每台电脑的内容状态。
+			 * 以前这里手写一句"同步包已应用（写入 N）"，把"对方：…"整段盖掉了 ——
+			 * 用户应用完只看到自己写入了几个文件，看不到对面到底同没同步。
+			 */
+			await refreshStatusBar(this.plugin);
 
 			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
@@ -993,6 +1009,9 @@ export class ApplyBundleModal extends Modal {
 			}
 			const overwritten = plan.report.forcedOverwrites;
 			if (overwritten > 0) parts.push(`覆盖你改过的 ${overwritten} 个（你那一版挪进了回收目录）`);
+			if (result.restored > 0) {
+				parts.push(`恢复你误改的 ${result.restored} 个（旧版本挪进了回收目录）`);
+			}
 			if (result.moved > 0) parts.push(`改名 ${result.moved}`);
 			if (result.foldersCreated > 0) parts.push(`新建文件夹 ${result.foldersCreated}`);
 			if (result.foldersRemoved > 0) parts.push(`清理空文件夹 ${result.foldersRemoved}`);
@@ -1021,28 +1040,45 @@ export class ApplyBundleModal extends Modal {
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
 			// "两边到底一不一样"就是他最想知道的那句。
-			const sameSentence = this.stateIdSentence(result, plan.report.peerStateId);
-
 			// 什么都没写 / 没删 / 没建：说明本来就已经是包里那一版了，
 			// 别报成"写入 0、跳过 N"那样让人以为应用失败了
 			const didNothing = result.written === 0 && result.deleted === 0 && result.moved === 0
-				&& result.foldersCreated === 0 && result.foldersRemoved === 0;
+				&& result.restored === 0 && result.foldersCreated === 0 && result.foldersRemoved === 0;
 			if (didNothing && result.failed.length === 0) {
-				new Notice(
-					`同步包里的内容本来就已经在本地了（${result.skipped} 个文件一致），没有改动任何东西`
-					+ `；${sameSentence}`,
-					8000,
-				);
+				new Notice('没有改动 · 本地已经是最新', 5000);
 			} else {
-				new Notice(`同步包已应用：${parts.join('、')}；${sameSentence}`, 9000);
+				const same = result.stateIdCompare === 'match' ? '两边一致' : '编号还差一点';
+				new Notice(`已应用同步包 · ${same}`, 6000);
 			}
 			this.close();
+			/**
+			 * **应用完马上把新状态写回货架并推上去**（只拉那台尤其要紧）：
+			 * 对面一直看不到"我应用完了 / 我回到哪一个状态"，只能靠它下次自己同步 ——
+			 * 用户报的"应用完了两边还是各说各话"有一半是这一步没做。
+			 * 失败不挡应用本身：状态文件已经落盘了，下一轮 30 秒节拍还会再试。
+			 */
+			void this.reportToShelf();
 		} catch (error) {
 			this.plugin.reportProgress(null);
 			const message = error instanceof Error ? error.message : String(error);
 			this.reportEl.setText(`应用失败：${message}`);
 			new Notice(`应用同步包失败：${message}`, 8000);
 			this.plugin.log.error('应用同步包失败', error);
+		}
+	}
+
+	/**
+	 * 应用完把"我现在在哪一步"写进货架并推上去（`syncGitNow` 里会写 `.lsave-peers`）。
+	 *
+	 * 只在那台机器**开了 git、而且货架已经接上**时才有意义；失败只记日志 ——
+	 * 应用本身已经成功，不该让一次网络失败看起来像应用失败。
+	 */
+	private async reportToShelf(): Promise<void> {
+		if (!this.plugin.settings.gitEnabled) return;
+		try {
+			await syncGitNow(this.plugin, { quiet: true });
+		} catch (error) {
+			this.plugin.log.debug('应用后上报状态失败（下一轮同步还会再试）', error);
 		}
 	}
 
@@ -1102,6 +1138,11 @@ class ConfirmApplyModal extends Modal {
 		});
 		if (report.forcedOverwrites > 0) {
 			facts.createEl('li', { text: `会覆盖 ${report.forcedOverwrites} 个本地改动过的文件` });
+		}
+		if (report.restored > 0) {
+			facts.createEl('li', {
+				text: `会恢复 ${report.restored} 个你这边误改的文件（只拉不推：与对方严格相等；旧版本挪进回收目录）`,
+			});
 		}
 		if (paths.length > 0) {
 			facts.createEl('li', {

@@ -28,7 +28,15 @@ import { YIELD_EVERY, yieldToUi } from '../utils/async';
 export const BUNDLE_MAGIC = Buffer.from('LOCALLYSAVE1\n', 'utf8');
 export const BUNDLE_TRAILER_MAGIC = Buffer.from('LSAVEEND', 'utf8');
 export const BUNDLE_FORMAT = 'locally-save-bundle';
-export const BUNDLE_VERSION = 1;
+/**
+ * 最高支持的包版本。**版本 2 才允许出现 `moves`**：
+ * 旧插件读到 v2 必须明确拒绝（`header.version > BUNDLE_VERSION` 那条），
+ * 否则它会把"移动操作"当成"这些文件没了/还在原地"，静默导错。
+ * 新插件仍然读 v1（没有 `moves` 的旧包）。
+ */
+export const BUNDLE_VERSION = 2;
+/** 没有移动操作时仍写 v1，保证老版本还能读普通包 */
+export const BUNDLE_VERSION_PLAIN = 1;
 /** 后缀：界面里也用这个值（settings/model.ts 的 BUNDLE_EXTENSION） */
 export const BUNDLE_EXT = '.lsave';
 
@@ -72,6 +80,27 @@ export interface BundleDeletedEntry {
 	baseSize?: number;
 	baseMtime?: number;
 	baseHash?: string;
+}
+
+/**
+ * 一个"移动/改名"操作（版本 2 才有）。
+ *
+ * 有了它，搬一个文件夹时**不用把里面每个文件的字节重新装一遍**：
+ * - `kind:'file'`：把旧路径的文件直接改名到新路径；`size`/`mtime` 用来核对源文件没被改过；
+ * - `kind:'dir'`：整棵子树改名；`files` 是文件数（报告/校验用）。
+ *
+ * 接收方必须**站在同一份基准上、源文件还在且没改过**；否则计划阶段直接拒绝
+ * （包里没带内容，硬做只会落一个错误的状态）。这是"省流量"换来的硬前提。
+ */
+export interface BundleMove {
+	from: string;
+	to: string;
+	kind: 'file' | 'dir';
+	/** 文件移动：源文件应有的大小/修改时间（应用端据此确认源没被改过） */
+	size?: number;
+	mtime?: number;
+	/** 目录移动：这棵子树里有几个文件（仅用于校验与报告） */
+	files?: number;
 }
 
 export interface BundleHeader {
@@ -163,6 +192,11 @@ export interface BundleHeader {
 	 * 而一个空文件夹没有任何文件可以"顺带"，不记就永远传不过去。
 	 */
 	emptyDirs?: string[];
+	/**
+	 * **移动/改名操作**（版本 2）：这些路径不占负载，应用端直接改名。
+	 * 旧插件读到版本 2 会拒绝（见 `BUNDLE_VERSION`），不会把移动误当成删除/新增。
+	 */
+	moves?: BundleMove[];
 	/** 负载总字节数 */
 	payloadBytes: number;
 }
@@ -242,7 +276,9 @@ export async function writeBundle(
 		offset += source.size;
 	}
 
-	const fullHeader: BundleHeader = { ...header, entries, payloadBytes: offset };
+	// 只有带移动操作的包才升到 v2；普通包保持 v1，老版本插件照样能读
+	const version = header.moves && header.moves.length > 0 ? 2 : BUNDLE_VERSION_PLAIN;
+	const fullHeader: BundleHeader = { ...header, version, entries, payloadBytes: offset };
 	const headerBytes = Buffer.from(JSON.stringify(fullHeader), 'utf8');
 	const lastSeparator = Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\'));
 	if (lastSeparator > 0) await ensureDir(file.slice(0, lastSeparator));

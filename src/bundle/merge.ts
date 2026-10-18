@@ -83,6 +83,8 @@ async function listRings(baseDir: string, lineage: string): Promise<RingRef[]> {
 	for (const item of await listBundles(baseDir)) {
 		const header = item.header;
 		if (!header || header.lineage !== lineage) continue;
+		// 带移动操作的包不参与合并：合并只拼文件条目/删除项，拼不了 moves（会静默丢掉移动）
+		if (header.moves && header.moves.length > 0) continue;
 		const from = baselineOfBundle(header);
 		const hash = header.mode === 'full' ? from : (header.targetBaselineHash ?? null);
 		if (!hash) continue; // 旧版更新包没记落点：接不出下一环，不能当边

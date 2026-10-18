@@ -2,13 +2,14 @@ import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
 import { registerCommands } from './commands';
 import { LocallySaveSettingTab, settingsFrom } from './settings';
 import type { PluginSettings } from './settings';
-import { describeLastActivity } from './bundle/log';
-import { STATE_FILE_NAME, loadState } from './sync/state';
-import { applyBundleAction, checkIncomingBundles, exportBundleAction, exportBundlesNow } from './ui/actions';
+import { STATE_FILE_NAME } from './sync/state';
+import { applyBundleAction, checkIncomingBundles, exportBundleAction, exportBundlesNow, isReceiveOnly, syncNow } from './ui/actions';
+import { maybeGitSync, syncGitNow } from './ui/git';
 import { registerBundleDropTarget } from './ui/drop-watch';
 import { registerProtocolHandler } from './ui/protocol';
 import { SyncStatusBar } from './ui/progress';
 import { pickIcon } from './ui/ribbon';
+import { openPeerStatus, refreshStatusBar } from './ui/status';
 import { createLogger } from './utils/log';
 import { toNative } from './utils/paths';
 
@@ -45,6 +46,18 @@ export default class LocallySavePlugin extends Plugin {
 	incomingBusy = false;
 	/** 上一次留包跑完的时间（定时留包靠它判断到没到点） */
 	lastBundleAt = 0;
+	/**
+	 * 正在和 git 远程同步。
+	 *
+	 * 与留包 / 收包互斥：同步会往包文件夹里写文件、也会读它，
+	 * 与应用（`apply.ts` 的 `applying`）也不许同时开跑 —— 那条由 `ui/git.ts` 自己查。
+	 */
+	gitBusy = false;
+	/** 上一次 git 同步的时间（拉取的节拍靠它；启动时是 0，所以第一拍就会拉） */
+	lastGitAt = 0;
+	/** 连续失败次数与退避截止时间：连不上时别每 30 秒弹一次 */
+	gitFailures = 0;
+	gitBackoffUntil = 0;
 	/** 保存事件攒到的"脏"时间：停下来多久之后才真的留包 */
 	private saveDirtyAt = 0;
 	private pendingSave = false;
@@ -59,14 +72,16 @@ export default class LocallySavePlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
-		this.statusBar = new SyncStatusBar(this.addStatusBarItem());
+		this.statusBar = new SyncStatusBar(this.addStatusBarItem(), () => {
+			void openPeerStatus(this, () => { void syncGitNow(this, { manual: true }); });
+		});
 
 		// 左侧栏三个入口。图标名用运行时清单挑（类型上 IconName 就是 string，
 		// 写错了只会静默显示成空白方块，见 ui/ribbon.ts）
 		this.ribbonSyncEl = this.addRibbonIcon(
 			pickIcon(['package-plus', 'archive', 'save']),
-			'Locally Save：立即留包',
-			() => { void exportBundlesNow(this); },
+			'Locally Save：立即同步（导出包 + 推拉）',
+			() => { void syncNow(this); },
 		);
 		this.ribbonExportEl = this.addRibbonIcon(
 			pickIcon(['package', 'archive', 'download']),
@@ -99,8 +114,13 @@ export default class LocallySavePlugin extends Plugin {
 			this.pendingSave = true;
 		}));
 
-		if (this.settings.syncOnStartup) {
+		// 「仅拉」只收不发：启动 / 定时 / 保存后都不写包（见 `isReceiveOnly`）
+		if (this.settings.syncOnStartup && !isReceiveOnly(this.settings)) {
 			this.app.workspace.onLayoutReady(() => { void exportBundlesNow(this, '启动留包', { quiet: true }); });
+		}
+		// git：启动后对一遍（关着 / 还没接上时 maybeGitSync 自己会安静跳过，不会自动 init）
+		if (this.settings.gitEnabled) {
+			this.app.workspace.onLayoutReady(() => { void maybeGitSync(this); });
 		}
 		this.log.debug(`已加载 v${this.manifest.version}`);
 	}
@@ -158,13 +178,8 @@ export default class LocallySavePlugin extends Plugin {
 	 * 不随重启丢 —— 0.8.0 之前它来自"上次同步到副本"的记录，那条通道已经砍掉了。
 	 */
 	private async restoreLastActivity(): Promise<void> {
-		try {
-			const state = await loadState(this.stateFile());
-			this.statusBar.setSummary(describeLastActivity(state));
-		} catch (error) {
-			// 读不到不影响用：状态栏继续显示"尚未留包"，下次留包会写新的
-			this.log.debug('读回上次留包记录失败', error);
-		}
+		// 状态栏那一句（上次留包 / git / 对方状态）在一个地方拼，见 ui/status.ts
+		await refreshStatusBar(this);
 	}
 
 	async saveSettings(): Promise<void> {
@@ -183,12 +198,15 @@ export default class LocallySavePlugin extends Plugin {
 	 */
 	private tick(): void {
 		if (!this.settings.enabled) return;
-		if (this.bundleBusy || this.incomingBusy) return;
+		if (this.bundleBusy || this.incomingBusy || this.gitBusy) return;
 		void this.runTick();
 	}
 
-	/** 一拍的实际内容（异步）：先收包，再留包 */
+	/** 一拍的实际内容（异步）：**先和远程对一遍**，再收包，最后才考虑留包 */
 	private async runTick(): Promise<void> {
+		// 先 git：拉下来的包，紧接着的收包就能看见（不用等下一拍）
+		await maybeGitSync(this);
+		if (this.bundleBusy || this.incomingBusy) return;
 		const acted = await checkIncomingBundles(this);
 		if (acted || this.bundleBusy || this.incomingBusy) return;
 		this.tickExport();
@@ -196,6 +214,8 @@ export default class LocallySavePlugin extends Plugin {
 
 	/** 留包那一半：定时到点了、或者保存后静置够久了，就留一轮 */
 	private tickExport(): void {
+		// 「仅拉」＝只收不发：这个方向下一个包都不写（手动「导出同步包…」除外）
+		if (isReceiveOnly(this.settings)) return;
 		if (!this.settings.autoExportChanges && !this.settings.autoExportFull) return;
 
 		const minutes = this.settings.autoSyncInterval;

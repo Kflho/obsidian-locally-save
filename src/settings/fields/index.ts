@@ -1,6 +1,7 @@
 import { AUTO_SECTION } from './auto';
+import { ADVANCED_SECTION } from './advanced';
 import { GENERAL_SECTION } from './general';
-import { INTERFACE_SECTION } from './interface';
+import { GIT_SECTION } from './git';
 import { SYNC_SECTION } from './sync';
 import type { ActionSpec, FieldSection, FieldSpec } from './types';
 
@@ -18,8 +19,9 @@ import type { ActionSpec, FieldSection, FieldSpec } from './types';
 export const SETTINGS_SECTIONS: FieldSection[] = [
 	GENERAL_SECTION,
 	SYNC_SECTION,
+	GIT_SECTION,
 	AUTO_SECTION,
-	INTERFACE_SECTION,
+	ADVANCED_SECTION,
 ];
 
 /** key → 字段，供读取 / 写入控件值时查收敛规则 */

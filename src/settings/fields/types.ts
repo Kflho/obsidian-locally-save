@@ -105,8 +105,8 @@ export interface FieldGroup<T = PluginSettings> {
 export interface ActionSpec<T = PluginSettings> {
 	/** 行标题。声明式定义里 name 是必填的（设置搜索要用），所以这里也必须给 */
 	name: string;
-	/** 行说明 */
-	desc?: string;
+	/** 行说明。可以给函数：**状态**这种要按当前情况现算（例如"已接上 / 还没接入"） */
+	desc?: string | ((plugin: LocallySavePlugin) => string);
 	/** 按钮上的字 */
 	button: string;
 	/** 主按钮（强调色） */
