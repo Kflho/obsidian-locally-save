@@ -31,27 +31,35 @@ carry on a USB drive, a cloud folder or a chat app, and applies it on the other 
   vault (the everyday case). It carries only what changed since that full snapshot, so it **grows as
   you keep working**: exporting or applying a changes bundle does **not** move your baseline. The
   plugin tells you when one has grown big enough that you should export a fresh full snapshot as the
-  new baseline. A changes bundle is accepted only when the receiving machine stands on the **exact
-  same full snapshot** (equal baseline fingerprint); otherwise it is rejected with concrete next
-  steps (re-export from your baseline, send the full copy it is based on, or send a full copy
-  instead).
+  new baseline. A changes bundle normally needs the receiving machine to stand on the **exact same
+  full snapshot** (equal baseline fingerprint). A package whose computed landing state matches the
+  receiver's current content is also accepted — that is what makes a recovery package usable after
+  the two baselines have drifted. Anything else is rejected with concrete next steps (re-export from
+  your baseline, send the full copy it is based on, or send a full copy instead).
 - **Applying is always a strict sync** (there is no mode to choose): files listed in the bundle win
   (your version goes to the trash), deletions listed in the bundle are performed, and local files the
-  bundle's target state does not contain are moved to the trash too. Your own pending changes are
-  packed into a changes bundle first — if that cannot be written, nothing is touched.
+  bundle's target state does not contain are moved to the trash too. In normal/bidirectional use your
+  own pending changes are packed into a changes bundle first — if that cannot be written, nothing is
+  touched. In **pull-only** mode there is no "your half": edits on paths the bundle does not name are
+  restored from the baseline full snapshot (the local version goes to trash), so the resulting state
+  id matches the sender.
 - Each bundle carries a payload checksum, a generation number, a baseline fingerprint and a content
   **state id** ("are the two sides actually identical?"). A bundle corrupted in transit is rejected
   instead of being written into your vault.
 - **Opening a bundle is read-only**: a full report (what will be added, overwritten, deleted) is
   computed first; nothing is written until you press Apply.
-- **Automatic modes** (off by default): auto-keep a bundle on a schedule / after edits, and
-  auto-apply an incoming changes bundle — the latter only when it would not delete or overwrite
-  anything you already have. Full copies are never applied automatically.
+- **Automatic modes** (off by default): auto-keep a bundle on a schedule / after edits, and auto-apply
+  incoming bundles. The sync direction decides the policy: **pull-only** applies full copies and
+  destructive updates (strict mirror, old local versions go to trash), **bidirectional** asks first,
+  and without git only non-destructive changes bundles are auto-applied.
 - **Optional git transport** (off by default, desktop + system `git`): the bundle folder itself can be
   a git worktree. New bundles are committed and pushed, the other machine's are pulled and applied;
-  each machine also publishes a tiny status file (`.lsave-peers/`) so both sides can tell whether they
-  are at the same state. **Full copies are never pushed** (too large) — you still carry the first one
-  on a USB drive. Applying is always the same strict, whole-state bundle logic; git is only the truck.
+  each machine publishes a tiny status file (`.lsave-peers/`) with its state id, generation, baseline
+  and host name. The status bar separates the git push/pull result (`已推送 / 已拉取 / 远程已是最新`)
+  from per-machine content status (`一致 / 不同步 / 待上报`); hover it or run
+  "查看各台电脑同步状态…" for per-machine details. **Full copies are never pushed** (too large) — you
+  still carry the first one on a USB drive; a pulled full copy is applied automatically in pull-only
+  mode. Applying is always the same strict, whole-state bundle logic; git is only the truck.
   With it off, the plugin makes no network requests at all.
 - **Install** from the Obsidian community plugin browser, or download `main.js`, `manifest.json` and
   `styles.css` from [Releases](https://github.com/Kflho/obsidian-locally-save/releases) and put them
@@ -107,12 +115,12 @@ The rest of this document is in Chinese (the plugin's UI language).
 > 第一次给别人机器搬家时用**完整副本**；对方应用完，两台机器就站在同一个**基准点**上，
 > 从此互相发更新包才对得上号。
 
-## 用 git 搬包（可选，0.15.0）
+## 用 git 搬包（可选）
 
 不想每次拷文件？把**同步包文件夹**接到一个**私有** git 仓库（GitHub / Gitee / 自建都行）：
 
 1. 设置 → Git 远程 → 打开「启用 git 传输」→ 填远程地址（HTTPS 或 SSH）→「接入这个远程…」；
-2. 平时点左侧栏第一个图标「**立即同步**」：**先拉一次对方状态 → 发号 → 导出 → 推拉 → 收包**，
+2. 平时点左侧栏第一个图标「**立即同步**」：**先和远程对一遍 → 发号 → 导出 → 再推拉 → 按方向收包**，
    一步到位（导哪种看自动留包开关；都没开时有基准导更新包、没基准导完整包）；
 3. **方向决定这台机器负责哪一半**（是硬边界，不只是提示）：
    - **仅拉**（只收不发）：拉下来直接应用 —— 连会删文件 / 删空文件夹 / 覆盖本地改动的包也照做，
@@ -484,7 +492,15 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
 
 **应用完报告说"还差一点"？**
 包里没提到、而你又改过的文件，包里没有它的字节 —— 差的就是它们。
-它们已经进了"应用前替你存下的那个包"，那个包被应用之后两边就一致了。
+双向同步时它们已经进了"应用前替你存下的那个包"，那个包被应用之后两边就一致了；
+**只拉不推**时不会留着：会从基准完整副本恢复成对面那一版（你改的那份进回收目录），
+应用完就与对面严格相等。
+
+**只拉那台误改了文件，会怎样？**
+只拉不推的规则是"和对面严格相等"。应用更新包时，包里没点名的本地改动会从基准完整副本恢复
+（旧版本进回收目录），不会被当成"我这一半"留着。前提是那台机器还留着基准完整副本；
+没有就先让它应用一份完整副本。若它自己导过完整副本、基准已经错位，导出端可以生成一份
+"不识别移动"的恢复包（起点仍是共同完整副本）：对面应用完，内容和基准会一起接回来。
 
 **能只应用包里的某几个文件吗？**
 不能。应用是整包语义（严格同步），为的是保证应用完两边内容一致、下一次的更新包接得上。
