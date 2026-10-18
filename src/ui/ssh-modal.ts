@@ -68,7 +68,7 @@ export class SshKeyModal extends Modal {
 			contentEl.createEl('p', { text: '没有找到 SSH 密钥（~/.ssh/id_ed25519 等）。' });
 			new Setting(contentEl)
 				.setName('生成一把密钥')
-				.setDesc('ed25519、无口令（插件要在后台同步，不能每次问口令）')
+				.setDesc('ed25519、无口令。插件在后台同步，不能每次问口令。')
 				.addButton(button => button
 					.setButtonText('生成')
 					.setCta()
@@ -100,7 +100,8 @@ export class SshKeyModal extends Modal {
 				} else {
 					new Setting(contentEl)
 						.setName('用 GitHub CLI 添加')
-						.setDesc('gh 已登录，但 token 缺 admin:public_key（添加会报 404）。先在这台机器的终端跑下面这条，然后关掉窗口重开；或者直接复制公钥到网页')
+						.setDesc('gh 已登录，但 token 缺 admin:public_key（添加会报 404）。'
+							+ '先在这台机器的终端跑下面这条，然后关掉窗口重开；也可以直接复制公钥到网页。')
 						.addButton(button => button
 							.setButtonText('复制命令')
 							.onClick(() => { void this.copyText(GH_REFRESH_COMMAND); }));
@@ -109,9 +110,9 @@ export class SshKeyModal extends Modal {
 
 			new Setting(contentEl)
 				.setName('测试 SSH 登录')
-				.setDesc('只测能不能用这把密钥登进远程主机，不改任何东西。'
-					+ 'GitHub 不开 shell：认证成功也可能返回退出码 1 —— 这里只看输出里的 '
-					+ '"successfully authenticated"，不看退出码')
+				.setDesc('只测这把密钥能不能登录远程主机，不改任何东西。'
+					+ 'GitHub 不提供 shell，认证成功也可能返回退出码 1，所以这里只看输出里的 '
+					+ '“successfully authenticated”。')
 				.addButton(button => button
 					.setButtonText('测试')
 					.onClick(() => { void this.test(host); }));
@@ -120,8 +121,8 @@ export class SshKeyModal extends Modal {
 		if (this.key) {
 			contentEl.createEl('p', {
 				cls: 'locally-save-hint',
-				text: '第一次连接可能会问主机指纹：先在终端里跑一次 `ssh -T git@' + host + '`；'
-					+ '或者在插件里直接点「测试」看报错。',
+				text: '第一次连接可能会问主机指纹：先在终端里跑一次 ssh -T git@' + host + '，'
+					+ '或者点「测试」看报错。',
 			});
 		}
 
@@ -132,7 +133,7 @@ export class SshKeyModal extends Modal {
 	}
 
 	private async generate(): Promise<void> {
-		this.setStatus('正在生成密钥……');
+		this.setStatus('正在生成密钥…');
 		const result = await generateSshKey();
 		if (result.error) {
 			this.setStatus(`生成失败：${result.error}`);
@@ -140,7 +141,7 @@ export class SshKeyModal extends Modal {
 		}
 		this.key = result.key;
 		this.render();
-		this.setStatus('密钥已生成。把上面的公钥贴到 GitHub（或用 gh 一键添加），再点「测试」。');
+		this.setStatus('密钥已生成。把上面的公钥贴到 GitHub（或用 gh 添加），再点「测试」。');
 	}
 
 	private async copyKey(): Promise<void> {
@@ -159,7 +160,7 @@ export class SshKeyModal extends Modal {
 
 	private async addWithGh(): Promise<void> {
 		if (!this.key) return;
-		this.setStatus('正在用 gh 添加公钥……');
+		this.setStatus('正在用 gh 添加公钥…');
 		const result = await addKeyWithGh(this.key);
 		this.setStatus(result.ok
 			? `已添加：${result.text}`
@@ -167,7 +168,7 @@ export class SshKeyModal extends Modal {
 	}
 
 	private async test(host: string): Promise<void> {
-		this.setStatus('正在测试 SSH 登录……');
+		this.setStatus('正在测试 SSH 登录…');
 		const result = await testSshHost(host);
 		this.setStatus(result.ok
 			? `SSH 登录通过：${result.text}`

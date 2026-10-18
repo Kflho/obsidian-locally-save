@@ -24,13 +24,13 @@ import { openPeerStatus } from '../ui/status';
 export function registerCommands(plugin: LocallySavePlugin): void {
 	plugin.addCommand({
 		id: 'sync-now',
-		name: '立即同步（导出包 + git 推拉）',
+		name: '立即同步（导出包并推拉）',
 		callback: () => { void syncNow(plugin); },
 	});
 
 	plugin.addCommand({
 		id: 'sync-preview',
-		name: '预览：这次同步会导出什么',
+		name: '预览这次会导出什么',
 		callback: () => { void previewBundleExport(plugin); },
 	});
 

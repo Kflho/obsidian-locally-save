@@ -287,8 +287,8 @@ export function baselineAdvice(
 	if (!(limitMb > 0)) return null;
 	const mb = payloadBytes / (1024 * 1024);
 	if (mb < limitMb) return null;
-	return `这一份更新包要搬 ${mb.toFixed(1)} MB（自第 ${anchorGeneration ?? '?'} 代那份完整副本以来攒下的改动）——`
-		+ `已经超过 ${limitMb} MB 了：建议顺手导一份新的完整副本当基准，之后的更新包会从它重新算起，小得多`;
+	return `这一份更新包要搬 ${mb.toFixed(1)} MB（自第 ${anchorGeneration ?? '?'} 代那份完整副本以来攒下的改动），`
+		+ `已经超过 ${limitMb} MB。建议导一份新的完整副本当基准，之后的更新包会从它重新算起，小得多。`;
 }
 
 /**
@@ -456,10 +456,10 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 	if (found) return found;
 
 	throw new Error(
-		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一个状态。`
+		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一份完整副本。`
 		+ `${describeAnchorList(anchors)}。`
 		+ '先把那份包拷进来（或从回收站捞回来），'
-		+ '或者把设置里「从哪个状态开始」改回「自动：我站的那一份完整包」',
+		+ '或者把设置里「从哪个状态开始」改回「自动：我站的那份完整副本」',
 	);
 }
 
@@ -499,8 +499,8 @@ async function resolveStart(options: ExportOptions, state: PluginState): Promise
 	const anchor = await resolveAnchor(options, state);
 	if (!anchor) {
 		throw new Error(
-			'还没导出过完整副本：更新包是"从某个状态到某个状态"的差量，没有起点就没法算。'
-			+ '请先用「完整副本」导一次（对方也必须先应用它）',
+			'还没有完整副本：更新包是两份完整副本之间的差量，没有起点就算不出来。'
+			+ '请先导一份完整副本（对方也要先应用它）',
 		);
 	}
 	return { anchor, info: { picked: explicit ? 'explicit' : 'self', mine } };
@@ -521,7 +521,7 @@ async function resolveTarget(options: ExportOptions, state: PluginState): Promis
 
 	// 链条上的点（某份更新包落出的那一点）不再是状态 —— 0.14 起只有完整副本能当终点
 	throw new Error(
-		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一个完整副本。`
+		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一份完整副本。`
 		+ `${describeAnchorList(anchors)}。`
 		+ '先把那份包拷进来（或从回收站捞回来），'
 		+ '或者把设置里「到哪个状态为止」改回「最新（当前仓库）」',
@@ -841,8 +841,8 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 
 	if (mode === 'changes' && !anchorFiles) {
 		throw new Error(
-			'还没导出过完整副本：更新包是"从某个状态到某个状态"的差量，没有起点就没法算。'
-			+ '请先用「完整副本」导一次（对方也必须先应用它）',
+			'还没有完整副本：更新包是两份完整副本之间的差量，没有起点就算不出来。'
+			+ '请先导一份完整副本（对方也要先应用它）',
 		);
 	}
 
@@ -1871,7 +1871,7 @@ async function removeSupersededChanges(
 		if (other.mode !== 'changes') continue;
 		// 到这儿它就是一个"看着该被取代"的更新包了：没删就得说清为什么
 		if (other.lineage !== header.lineage) {
-			kept.push({ name: item.name, why: '不是同一条血脉的包（多半是另一台机器另立的基准）' });
+			kept.push({ name: item.name, why: '另一个来源的包（多半是另一台机器另立的基准）' });
 			continue;
 		}
 		/**
@@ -1886,8 +1886,8 @@ async function removeSupersededChanges(
 			if (otherBase !== myBase) {
 				kept.push({
 					name: item.name,
-					why: `另一份起点的包（第 ${other.baseGeneration ?? '?'} → ${other.targetGeneration} 代）`
-						+ '—— 还站在那份完整副本上的机器要用它',
+					why: `另一份起点的包（第 ${other.baseGeneration ?? '?'} → ${other.targetGeneration} 代），`
+						+ '还站在那份完整副本上的机器要用它',
 				});
 				continue;
 			}
@@ -1908,7 +1908,7 @@ async function removeSupersededChanges(
 			if (mineIsCheckpoint !== otherIsCheckpoint) {
 				kept.push({
 					name: item.name,
-					why: '终点形态不一样（一份送到另一份完整副本、一份送到最新状态）—— 两种各自有用',
+					why: '终点形态不一样（一份送到另一份完整副本，一份送到最新状态），两种各自有用',
 				});
 				continue;
 			}
@@ -1926,7 +1926,7 @@ async function removeSupersededChanges(
 				if (!otherCopy || !myCopy || otherCopy !== myCopy) {
 					kept.push({
 						name: item.name,
-						why: '认不出是不是我这台机器导的（另一台从同一份完整副本导的包装的是它那一半改动）—— 留着',
+						why: '认不出是不是我这台机器导的（另一台导的那一份是它那一半改动），留着',
 					});
 					continue;
 				}
@@ -1942,7 +1942,7 @@ async function removeSupersededChanges(
 			const otherCopy = other.source?.copyId;
 			const myCopy = header.source?.copyId;
 			if (!otherCopy || !myCopy || otherCopy !== myCopy) {
-				kept.push({ name: item.name, why: '别的机器导的（装的是它那一半改动）—— 留着' });
+				kept.push({ name: item.name, why: '别的机器导的（装的是它那一半改动），留着' });
 				continue;
 			}
 		}
@@ -1956,7 +1956,7 @@ async function removeSupersededChanges(
 		if (other.targetGeneration <= (other.baseGeneration ?? 0)) {
 			kept.push({
 				name: item.name,
-				why: `把大家带回第 ${other.targetGeneration} 代的那一份（回退说明）—— 正向导出生不出来，留着`,
+				why: `把大家带回第 ${other.targetGeneration} 代的那一份（回退说明），正向导出生不出来，留着`,
 			});
 			continue;
 		}

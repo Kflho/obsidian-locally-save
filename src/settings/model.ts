@@ -20,7 +20,7 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export const LOG_LEVEL_OPTIONS: Record<LogLevel, string> = {
 	silent: '不输出',
 	error: '只记错误',
-	debug: '全部输出（排查问题时用）',
+	debug: '全部输出（排查时用）',
 };
 
 /** 自动留包间隔（分钟）：键是存进 data.json 的值，值是面板上的文案 */
@@ -41,15 +41,15 @@ export const SYNC_INTERVAL_OPTIONS: Record<string, string> = {
  */
 export const SAVE_DELAY_OPTIONS: Record<string, string> = {
 	'0': '不留包',
-	'10': '停顿 10 秒后留包',
-	'30': '停顿 30 秒后留包',
-	'60': '停顿 1 分钟后留包',
-	'300': '停顿 5 分钟后留包',
+	'10': '保存 10 秒后留包',
+	'30': '保存 30 秒后留包',
+	'60': '保存 1 分钟后留包',
+	'300': '保存 5 分钟后留包',
 };
 
 export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
 	full: '完整副本（整个仓库）',
-	changes: '仅改动（自上次导出后变过的文件）',
+	changes: '更新包（自上次导出后变过的文件）',
 };
 
 /**
@@ -78,9 +78,9 @@ export const GIT_PULL_OPTIONS: Record<string, string> = {
 export type SyncDirection = 'both' | 'upload' | 'download';
 
 export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
-	both: '双向：收发都做（收到先确认，应用后把本机改动回传）',
-	upload: '仅推：只发不收（对面要自己应用）',
-	download: '仅拉：只收不发（收到直接应用，本机改动进回收目录）',
+	both: '双向：收发都做',
+	upload: '仅推：只发不收',
+	download: '仅拉：只收不发（收到直接应用）',
 };
 
 /**

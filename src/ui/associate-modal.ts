@@ -30,21 +30,20 @@ export class AssociateModal extends Modal {
 			text: '设置之后，双击 .lsave 文件就会用 Obsidian 打开、直接弹出应用对话框。',
 		});
 		contentEl.createEl('p', {
-			text: '注意：单纯把 .lsave「用 Obsidian 打开」是不通的 —— Obsidian 收到一个陌生路径只会'
-				+ '当成未知文件，压根到不了插件。能到插件的只有 URI 链接，'
-				+ '而且链接里必须写明交给哪个 vault（插件属于某个 vault）：',
+			text: '系统用 Obsidian 打开 .lsave 时，只有 URI 链接能到插件。链接里还要写明仓库名，'
+				+ '所以每台电脑、每个仓库各设一次：',
 			cls: 'locally-save-hint',
 		});
 		contentEl.createEl('p', { text: bundleLink('%1', this.vaultName), cls: 'locally-save-path' });
 		contentEl.createEl('p', {
-			text: `这次会关联到 vault「${this.vaultName}」。换 vault 或者改过仓库文件夹名的话，重新点一次即可。`,
+			text: `这次关联到仓库「${this.vaultName}」。换仓库或改过仓库文件夹名之后，重新设置一次。`,
 			cls: 'locally-save-hint',
 		});
 
 		if (!associationSupported()) {
 			contentEl.createEl('p', {
-				text: '当前平台不支持一键设置（这里只做了 Windows）。macOS / Linux 请手工把 .lsave '
-					+ '关联到上面这个链接；也可以直接把包拖到 Obsidian 窗口上，效果一样。',
+				text: '当前平台不支持一键设置（只实现了 Windows）。macOS / Linux 可以手动把 .lsave '
+					+ '关联到上面那个链接，或者直接把包拖到 Obsidian 窗口上。',
 				cls: 'locally-save-warn',
 			});
 			new Setting(contentEl).addButton(button => button
@@ -84,7 +83,7 @@ export class AssociateModal extends Modal {
 	}
 
 	private async install(): Promise<void> {
-		this.statusEl?.setText('正在写注册表……');
+		this.statusEl?.setText('正在写注册表…');
 		try {
 			await applyFileAssociation(this.vaultName);
 			this.statusEl?.setText('设置完成：现在双击 .lsave 就会用 Obsidian 打开并弹出应用对话框');
@@ -97,10 +96,10 @@ export class AssociateModal extends Modal {
 	}
 
 	private async uninstall(): Promise<void> {
-		this.statusEl?.setText('正在解除关联……');
+		this.statusEl?.setText('正在解除关联…');
 		try {
 			await removeFileAssociation();
-			this.statusEl?.setText('已解除：.lsave 现在回到"没有关联"的状态');
+			this.statusEl?.setText('已解除：.lsave 现在没有关联程序了');
 			new Notice('已解除 .lsave 的文件关联', 6000);
 		} catch (error) {
 			const message = describeCommandError(error);

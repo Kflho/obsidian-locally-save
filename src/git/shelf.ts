@@ -42,7 +42,7 @@ export class ShelfNestedError extends Error {
 	readonly outer: string;
 
 	constructor(outer: string) {
-		super(`这个文件夹在另一个 git 仓库里（${outer}）：换一个独立文件夹，别把货架放进库仓库`);
+		super(`这个文件夹在另一个 git 仓库里（${outer}）。换一个独立文件夹，别把同步包放进仓库。`);
 		this.name = 'ShelfNestedError';
 		this.outer = outer;
 	}
@@ -54,7 +54,7 @@ export class ShelfRemoteMismatchError extends Error {
 	readonly wanted: string;
 
 	constructor(current: string, wanted: string) {
-		super(`货架现在接的是 ${current}，设置里写的是 ${wanted}：地址不一样，插件不会自己改（改了就等于把包发到别处去）`);
+		super(`这个文件夹接的是 ${current}，设置里是 ${wanted}。地址不一样，插件不会自己改。`);
 		this.name = 'ShelfRemoteMismatchError';
 		this.current = current;
 		this.wanted = wanted;

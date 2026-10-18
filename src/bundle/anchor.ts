@@ -211,10 +211,10 @@ export function anchorOptions(
 	if (end === 'from') {
 		const detail = latest.generation !== null
 			? `我站的是第 ${latest.generation} 代${latest.hash ? ` · ${latest.hash}` : ''}`
-			: '还没站上过基准点（要先导一份完整副本）';
+			: '还没有完整副本（要先导一份）';
 		options[LATEST_STATE] = `自动：${detail}`;
 	} else {
-		options[LATEST_STATE] = '最新（当前仓库，现在这一刻）';
+		options[LATEST_STATE] = '最新（当前仓库）';
 	}
 	const seen = new Set<string>();
 	for (const anchor of anchors) {

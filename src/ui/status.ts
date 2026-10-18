@@ -111,16 +111,16 @@ export async function openPeerStatus(
 		}
 
 		if (!plugin.settings.gitEnabled) {
-			lines.push('git 传输关着：没有"远程同步"这回事；这里只看本机留包状态');
+			lines.push('git 传输关着，这里只显示本机的留包状态。');
 		} else {
 			const base = bundleBaseDir(plugin.settings);
 			if (base === '') {
-				lines.push('还没填「同步包文件夹」：去设置 → 同步包填一个仓库之外的目录');
+				lines.push('还没填「同步包文件夹」：去设置 → 同步包，填一个仓库之外的目录。');
 			} else {
 				const peers = readPeers(base, state.copyId);
 				lines.push('');
 				lines.push(peers.length === 0
-					? '还没有别的机器上报过状态：对方同步一次之后，这里会出现它。'
+					? '还没有别的机器上报状态。对方同步一次之后会出现在这里。'
 					: '各台机器（按最后上报排序）：');
 				for (const line of describePeersDetailed(peers, state.stateId?.id ?? null, state.stateId?.at ?? 0)) {
 					lines.push(line);

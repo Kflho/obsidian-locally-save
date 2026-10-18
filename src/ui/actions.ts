@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 import { exportBundle, exportRebaselineDiff, planBundleExport, plannedExportModes } from '../bundle/export';
 import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
-import { pickIncoming, sweepIncoming } from '../bundle/incoming';
+import { pickIncoming, sweepIncoming, unappliedIncoming } from '../bundle/incoming';
 import type { IncomingCandidate, IncomingPolicy, IncomingSweep } from '../bundle/incoming';
 import { describeExportRange } from '../bundle/log';
 import { listBundles } from '../bundle/manage';
@@ -165,7 +165,7 @@ async function runExport(
 		// 两台机器各导一份时，后导的那一份不会再用对方的号
 		const floor = options.generationFloor ?? await generationFloor(plugin, base);
 		const result = await writePlannedBundles(plugin, base, { ...options, generationFloor: floor });
-		const text = result.notes.length > 0 ? result.notes.join('、') : '什么都没有生成';
+		const text = result.notes.length > 0 ? result.notes.join('、') : '没有生成包';
 		// 自动触发 + 没有变化：正常结果，不打扰（状态栏与日志照写）
 		if (result.noChanges && quiet) {
 			await refreshStatusBar(plugin);
@@ -205,6 +205,21 @@ async function peerShortFor(plugin: LocallySavePlugin, base: string): Promise<st
 }
 
 /**
+ * 货架上还有几个"看过、但没应用成"的包（`needs-review` / `failed`）。
+ *
+ * 只给「立即同步」的总结用：那句总结如果说成"没有新改动"，用户会以为两边已经一致 ——
+ * 而实际上可能正躺着一份包等他处理（读不到就当 0，不该因为一个统计把同步说成失败）。
+ */
+async function unappliedCount(plugin: LocallySavePlugin, base: string): Promise<number> {
+	try {
+		const state = await loadState(plugin.stateFile());
+		return unappliedIncoming(await listBundles(base), state).length;
+	} catch {
+		return 0;
+	}
+}
+
+/**
  * **立即同步**（主入口）：导出包 → 和 git 远程推拉 → 应用拉下来的安全更新。
  *
  * 这是用户面前那一个按钮（左侧栏第一个图标、`sync-now` 命令、Git 页的「立即同步」）。
@@ -223,7 +238,7 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		return;
 	}
 	if (syncing || plugin.bundleBusy || plugin.gitBusy) {
-		new Notice('上一次同步 / 留包还没跑完');
+		new Notice('上一次同步或留包还没跑完');
 		return;
 	}
 
@@ -249,12 +264,16 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		 */
 		if (isReceiveOnly(plugin.settings)) {
 			plugin.statusBar.showActivity(`${label}：应用…`);
-			const acted = await checkIncomingBundles(plugin);
+			const acted = await checkIncomingBundles(plugin, { manual: true });
+			// 应用完立刻把新状态推上去（`syncGitNow` 会先写 peer，再提交推送）：
+			// 对面下一次拉取就能看到"我已经应用了"，而不是等下一次节拍
 			if (acted) await syncGitNow(plugin, { quiet: true });
 			await refreshStatusBar(plugin);
+			const waiting = await unappliedCount(plugin, base);
 			const peer = await peerShortFor(plugin, base);
 			new Notice(
 				`${label}：${acted ? '已应用对方的包' : '没有新包'}（仅拉：不导出）`
+					+ `${waiting > 0 ? ` · 还有 ${waiting} 个包没应用` : ''}`
 					+ `${peer ? ` · ${peer}` : ''}`,
 				6000,
 			);
@@ -295,9 +314,10 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 			return;
 		}
 
-		// 拉下来的包交给自动收包（安全边界不变：只应用不会动本机已有东西的更新包）
+		// 拉下来的包交给收包那条路。**手动点了同步**：上次被拦下的包也再试一次，
+		// 不然它会在 `state.incoming` 里躺到永远，两边代数一直差着（用户报的 108 / 109）
 		plugin.statusBar.showActivity(`${label}：应用…`);
-		const acted = await checkIncomingBundles(plugin);
+		const acted = await checkIncomingBundles(plugin, { manual: true });
 		/**
 		 * 结果按"用户实际关心什么"分三层：
 		 * - 我这边有没有导出 / 推上去；
@@ -307,17 +327,28 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		 * 不再用一句"已同步"把这三层糊在一起：推上去只说明远程有我的包，
 		 * 对方没拉、没应用之前，内容仍然是"待上报"。
 		 */
-		if (acted) parts.push('已应用对方的包');
-		else if (exported?.wrote && !exported.fullWritten) {
+		if (acted) {
+			parts.push('已应用对方的包');
+			// 应用完立刻推一次：新的状态编号 / 基准要让对面下一次拉取就看得到，
+			// 别等下一次 30 秒节拍（不然对面会在这一小段时间里报"不同步"）
+			await syncGitNow(plugin, { quiet: true });
+		} else if (exported?.wrote && !exported.fullWritten) {
 			parts.push(plugin.settings.syncDirection === 'upload' ? '已推送，等对方拉取' : '已推送');
 		} else if (exported?.fullWritten) {
 			// 完整包在 .git/info/exclude 里，不随 git 走 —— 别写成"已推送"
-			parts.push('完整包不进 git，要手动拷');
+			parts.push('完整副本不进 git，需要手动拷');
 		} else if (exported?.noChanges) {
 			parts.push('没有新改动');
 		} else {
 			parts.push('已推拉');
 		}
+		/**
+		 * **别让"没有新改动"读成"两边已经一样了"**：货架上可能还躺着一份没应用成的包
+		 * （完整副本、或者是让用户自己看的那种）。明明两边代数差着一截，点同步却只说"已经最新"，
+		 * 用户只会当成插件坏了（报过的现场：一台 108、一台 109）。
+		 */
+		const waiting = await unappliedCount(plugin, base);
+		if (waiting > 0) parts.push(`还有 ${waiting} 个包没应用（用「打开同步包并应用…」查看）`);
 		const peer = await peerShortFor(plugin, base);
 		if (peer) parts.push(peer);
 		await refreshStatusBar(plugin);
@@ -350,7 +381,7 @@ async function writePlannedBundles(
 	const generationFloor = options.generationFloor ?? 0;
 	if (!hasChanges(state, inventory)) {
 		return {
-			notes: ['自上次留包以来没有变化，没有生成包（要强行导一份完整副本：用「导出同步包…」）'],
+			notes: ['自上次留包以来没有变化，没有生成包（要导完整副本，用「导出同步包…」）'],
 			advice: null,
 			wrote: false,
 			noChanges: true,
@@ -406,9 +437,9 @@ async function writePlannedBundles(
 					);
 					if (diff.outcome?.file) {
 						written.push(diff.outcome.file);
-						notes.push(`顺带导了一份「旧基准 → 新完整包」的差量包（${diff.outcome.entryCount} 个文件）：对方收下就能跟上新基准`);
+						notes.push(`同时导了一份「旧基准 → 新完整包」的差量包（${diff.outcome.entryCount} 个文件）：对方收下就能跟上新基准`);
 					} else if (diff.error) {
-						notes.push(`没能顺带导差量包（${diff.error}）：对方还站在旧基准上时，得手动把新的完整包发过去`);
+						notes.push(`没能同时导差量包（${diff.error}）：对方还站在旧基准上时，得手动把新的完整副本发过去`);
 					}
 				}
 			}
@@ -429,7 +460,7 @@ async function writePlannedBundles(
 			continue;
 		}
 		if (result.kind === 'failed') {
-			notes.push(mode === 'full' ? `完整包没导成（${result.error}）` : `更新包没导成（${result.error}）`);
+			notes.push(mode === 'full' ? `完整副本没导成（${result.error}）` : `更新包没导成（${result.error}）`);
 		}
 	}
 	return { notes, advice, wrote, noChanges: false, fullWritten };
@@ -615,8 +646,8 @@ function confirmIncomingApply(
 			title: '收到对方的更新包',
 			lines: [
 				`「${candidate.bundle.name}」会：${summary}。`,
-				'本地被覆盖 / 删掉的文件会先进回收目录（.trash/locally-save），捞得回来。',
-				'应用完会把本机这边的改动导成更新包，对方拉到后两边就一致。',
+				'本地被覆盖或删掉的文件会先进回收目录（.trash/locally-save），能捞回来。',
+				'应用完会把本机的改动导成更新包，对方拉到后两边一致。',
 			],
 			confirmText: '应用',
 			onResolve: resolve,
@@ -630,9 +661,18 @@ function confirmIncomingApply(
  * 由 `main.tick()` 每 30 秒调一次，安全策略与基准判定在 `bundle/incoming.ts` 里；
  * 这里只负责"方向 → 策略"、通知、状态栏与"这一拍干了活没有"。
  *
+ * `manual`：用户自己点的「立即同步」。与自动节拍的区别**只有两处**，都在安全边界之内：
+ * - 上次停在 `needs-review` / `failed` 的包**重新挑出来**（用户明确要同步，就该再试一次）；
+ * - "起点对不上、先搁着"的那句提示**再说一遍**（自动节拍只提示一次，免得刷屏）。
+ * 应用的安全边界一个字没松：默认策略照样不碰会删东西的包；「双向」照样要确认。
+ *
  * 返回 true ＝ 这一拍动过东西（调用方据此跳过同拍的留包：刚应用完不该立刻回礼）。
  */
-export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<boolean> {
+export async function checkIncomingBundles(
+	plugin: LocallySavePlugin,
+	options: { manual?: boolean } = {},
+): Promise<boolean> {
+	const manual = options.manual === true;
 	const direction: SyncDirection | null = plugin.settings.gitEnabled
 		? plugin.settings.syncDirection
 		: null;
@@ -652,7 +692,7 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 	plugin.incomingBusy = true;
 	try {
 		const state = await loadState(plugin.stateFile());
-		const candidates = pickIncoming(await listBundles(base), state);
+		const candidates = pickIncoming(await listBundles(base), state, { retryBlocked: manual });
 		if (candidates.length === 0) return false;
 
 		const sweep = await sweepIncoming(
@@ -661,7 +701,7 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 			candidates,
 			direction === null ? {} : incomingPolicy(plugin, direction),
 		);
-		await reportIncomingSweep(plugin, sweep);
+		await reportIncomingSweep(plugin, sweep, { manual });
 		/**
 		 * **回礼**：刚把对方的改动合进来，我这边多出来的那一半得发回去，对面才能一致。
 		 *
@@ -698,7 +738,11 @@ export async function checkIncomingBundles(plugin: LocallySavePlugin): Promise<b
 const waitingNotified = new Set<string>();
 
 /** 把一次自动接包的结果说给用户听（各说各的，不糊成一句） */
-async function reportIncomingSweep(plugin: LocallySavePlugin, sweep: IncomingSweep): Promise<void> {
+async function reportIncomingSweep(
+	plugin: LocallySavePlugin,
+	sweep: IncomingSweep,
+	options: { manual?: boolean } = {},
+): Promise<void> {
 	for (const item of sweep.applied) {
 		const parts = [`写入 ${item.written}`];
 		if (item.deleted > 0) parts.push(`删除 ${item.deleted}`);
@@ -726,7 +770,11 @@ async function reportIncomingSweep(plugin: LocallySavePlugin, sweep: IncomingSwe
 		);
 	}
 
-	const fresh = sweep.waiting.filter(name => !waitingNotified.has(name));
+	// 手动的「立即同步」**不按"只说一次"压着**：用户就是来问"到底还差什么"的，
+	// 每点一次都说一遍才对（自动节拍才需要防刷屏）。
+	const fresh = options.manual === true
+		? sweep.waiting
+		: sweep.waiting.filter(name => !waitingNotified.has(name));
 	for (const name of fresh) waitingNotified.add(name);
 	if (fresh.length > 0) {
 		new Notice(`收到 ${fresh.length} 个更新包：起点对不上，让对方按你的基准重导`, 8000);

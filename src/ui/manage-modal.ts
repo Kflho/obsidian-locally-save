@@ -82,7 +82,7 @@ export class BundleManagerModal extends Modal {
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
 			.setName('想留一个还原点？')
-			.setDesc('用「导出同步包…」勾上「完整副本」：整个仓库写成一份包，你也会站到它上面（仓库文件不动）');
+			.setDesc('在「导出同步包…」里勾上「完整副本」：整个仓库写成一份包，你也会站到它上面，仓库文件不动。');
 		this.list = new BundleListView(this.plugin, contentEl, {
 			baseDir: () => this.effectiveDir(),
 			actionLabel: '应用…',
@@ -95,7 +95,7 @@ export class BundleManagerModal extends Modal {
 			showTrash: true,
 			// 「我现在基于第几代、状态编号是什么」——管包的时候最需要对上号
 			showPosition: true,
-			emptyText: '这个文件夹里还没有 .lsave 文件（先去「导出同步包」导一个）',
+			emptyText: '这个文件夹里还没有 .lsave 文件（先用「导出同步包」导一个）',
 		});
 		void this.list.refresh();
 		void this.renderPosition();
@@ -103,7 +103,7 @@ export class BundleManagerModal extends Modal {
 		new Setting(contentEl)
 			.addButton(button => button
 				.setButtonText('合并相邻的更新包…')
-				.setTooltip('把连着的一串小更新包并成一份大的（手里还留着以前那些小包时用：少几个文件，搬起来省事）')
+				.setTooltip('把连着的一串小更新包并成一份大的，少几个文件要搬')
 				.onClick(() => { void this.mergeAdjacent(); }))
 			.addButton(button => button
 				.setButtonText('更新记录…')
@@ -125,8 +125,8 @@ export class BundleManagerModal extends Modal {
 		const { plans, forks } = await planBundleMerges(this.effectiveDir(), state.lineage);
 		if (plans.length === 0) {
 			new Notice(forks > 0
-				? '没有可以合并的：同一个起点往外分了几份不同落点的包，哪条是正路只有你清楚，插件不替你猜'
-				: '没有可以合并的：这里没有"连着两份以上、首尾相接"的更新包');
+				? '没有可以合并的包：同一个起点分出了几份不同落点的包，插件不替你猜哪条是正路'
+				: '没有可以合并的包：这里没有首尾相接的更新包');
 			return;
 		}
 		new ConfirmMergeModal(this.app, plans, async () => {
@@ -153,7 +153,7 @@ export class BundleManagerModal extends Modal {
 			}
 			const parts = [...done];
 			if (failed.length > 0) parts.push(`失败：${failed.join('；')}`);
-			new Notice(`合并完成：${parts.join('、')}。原来那几份在回收站里，捞得回来`, 9000);
+			new Notice(`合并完成：${parts.join('、')}。原来那几份在回收站里，能捞回来。`, 9000);
 			await this.list?.refresh();
 			void this.renderPosition();
 		}).open();
@@ -175,13 +175,13 @@ export class BundleManagerModal extends Modal {
 			});
 			const changes = describeLocalChanges(state, inventory);
 			if (!changes) {
-				this.positionEl.setText('本机还没站上过完整副本（没导过、也没应用过）：先导一份完整副本，更新包才有起点');
+				this.positionEl.setText('本机还没有完整副本（没导过、也没应用过）：先导一份完整副本，更新包才有起点。');
 				return;
 			}
-			this.positionEl.setText(`本机现在：第 ${state.generation} 代`
-				+ `，自你站的那份完整副本以来改了 ${changes.changed} 个文件`
+			this.positionEl.setText(`本机：第 ${state.generation} 代。`
+				+ `自你站的那份完整副本以来改了 ${changes.changed} 个文件`
 				+ `${changes.deleted > 0 ? `、删了 ${changes.deleted} 个` : ''}`
-				+ '（这些就是下次更新包会装的内容）');
+				+ '，这些就是下次更新包会装的内容。');
 		} catch (error) {
 			this.positionEl.setText(`读不到本机状态：${describe(error)}`);
 		}
@@ -217,9 +217,8 @@ class ConfirmMergeModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '合并相邻的更新包' });
 		contentEl.createEl('p', {
-			text: '把连着的一串小更新包并成一份大的：几份并成一份，少几个文件要搬。'
-				+ '合并后那份的起点还是这一串的开头、终点还是这一串的末尾，内容一份都不少。'
-				+ '手里还留着以前那些小包时用它，日常新留的包不用管。',
+			text: '把连着的一串小更新包并成一份：几份并成一份，少几个文件要搬。'
+				+ '起点还是这一串的开头，终点还是末尾，内容一份不少。',
 			cls: 'locally-save-hint',
 		});
 
@@ -232,9 +231,8 @@ class ConfirmMergeModal extends Modal {
 			});
 		}
 		contentEl.createEl('p', {
-			text: '原来那几份会挪进回收站（不是真删，捞得回来）。'
-				+ '已经站在这些包送到的某个状态上的机器照样收得下合并后的这一份：'
-				+ '应用它会直接把你送到这一串的末尾。',
+			text: '原来那几份会挪进回收站，能捞回来。'
+				+ '已经站在这些包送到的状态上的机器，照样收得下合并后的这一份。',
 			cls: 'locally-save-hint',
 		});
 
