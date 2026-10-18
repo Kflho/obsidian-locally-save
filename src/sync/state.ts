@@ -108,6 +108,27 @@ export interface StateIdRecord extends StateIdInfo {
 	at: number;
 }
 
+/**
+ * 最近一次 git 同步的结果（状态栏与设置页读它）。
+ *
+ * 只记结果，不记凭据：远程地址在设置里，token 一律不落盘（用系统 git 的 credential helper / SSH）。
+ * 旧状态文件没有这一项 → null，界面不显示 git 那半句。
+ */
+export interface GitSyncRecord {
+	at: number;
+	ok: boolean;
+	/** 这一趟有没有真的把包推上去 */
+	pushed: boolean;
+	/** 这一趟从远程新落下来几个包 */
+	pulled: number;
+	/** 本地领先远程几个提交（没推上去的） */
+	ahead: number;
+	/** 远程领先本地几个提交（没拉下来的） */
+	behind: number;
+	/** 失败时那句话（成功了就没有这一项） */
+	error?: string;
+}
+
 export interface PluginState {
 	version: 1;
 	/** 这份副本的身份：第一次建状态时生成，之后不变（只用于排查问题） */
@@ -197,6 +218,8 @@ export interface PluginState {
 	 * 只留最近 `INCOMING_LIMIT` 笔，别把状态文件撑大。
 	 */
 	incoming: IncomingRecord[];
+	/** 最近一次 git 同步的结果（没启用 git 时是 null） */
+	git: GitSyncRecord | null;
 }
 
 /** 「这个包我处理过了」的一笔记录（自动应用那条路用） */
@@ -238,6 +261,8 @@ export interface BundleLogEntry {
 	/** 包里装了几个文件 / 点名删了几个 */
 	entries: number;
 	deleted: number;
+	/** 移动/改名操作有几处（版本 2 的包才有；旧记录没有这一项） */
+	moves?: number;
 	/** 这一次导出 / 应用之后，我这边的状态编号（见 `sync/state-id.ts`）：两台机器的日志一比就知道同不同步 */
 	stateId?: string;
 	/**
@@ -273,6 +298,7 @@ export function emptyState(): PluginState {
 		pendingReturn: null,
 		stateId: null,
 		incoming: [],
+		git: null,
 	};
 }
 
@@ -336,6 +362,22 @@ function normalizeState(raw: Partial<PluginState> | null): PluginState {
 		stateId: normalizeStateId(raw.stateId),
 		// 老状态文件没有这一项（那个年代还没有自动应用）：空表 ＝ 从头开始记
 		incoming: Array.isArray(raw.incoming) ? raw.incoming : [],
+		git: normalizeGit(raw.git),
+	};
+}
+
+/** 状态文件里的 git 同步记录：形状不对就当没有（别让界面显示一条假结果） */
+function normalizeGit(raw: Partial<GitSyncRecord> | null | undefined): GitSyncRecord | null {
+	if (!raw || typeof raw.at !== 'number' || !Number.isFinite(raw.at)) return null;
+	const count = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+	return {
+		at: raw.at,
+		ok: raw.ok === true,
+		pushed: raw.pushed === true,
+		pulled: count(raw.pulled),
+		ahead: count(raw.ahead),
+		behind: count(raw.behind),
+		...(typeof raw.error === 'string' && raw.error !== '' ? { error: raw.error } : {}),
 	};
 }
 

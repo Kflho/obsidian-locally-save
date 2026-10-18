@@ -14,6 +14,11 @@
 	color: var(--text-muted);
 }
 
+/* 状态栏那一格可点：打开「各台电脑同步状态」 */
+.locally-save-status-clickable {
+	cursor: pointer;
+}
+
 /* 按设置隐藏的入口（左侧栏图标 / 状态栏文字）。
    用类切换而不是拆掉元素：开关一改立刻生效，不用重载插件 */
 .locally-save-hidden {

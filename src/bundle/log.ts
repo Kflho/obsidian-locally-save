@@ -27,7 +27,8 @@ export function describeLogEntry(entry: BundleLogEntry): string {
 	const parts: string[] = [];
 	parts.push(entry.direction === 'export' ? '→ 导出' : '← 应用');
 	parts.push(entry.mode === 'full' ? '完整副本' : '更新包');
-	parts.push(`${entry.entries} 个文件${entry.deleted > 0 ? `（含 ${entry.deleted} 个删除）` : ''}`);
+	parts.push(`${entry.entries} 个文件${entry.deleted > 0 ? `（含 ${entry.deleted} 个删除）` : ''}`
+		+ `${entry.moves && entry.moves > 0 ? `、${entry.moves} 处移动` : ''}`);
 	parts.push(
 		entry.mode === 'full'
 			? `第 ${entry.target} 代 · 立基准`

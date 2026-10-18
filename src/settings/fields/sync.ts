@@ -1,36 +1,28 @@
-import {
-	DEFAULT_SETTINGS,
-	SIZE_WARN_OPTIONS,
-	coerceBoolean,
-	coerceAnchorFingerprint,
-	coerceNumberChoice,
-	coerceText,
-} from '../model';
+import { DEFAULT_SETTINGS, coerceText } from '../model';
 import type { PluginSettings } from '../model';
-import { anchorOptions, listFullAnchorsSync, LATEST_STATE } from '../../bundle/anchor';
 import { bundleBaseDir } from '../../bundle/paths';
-import { loadStateSync } from '../../sync/state';
 import { ApplyBundleModal, ExportBundleModal } from '../../ui/bundle-modal';
 import { BundleHelpModal } from '../../ui/help-modal';
 import { BundleManagerModal } from '../../ui/manage-modal';
 import { associationSupported } from '../../ui/associate';
 import { AssociateModal } from '../../ui/associate-modal';
-import type LocallySavePlugin from '../../main';
+import { syncNow } from '../../ui/actions';
 import type { FieldSection } from './types';
 
 /**
- * 「同步包」一页：包放哪儿、什么时候自动留、应用 / 管理包。
+ * 「同步包」一页：**只留日常要用的**。
  *
- * 0.8.0 起这是插件**唯一**的一条通道：**完整副本（基准 + 还原点）+ 更新包（天天搬）**。
- * 原来那一组"同步到本地文件夹副本"的设置（目标文件夹 / 同步方向 / 删除传播）
- * 随那条通道一起删掉了 —— 共用目录那种用法交给 Remotely Save 这类走云的插件，
- * 这里只做"不联网的单文件搬运"。
- * 0.11.0 又把「应用同步包时的默认处理」那一组删了：应用只剩"严格同步"一种语义。
+ * 包放哪儿、点一下同步、手动导出 / 管理 / 应用。
+ * 进包规则、更新包起点终点、校验、拖放这些不常用的，全挪到「高级」页 ——
+ * 用户提过"包设置太繁琐"，主页面不该摆一排下拉框。
+ *
+ * 0.8.0 起这是插件唯一的内容通道：完整副本（基准 + 还原点）+ 更新包（日常）。
+ * 0.11.0 把「应用方式」收成严格同步，界面上已经没有可选项。
  */
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '同步包',
-	desc: '把仓库打包成单个 .lsave 文件来回搬：先立一份完整副本当基准，之后只导"从那份完整副本到现在"的更新包',
+	desc: '留包 / 应用同步包。日常直接点左侧栏的「立即同步」就行，这一页只管东西放在哪',
 	groups: [
 		{
 			heading: '包放在哪',
@@ -38,90 +30,35 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: '包放在哪个文件夹（绝对路径）。完整包与更新包分别进它的 full 与 changes 子目录。必填',
+					desc: '包放在哪个文件夹（绝对路径，库外面）。完整包进它的 full 子目录，更新包进 changes。必填',
 					control: { type: 'text', placeholder: 'D:\\备份\\同步包' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
 				},
-				{
-					key: 'excludePatterns',
-					name: '不进包的文件',
-					desc: '一行一条，写法同 .gitignore：目录/ 表示整个目录，*.tmp 表示这一类文件，a/**/*.md 表示路径。默认已排除配置目录、回收目录与系统垃圾文件',
-					control: {
-						type: 'textarea',
-						placeholder: '一行一条，例如：\n附件/临时/\n*.tmp',
-						rows: 6,
-					},
-					coerce: value => coerceText(value, DEFAULT_SETTINGS.excludePatterns),
-				},
 			],
 		},
 		{
-			heading: '自动留包',
-			// 什么时候触发在「自动留包」那一页（启动 / 定时 / 保存后）；
-			// 这里只管留哪种包 —— 两个开关各自独立
-			fields: [
+			heading: '同步',
+			fields: [],
+			actions: [
 				{
-					key: 'autoExportChanges',
-					name: '留更新包',
-					desc: '留包时导一个更新包：只装自上一个基准点以来的新改动。第一次要先导一次完整副本',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
-				},
-				{
-					key: 'autoExportFull',
-					name: '留完整包',
-					desc: '留包时导一份完整副本（整个仓库重写一遍，大库会明显变慢）。它同时是一个基准点与还原点',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
-				},
-			],
-		},
-		{
-			heading: '更新包',
-			// 本地有几份完整包，就有几个"状态"，再加上默认那一项 ——
-			// 选项是在渲染那一刻扫包目录算出来的（见 bundle/anchor.ts）
-			fields: [
-				{
-					key: 'changesFromState',
-					name: '从哪个状态开始',
-					desc: '更新包从一份**完整副本**往外算，默认是你现在站的那一份。'
-						+ '对方还停在更老的一份上时，照它「更新记录」里那个基准指纹选那一份',
-					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
-					coerce: value => coerceAnchorFingerprint(value),
-				},
-				{
-					key: 'changesToState',
-					name: '到哪个状态为止',
-					desc: '默认「最新（当前仓库）」；选另一份完整副本则导一份"从起点到那一份"的差量包'
-						+ '（内容取自那份包，不是你现在的仓库）',
-					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
-					coerce: value => coerceAnchorFingerprint(value),
-				},
-				{
-					key: 'bundleSizeWarnLimit',
-					name: '攒大了提醒立新基准',
-					desc: '更新包是自起点那份完整副本累积的：超过这个大小就提醒你导一份新的完整副本换基准，'
-						+ '之后的更新包会从它重新算起',
-					control: { type: 'dropdown', options: SIZE_WARN_OPTIONS },
-					coerce: value => coerceNumberChoice(
-						value,
-						Object.keys(SIZE_WARN_OPTIONS).map(Number),
-						DEFAULT_SETTINGS.bundleSizeWarnLimit,
-					),
+					name: '立即同步',
+					desc: '导出包 + 和远程推拉 + 应用拉下来的安全更新。和左侧栏第一个图标是同一件事',
+					button: '同步',
+					cta: true,
+					run: plugin => { void syncNow(plugin); },
+					disabled: settings => !hasBundleDir(settings),
 				},
 			],
 		},
 		{
 			heading: '手动导出',
-			// 这一组没有设置项：导哪种包是"这一次要怎么导"的选择，
-			// 放在对话框里两个独立开关上（不是互斥的下拉框）
+			// 导哪种包是"这一次要怎么导"的选择，放在对话框里两个独立开关上（不是互斥的下拉框）
 			fields: [],
 			actions: [
 				{
 					name: '导出到文件',
-					desc: '把仓库打包成 .lsave 文件，拷到别的机器上应用。完整副本与更新包是两个独立开关，可以都要',
+					desc: '把仓库打包成 .lsave，拷到别的机器上应用。完整副本与更新包是两个独立开关，可以都要',
 					button: '导出同步包…',
-					cta: true,
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),
 				},
@@ -129,7 +66,6 @@ export const SYNC_SECTION: FieldSection = {
 		},
 		{
 			heading: '管理',
-			// 包攒多了要清、要看看某个包到底在哪个目录：这些都是"管已有的包"，不是设置项
 			fields: [],
 			actions: [
 				{
@@ -142,36 +78,12 @@ export const SYNC_SECTION: FieldSection = {
 		},
 		{
 			heading: '应用同步包',
-			fields: [
-				{
-					key: 'autoApplyIncoming',
-					name: '自动应用收到的更新包',
-					desc: '每 30 秒看一眼包文件夹：只在不会删东西、也不会覆盖你改过的内容时才自动应用；'
-						+ '完整副本、要删东西的、两边都改过的一律只提示一句',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncoming),
-				},
-				{
-					key: 'dropBundleToApply',
-					name: '拖入 .lsave 即打开应用对话框',
-					desc: '把 .lsave 拖到 Obsidian 窗口上就打开应用对话框（往笔记里拖图片、拖附件照旧）',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.dropBundleToApply),
-				},
-				{
-					key: 'bundleVerify',
-					name: '应用前校验完整性',
-					desc: '把整个包读一遍算校验和，确认传输没把文件弄坏（大包会多花几秒）',
-					control: { type: 'toggle' },
-					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.bundleVerify),
-				},
-			],
+			fields: [],
 			actions: [
 				{
 					name: '应用一个包',
 					desc: '选中包后先算一遍再给你看（同步程度、会改动哪些）；确认了才动文件',
 					button: '打开同步包并应用…',
-					cta: true,
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),
 				},
@@ -179,7 +91,6 @@ export const SYNC_SECTION: FieldSection = {
 		},
 		{
 			heading: '用 Obsidian 直接打开',
-			// 这一组也没有设置项：都是"点一下做一件事"的按钮
 			fields: [],
 			actions: [
 				{
@@ -203,41 +114,4 @@ export const SYNC_SECTION: FieldSection = {
 /** 没填「同步包文件夹」＝没地方放包、也没地方找包 —— 导出 / 应用按钮就该是灰的 */
 function hasBundleDir(settings: PluginSettings): boolean {
 	return bundleBaseDir(settings) !== '';
-}
-
-/**
- * 「从哪个状态 / 到哪个状态」的选项：**只有完整副本**，外加"默认"那一项
- * （起点端＝我站的那一份完整副本；终点端＝最新状态）。
- *
- * 0.14 起"链条上的中间点"（每份更新包落出的那一点）**不再是状态** ——
- * 它们没有自己的包文件、还得沿链条叠加才算得出来，正是"自由度太高、用户容易出错"的来源
- * （见 `docs/只有完整包才算基准点-实施计划.md`）。那个模块（`bundle/points.ts`）已经删了。
- *
- * 设置面板是同步渲染的，所以这里用的是同步那套读法（`listFullAnchorsSync` / `loadStateSync`）——
- * 只读包头部，很便宜。读不出来（没填包目录、状态文件还没建）也要给出一张表：
- * 至少留着默认那一项，否则下拉框会空着，用户以为这个设置坏了。
- */
-function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
-	const fallback = end === 'from'
-		? { [LATEST_STATE]: '自动：我站的那一份完整副本（还没立过基准）' }
-		: { [LATEST_STATE]: '最新（当前仓库，现在这一刻）' };
-	/** 现在存着的值（一个基准指纹）：那一份要是找不到了，也得把它列出来（否则下拉框会显示成别的项） */
-	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
-	try {
-		const base = bundleBaseDir(plugin.settings);
-		const state = loadStateSync(plugin.stateFile());
-		const anchors = listFullAnchorsSync(base, state.lineage);
-		const options = anchorOptions(anchors, end, {
-			generation: state.bundle?.fullGeneration ?? null,
-			hash: state.bundle?.fullHash ?? null,
-			file: state.bundle?.fullFile ?? null,
-		});
-		const wanted = coerceAnchorFingerprint(current);
-		if (wanted !== '' && !(wanted in options)) {
-			options[wanted] = `基准 ${wanted}（这个目录里找不到这一个状态）`;
-		}
-		return options;
-	} catch {
-		return fallback;
-	}
 }

@@ -43,6 +43,7 @@ export class ExportPreviewModal extends Modal {
 				continue;
 			}
 			const parts = [`${preview.fileCount} 个文件`, `约 ${formatBytes(preview.bytes)}`];
+			if (preview.moves.length > 0) parts.push(`移动/改名 ${preview.moves.length} 处`);
 			if (preview.mode === 'changes' && preview.deletedCount > 0) {
 				parts.push(`点名删除 ${preview.deletedCount} 个`);
 			}
@@ -74,7 +75,7 @@ export class ExportPreviewModal extends Modal {
 				continue;
 			}
 
-			if (preview.fileCount === 0 && preview.deletedCount === 0) {
+			if (preview.fileCount === 0 && preview.deletedCount === 0 && preview.moves.length === 0) {
 				contentEl.createEl('p', { text: '起点与终点之间没有变化，这个包不会生成。' });
 				continue;
 			}

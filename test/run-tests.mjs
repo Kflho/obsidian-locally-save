@@ -17,10 +17,18 @@ const entryPoints = [
 	"test/chain.test.ts",
 	"test/auto-export.test.ts",
 	"test/auto-apply.test.ts",
+	"test/incoming-direction.test.ts",
+	"test/download-mirror.test.ts",
+	"test/peers.test.ts",
 	"test/drop.test.ts",
 	"test/protocol.test.ts",
 	"test/settings.test.ts",
 	"test/commands.test.ts",
+	"test/git.test.ts",
+	"test/git-flow.test.ts",
+	"test/generation.test.ts",
+	"test/moves.test.ts",
+	"test/ssh.test.ts",
 ];
 const outdir = path.resolve("test/.build");
 

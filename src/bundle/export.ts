@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BUNDLE_EXT, BUNDLE_FORMAT, BUNDLE_VERSION, readBundleInfo, writeBundle } from './format';
-import type { BundleDeletedEntry, BundleHeader, BundleInfo, BundleSource } from './format';
+import type { BundleDeletedEntry, BundleHeader, BundleInfo, BundleMove, BundleSource } from './format';
 import { bundleDirForMode } from './paths';
 import type { BundleMode } from './paths';
 import { baselineOfBundle, baselineOfFullBundle, listingHashOfFiles } from './baseline';
@@ -46,6 +46,11 @@ export interface ExportOptions {
 	 * 所以改成由调用方明确指定，一次调用导一种，要两种就调两次。
 	 */
 	mode: 'full' | 'changes';
+	/**
+	 * 这次发号至少从它之后开始（git 货架上已经看到别的机器报过更高的号时用）。
+	 * 不管本机高水位多少，最终取较大值再 +1 —— 两台机器就不会各发一个同代包。
+	 */
+	generationFloor?: number;
 	/**
 	 * **这次更新包从哪个状态开始**：`null` / 不填 ＝ 我状态里那份最新的（原来的行为）；
 	 * 给一个**基准指纹**（16 位十六进制）＝ 接着**那一份**完整副本往后算。
@@ -105,6 +110,26 @@ export interface ExportOptions {
 	 */
 	skipPaths?: Iterable<string>;
 	/**
+	 * **即使相对起点没变过、也要装进包里**的路径（正常更新包只装"变过的"）。
+	 *
+	 * 只给"让对面撤销误改"这一种用途：对方在只拉模式下改了一个文件，而我们这边
+	 * 相对基准**没变过** —— 正常导出不会带上它（"没变"不是改动），可对方需要的正是
+	 * 我们这一版原样覆盖回去。条目照常带 `base`（基准里那一版），接收方比较时
+	 * 会把它判成"本地改过"，先把误改挪进回收目录、再写成我们的版本。
+	 *
+	 * 只对"从完整副本到最新"的更新包有效（差量包的内容由两份完整副本决定）。
+	 */
+	forcePaths?: Iterable<string>;
+	/**
+	 * **不要识别移动/改名**：把移动按"旧路径点名删除 + 新路径带内容写入"处理。
+	 *
+	 * 正常导出都该识别移动（省流量、包小）。唯一需要关掉的是"让只拉端撤销误改、
+	 * 并把基准接回起点"这种恢复包：带 `moves` 的包，应用端倒推起点时没有反向移动
+	 * 这条信息（`apply.ts` 的 `startPointOf`），`adoptBaseline` 会验不过 ——
+	 * 对面内容虽然改对了，基准还停在它自己导出的那份上，下一次又对不上。
+	 */
+	noMoves?: boolean;
+	/**
 	 * **这些路径的内容不在仓库里**（内容指纹照这份表取）。
 	 *
 	 * 用在"起点是合成的那一份"上（`anchorOverride`）：被对方那份包覆盖的路径上，
@@ -147,6 +172,8 @@ export interface ExportOutcome {
 	reason?: string;
 	entryCount: number;
 	deletedCount: number;
+	/** 这一份包里有几个移动/改名操作（这些不占负载） */
+	moveCount: number;
 	/** 包里一共有多少个文件夹（含空文件夹） */
 	dirCount: number;
 	/** 其中空文件夹几个（这些是"不记就传不过去"的那些） */
@@ -377,6 +404,8 @@ interface BundleWork {
 	history: Record<string, FileRecord[]>;
 	picked: string[];
 	deleted: BundleDeletedEntry[];
+	/** 这一趟识别出来的移动/改名（不占负载，接收方直接改名） */
+	moves: BundleMove[];
 	/**
 	 * 这一份"从 a 到 b"的差量包**已经导过了**（`changes/` 里躺着一份一模一样的）：
 	 * 记下那份包的文件名，调用方据此不重复生成（内容由两份完整包决定，重导只是白写一遍）。
@@ -500,6 +529,277 @@ async function resolveTarget(options: ExportOptions, state: PluginState): Promis
 }
 
 /**
+ * 从"旧路径没了 / 新路径出现"里认出**移动/改名**。
+ *
+ * 条件是硬的：旧路径的内容记录（大小 + 修改时间）与新路径**完全一致**，而且这一对候选**唯一**；
+ * 认不出来（同名同大小、时间也一样那种重复文件）就老老实实按"删旧 + 装新的"走 —— 宁可包大，
+ * 不乱配对。目录移动另外要求：整棵子树都是这样一一对应搬走的（没有留下、没有多出、目标事先不存在）。
+ *
+ * 只用**记录**（大小/mtime），不读旧内容：`fs.rename` 会保留 mtime，正常的"挪文件"都能认出来；
+ * 复制+删除导致 mtime 变了就认不出 —— 那种情况装内容也不会错。
+ */
+function detectMovesByRecords(
+	anchorFiles: Record<string, FileRecord>,
+	inventory: Inventory,
+	deleted: BundleDeletedEntry[],
+	picked: string[],
+	skip: Set<string>,
+): { moves: BundleMove[]; removedFrom: Set<string>; removedTo: Set<string> } {
+	const empty = { moves: [] as BundleMove[], removedFrom: new Set<string>(), removedTo: new Set<string>() };
+	const oldCandidates = deleted.filter(item =>
+		!skip.has(item.path)
+		&& item.baseSize !== undefined
+		&& item.baseMtime !== undefined
+		&& !inventory.files.has(item.path));
+	const newCandidates = picked.filter(file => !skip.has(file) && !anchorFiles[file]);
+	if (oldCandidates.length === 0 || newCandidates.length === 0) return empty;
+
+	// 按"大小相同 + mtime 在 2 秒容差内"一对一配对；同名同大小同时间（无法唯一）不猜。
+	// 用容差而不是精确相等：应用包时 utimes 的毫秒精度可能和状态里记的差一点点，
+	// 精确相等会让"已经搬过一次的文件"在下一轮认不出来。
+	interface Pair { from: string; to: string; record: FileRecord }
+	const newRecords = newCandidates
+		.map(file => ({ path: file, record: inventory.files.get(file) }))
+		.filter((item): item is { path: string; record: FileRecord } => item.record !== undefined);
+	const usedNew = new Set<string>();
+	const pairedOld = new Set<string>();
+	const pairs: Pair[] = [];
+	const pairOld = (old: BundleDeletedEntry, candidates: typeof newRecords): void => {
+		if (pairedOld.has(old.path)) return;
+		const oldRecord = anchorFiles[old.path];
+		if (!oldRecord) return;
+		const matches = candidates.filter(item =>
+			!usedNew.has(item.path)
+			&& item.record.size === oldRecord.size
+			&& Math.abs(item.record.mtime - oldRecord.mtime) <= DEFAULT_MTIME_TOLERANCE_MS);
+		if (matches.length !== 1) return;
+		const matched = matches[0]!;
+		usedNew.add(matched.path);
+		pairedOld.add(old.path);
+		pairs.push({ from: old.path, to: matched.path, record: matched.record });
+	};
+	// 先按 basename 配：目录里有多份"大小/时间完全一样"的文件时，按记录配对会张冠李戴
+	for (const old of oldCandidates) {
+		pairOld(old, newRecords.filter(item => path.basename(item.path) === path.basename(old.path)));
+	}
+	// 剩下的按记录（大小 + 2 秒容差）唯一配对：改名会改 basename，靠这个认
+	for (const old of oldCandidates) pairOld(old, newRecords);
+	if (pairs.length === 0) return empty;
+
+	/**
+	 * 目录候选：拿"大小 + mtime 相同"的旧/新路径找**公共后缀**。
+	 * `旧/sub/x` → `新/深/sub/x` 的公共后缀是 `sub/x`，前缀映射就是 `旧 → 新/深`。
+	 * 这样即使目录里有多个大小/时间完全一样的文件（无法一一配对），也能认出整目录移动；
+	 * 真正的校验在下面按**相对路径**重做一遍，不靠这次配对。
+	 */
+	const candidates = new Map<string, { from: string; to: string }>();
+	let budget = 4000;
+	for (const pair of pairs) {
+		const oldParts = pair.from.split('/');
+		const newParts = pair.to.split('/');
+		let suffix = 0;
+		while (suffix < oldParts.length && suffix < newParts.length
+			&& oldParts[oldParts.length - 1 - suffix] === newParts[newParts.length - 1 - suffix]) {
+			suffix++;
+		}
+		if (suffix === 0) continue;
+		const from = oldParts.slice(0, oldParts.length - suffix).join('/');
+		const to = newParts.slice(0, newParts.length - suffix).join('/');
+		if (from === '' || to === '') continue;
+		candidates.set(`${from}\u0000${to}`, { from, to });
+		if (--budget <= 0) break;
+	}
+	const pairByFrom = new Map(pairs.map(pair => [pair.from, pair]));
+
+	const depth = (dir: string): number => dir.split('/').length;
+	const claimed: { from: string; to: string }[] = [];
+	const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+	const moves: BundleMove[] = [];
+	const removedFrom = new Set<string>();
+	const removedTo = new Set<string>();
+	const consumed = new Set<Pair>();
+
+	for (const candidate of [...candidates.values()].sort((a, b) => depth(a.from) - depth(b.from))) {
+		if (claimed.some(item => overlaps(candidate.from, item.from) || overlaps(candidate.to, item.to))) continue;
+		const oldPrefix = `${candidate.from}/`;
+		const newPrefix = `${candidate.to}/`;
+		const oldUnder = Object.keys(anchorFiles).filter(file => file.startsWith(oldPrefix));
+		const newUnder = [...inventory.files.keys()].filter(file => file.startsWith(newPrefix));
+		if (oldUnder.length === 0 || newUnder.length !== oldUnder.length) continue;
+		if (Object.keys(anchorFiles).some(file => file.startsWith(newPrefix))) continue;
+		if ([...inventory.files.keys()].some(file => file.startsWith(oldPrefix))) continue;
+		let valid = true;
+		for (const oldPath of oldUnder) {
+			const toPath = newPrefix + oldPath.slice(oldPrefix.length);
+			const oldRecord = anchorFiles[oldPath];
+			const newRecord = inventory.files.get(toPath);
+			if (!oldRecord || !newRecord || !sameRecord(newRecord, oldRecord, DEFAULT_MTIME_TOLERANCE_MS)) {
+				valid = false;
+				break;
+			}
+		}
+		if (!valid) continue;
+		moves.push({ from: candidate.from, to: candidate.to, kind: 'dir', files: oldUnder.length });
+		claimed.push(candidate);
+		for (const oldPath of oldUnder) {
+			removedFrom.add(oldPath);
+			const pair = pairByFrom.get(oldPath);
+			if (pair) consumed.add(pair);
+		}
+		for (const newPath of newUnder) removedTo.add(newPath);
+	}
+
+	// 目录移动没吃掉的配对，就是文件级移动
+	for (const pair of pairs) {
+		if (consumed.has(pair)) continue;
+		moves.push({
+			from: pair.from,
+			to: pair.to,
+			kind: 'file',
+			size: pair.record.size,
+			mtime: pair.record.mtime,
+		});
+		removedFrom.add(pair.from);
+		removedTo.add(pair.to);
+	}
+
+	return { moves, removedFrom, removedTo };
+}
+
+/**
+ * 先按**路径**认整目录改名（内容改没改都行），剩下的再按记录认文件移动。
+ *
+ * 为什么不能只按记录：文件夹改名时如果里面有个文件同时被编辑，它的记录就变了，
+ * 按记录配不上；而它显然也是"跟着文件夹搬过去"的。按相对路径（basename + 后缀）
+ * 能给整棵子树配对：改过的文件照常带内容条目，没改的才真正"只移动、不传字节"。
+ */
+function detectMoves(
+	anchorFiles: Record<string, FileRecord>,
+	inventory: Inventory,
+	deleted: BundleDeletedEntry[],
+	picked: string[],
+	skip: Set<string>,
+): { moves: BundleMove[]; removedFrom: Set<string>; removedTo: Set<string> } {
+	const oldCandidates = deleted.filter(item =>
+		!skip.has(item.path)
+		&& item.baseSize !== undefined
+		&& item.baseMtime !== undefined
+		&& !inventory.files.has(item.path));
+	const newCandidates = picked.filter(file => !skip.has(file) && !anchorFiles[file]);
+	if (oldCandidates.length === 0 || newCandidates.length === 0) {
+		return { moves: [], removedFrom: new Set(), removedTo: new Set() };
+	}
+	const pickedSet = new Set(picked);
+	const newByBase = new Map<string, string[]>();
+	for (const file of newCandidates) {
+		const base = path.basename(file);
+		const list = newByBase.get(base);
+		if (list) list.push(file);
+		else newByBase.set(base, [file]);
+	}
+	const candidates = new Map<string, { from: string; to: string }>();
+	for (const old of oldCandidates) {
+		for (const file of newByBase.get(path.basename(old.path)) ?? []) {
+			const oldParts = old.path.split('/');
+			const newParts = file.split('/');
+			let suffix = 0;
+			while (suffix < oldParts.length && suffix < newParts.length
+				&& oldParts[oldParts.length - 1 - suffix] === newParts[newParts.length - 1 - suffix]) {
+				suffix++;
+			}
+			if (suffix === 0) continue;
+			const from = oldParts.slice(0, oldParts.length - suffix).join('/');
+			const to = newParts.slice(0, newParts.length - suffix).join('/');
+			if (from === '' || to === '') continue;
+			candidates.set(`${from}\u0000${to}`, { from, to });
+		}
+	}
+	const depth = (dir: string): number => dir.split('/').length;
+	const overlaps = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+	const moves: BundleMove[] = [];
+	const removedFrom = new Set<string>();
+	const removedTo = new Set<string>();
+	const claimed: { from: string; to: string }[] = [];
+	for (const candidate of [...candidates.values()].sort((a, b) => depth(a.from) - depth(b.from))) {
+		if (claimed.some(item => overlaps(candidate.from, item.from) || overlaps(candidate.to, item.to))) continue;
+		const oldPrefix = `${candidate.from}/`;
+		const newPrefix = `${candidate.to}/`;
+		const oldUnder = Object.keys(anchorFiles).filter(file => file.startsWith(oldPrefix));
+		const newUnder = [...inventory.files.keys()].filter(file => file.startsWith(newPrefix));
+		if (oldUnder.length === 0 || newUnder.length === 0) continue;
+		if (Object.keys(anchorFiles).some(file => file.startsWith(newPrefix))) continue;
+		if ([...inventory.files.keys()].some(file => file.startsWith(oldPrefix))) continue;
+		let valid = true;
+		for (const oldPath of oldUnder) {
+			const toPath = newPrefix + oldPath.slice(oldPrefix.length);
+			if (!inventory.files.has(toPath)) {
+				valid = false;
+				break;
+			}
+		}
+		if (!valid) continue;
+		for (const newPath of newUnder) {
+			const fromPath = oldPrefix + newPath.slice(newPrefix.length);
+			if (!anchorFiles[fromPath] && !pickedSet.has(newPath)) {
+				valid = false;
+				break;
+			}
+		}
+		if (!valid) continue;
+		moves.push({ from: candidate.from, to: candidate.to, kind: 'dir', files: oldUnder.length });
+		claimed.push(candidate);
+		for (const oldPath of oldUnder) removedFrom.add(oldPath);
+		for (const newPath of newUnder) {
+			const oldRecord = anchorFiles[oldPrefix + newPath.slice(newPrefix.length)];
+			const newRecord = inventory.files.get(newPath);
+			// 只有"内容没变"的路径才从 picked 里拿掉；改过/新增的仍要带内容
+			if (oldRecord && newRecord && sameRecord(newRecord, oldRecord, DEFAULT_MTIME_TOLERANCE_MS)) {
+				removedTo.add(newPath);
+			}
+		}
+	}
+
+	const oldLeft = deleted.filter(item => !removedFrom.has(item.path));
+	const newLeft = picked.filter(file => !removedTo.has(file));
+	const byRecords = detectMovesByRecords(anchorFiles, inventory, oldLeft, newLeft, skip);
+	const seen = new Set(moves.map(move => `${move.kind}\u0000${move.from}\u0000${move.to}`));
+	for (const move of byRecords.moves) {
+		const key = `${move.kind}\u0000${move.from}\u0000${move.to}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		moves.push(move);
+	}
+	for (const file of byRecords.removedFrom) removedFrom.add(file);
+	for (const file of byRecords.removedTo) removedTo.add(file);
+	return { moves, removedFrom, removedTo };
+}
+
+/**
+ * 上一份交换状态（`state.bundle.files`）相对基准做过哪些移动 —— 用来给"移动之后又删掉的文件"
+ * 补一条**新路径**的删除（只靠这一份包里的 current moves 看不出旧 → 中间路径）。
+ */
+function aliasesFromPrevious(
+	anchorFiles: Record<string, FileRecord>,
+	previous: Record<string, FileRecord>,
+	skip: Set<string>,
+): BundleMove[] {
+	if (Object.keys(previous).length === 0 || Object.keys(anchorFiles).length === 0) return [];
+	const previousFiles = new Map(Object.entries(previous));
+	const oldCandidates: BundleDeletedEntry[] = Object.entries(anchorFiles)
+		.filter(([file]) => !previousFiles.has(file) && !skip.has(file))
+		.map(([file, record]) => ({ path: file, baseSize: record.size, baseMtime: record.mtime }));
+	const newCandidates = Object.keys(previous).filter(file => !skip.has(file) && !anchorFiles[file]);
+	if (oldCandidates.length === 0 || newCandidates.length === 0) return [];
+	return detectMoves(
+		anchorFiles,
+		{ files: previousFiles, dirs: new Set<string>() },
+		oldCandidates,
+		newCandidates,
+		skip,
+	).moves;
+}
+
+/**
  * 算这次要装什么（**纯计算，不写盘**）。
  *
  * `exportBundle` 与「导出预览」共用它 —— 预览要能把"会装进去哪些文件、会点名删哪些"
@@ -547,8 +847,8 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	}
 
 	// ------------------------------------------------------ 挑出要装进包的文件
-	const picked: string[] = [];
-	const deleted: BundleDeletedEntry[] = [];
+	let picked: string[] = [];
+	let deleted: BundleDeletedEntry[] = [];
 	/** 这一趟不用管的路径（见 `ExportOptions.skipPaths`）：起点/终点两侧的比较都跳过它们 */
 	const skip = new Set(options.skipPaths ?? []);
 	const pushDeleted = (file: string, base: FileRecord) => {
@@ -597,7 +897,111 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）
 	const existing = target ? await findExistingCheckpoint(options, state, anchor, target) : null;
 
-	return { state, inventory, previous, anchor, start: start?.info ?? null, target, history, picked, deleted, existing };
+	/**
+	 * **改名/移动识别**：只对"从基准到最新"的更新包做（差量包的终点是一份完整副本，
+	 * 内容取自那份包，不在这里拆）。认出来的路径从 `picked`/`deleted` 里拿掉，
+	 * 包里只留一条操作；接收方按操作改名，不用重传内容。
+	 */
+	let currentMoves: BundleMove[] = [];
+	let finalMoves: BundleMove[] = [];
+	if (mode === 'changes' && target === null && options.noMoves !== true) {
+		const detected = detectMoves(anchorFiles ?? {}, inventory, deleted, picked, skip);
+		currentMoves = detected.moves;
+		if (currentMoves.length > 0) {
+			deleted = deleted.filter(item => !detected.removedFrom.has(item.path));
+			picked = picked.filter(file => !detected.removedTo.has(file));
+		}
+
+		/**
+		 * **上一份交换状态 → 现在**的移动：处理"已经搬过一次家、这次又搬"。
+		 * 例：基准里是 `旧`，上一份包搬成了 `新`（接收方手里是 `新`），这次又搬成 `新2`。
+		 */
+		let chainMoves: BundleMove[] = [];
+		if (Object.keys(previous).length > 0) {
+			const oldCandidates: BundleDeletedEntry[] = Object.entries(previous)
+				.filter(([file]) => !inventory.files.has(file) && !skip.has(file))
+				.map(([file, record]) => ({ path: file, baseSize: record.size, baseMtime: record.mtime }));
+			const newCandidates = [...inventory.files.keys()].filter(file => !skip.has(file) && !previous[file]);
+			if (oldCandidates.length > 0 && newCandidates.length > 0) {
+				const viaPrevious = detectMoves(previous, inventory, oldCandidates, newCandidates, skip);
+				chainMoves = viaPrevious.moves;
+				for (const from of viaPrevious.removedFrom) {
+					deleted = deleted.filter(item => item.path !== from);
+				}
+				for (const to of viaPrevious.removedTo) {
+					picked = picked.filter(file => file !== to);
+				}
+			}
+		}
+
+		/**
+		 * **包里带哪几条移动**：这次识别出来的 + 上一份状态到现在的链式移动。
+		 * 累积更新包里重复出现的移动由应用端按"源在就搬、目标在就跳过"处理。
+		 */
+		const rawMoves = [...currentMoves, ...chainMoves];
+		const seenMoves = new Set<string>();
+		const moves: BundleMove[] = [];
+		for (const move of rawMoves) {
+			const key = `${move.kind}\u0000${move.from}\u0000${move.to}`;
+			if (seenMoves.has(key)) continue;
+			seenMoves.add(key);
+			moves.push(move);
+		}
+		finalMoves = moves;
+
+		/**
+		 * 移动过、后来又删掉的文件：沿移动链把**每一个落点**都补一条删除。
+		 * 只发旧路径的话，已经搬过家的接收方删不掉它（手里是某个中间路径）。
+		 */
+		const aliases = [...moves, ...aliasesFromPrevious(anchorFiles ?? {}, previous, skip)];
+		if (aliases.length > 0) {
+			const pickedSet = new Set(picked);
+			const seenDeleted = new Set(deleted.map(item => item.path));
+			const extra: BundleDeletedEntry[] = [];
+			for (const item of deleted) {
+				let currentPath = item.path;
+				for (const move of aliases) {
+					let mapped: string | null = null;
+					if (move.kind === 'file' && currentPath === move.from) {
+						mapped = move.to;
+					} else if (move.kind === 'dir' && currentPath.startsWith(`${move.from}/`)) {
+						mapped = move.to + currentPath.slice(move.from.length);
+					}
+					if (mapped === null) continue;
+					if (!inventory.files.has(mapped) && !pickedSet.has(mapped) && !seenDeleted.has(mapped)) {
+						const record = previous[mapped];
+						extra.push({
+							path: mapped,
+							...(record ? { baseSize: record.size, baseMtime: record.mtime } : {}),
+							...(item.baseHash ? { baseHash: item.baseHash } : {}),
+						});
+						seenDeleted.add(mapped);
+					}
+					currentPath = mapped;
+				}
+			}
+			deleted.push(...extra);
+		}
+	}
+
+	/**
+	 * **强制装进包里的路径**（`forcePaths`）：正常更新包只装"相对起点变过的"，
+	 * 但"让对面撤销误改"需要的是**我们这一版原样覆盖回去**，哪怕我们从来没动过它。
+	 *
+	 * 只在"从完整副本到最新"的更新包里生效：差量包的内容由两份完整副本决定，
+	 * 强行塞一条会破坏"应用完正好等于终点"的确定性。
+	 */
+	if (mode === 'changes' && target === null) {
+		for (const file of options.forcePaths ?? []) {
+			if (skip.has(file) || !inventory.files.has(file) || picked.includes(file)) continue;
+			picked.push(file);
+			// 它本来在删除清单里（比如移动/改名留下的旧路径）就划掉：这一趟要的是"路径在"
+			deleted = deleted.filter(item => item.path !== file);
+		}
+	}
+	picked.sort();
+
+	return { state, inventory, previous, anchor, start: start?.info ?? null, target, history, picked, deleted, moves: finalMoves, existing };
 }
 
 /**
@@ -635,6 +1039,8 @@ export interface BundleExportPreview {
 	mode: BundleMode;
 	fileCount: number;
 	deletedCount: number;
+	/** 识别出来的移动/改名（不占负载） */
+	moves: BundleMove[];
 	bytes: number;
 	/** 会装进包里的文件（界面只列前若干个，其余报个数） */
 	files: string[];
@@ -679,6 +1085,7 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			mode: options.mode,
 			fileCount: work.picked.length,
 			deletedCount: work.deleted.length,
+			moves: work.moves,
 			bytes,
 			files: work.picked,
 			deleted: work.deleted.map(item => item.path),
@@ -702,6 +1109,7 @@ export async function planBundleExport(options: ExportOptions): Promise<BundleEx
 			mode: options.mode,
 			fileCount: 0,
 			deletedCount: 0,
+			moves: [],
 			bytes: 0,
 			files: [],
 			deleted: [],
@@ -722,7 +1130,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const started = Date.now();
 	const { mode } = options;
 	const work = await prepareBundle(options, mode);
-	const { state, inventory, previous, anchor, start, target, history, picked, deleted, existing } = work;
+	const { state, inventory, previous, anchor, start, target, history, picked, deleted, moves, existing } = work;
 	/** 终点是一份完整副本（差量包）：内容取自那份包，结束时到达它的世代 */
 	const checkpoint = target !== null;
 	/**
@@ -738,7 +1146,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 *   ＋ 进包的文件 − 点名的删除），那些"不在仓库里"的版本用包条目里带的指纹（`stateIdHashes`）；
 	 * - 其余：照现在的仓库算。
 	 */
-	const landedPoint = landedPointOf(mode, checkpoint, target, anchor, inventory, picked, deleted);
+	const landedPoint = landedPointOf(mode, checkpoint, target, anchor, inventory, picked, deleted, moves);
 	const stateIdInfo: StateIdInfo | null = checkpoint
 		? (target?.stateId ?? null)
 		: options.anchorOverride
@@ -828,7 +1236,12 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 * - **`anchor.generation`**：起点那份完整副本的号 —— 我应用过一份更老的完整副本
 	 *   （内容版本往回走了）之后再导出时，新号仍然从高水位往后发，不会撞历史上用过的号。
 	 */
-	const highWater = Math.max(state.maxGeneration ?? 0, state.generation, anchor?.generation ?? 0);
+	const highWater = Math.max(
+		state.maxGeneration ?? 0,
+		state.generation,
+		anchor?.generation ?? 0,
+		options.generationFloor ?? 0,
+	);
 	/**
 	 * 这一份包结束时到达的世代：
 	 * - 差量包（终点是某份完整副本）＝**那份完整副本记着的那一代**（内容到它为止）；
@@ -869,6 +1282,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		reason,
 		entryCount: 0,
 		deletedCount: 0,
+		moveCount: 0,
 		dirCount: 0,
 		emptyDirCount: 0,
 		payloadBytes: 0,
@@ -892,7 +1306,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		);
 	}
 
-	if (mode === 'changes' && picked.length === 0 && deleted.length === 0) {
+	if (mode === 'changes' && picked.length === 0 && deleted.length === 0 && moves.length === 0) {
 		options.log.debug('更新包：起点与终点之间没有任何变化');
 		return emptyOutcome(checkpoint
 			? `第 ${anchor?.generation} 代与第 ${target?.generation} 代之间没有任何变化，不需要导出`
@@ -1091,6 +1505,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			...(stateIdInfo ? { stateId: stateIdInfo } : {}),
 			deleted,
 			emptyDirs,
+			...(moves.length > 0 ? { moves } : {}),
 		},
 		sources,
 		// 每打包完一个文件，数字 +1（0 → 文件数，就这么个数）
@@ -1170,6 +1585,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		target: targetGeneration,
 		entries: sources.length,
 		deleted: deleted.length,
+		...(moves.length > 0 ? { moves: moves.length } : {}),
 		...(frozen ? { checkpoint: true } : {}),
 		...(options.logNote ? { note: options.logNote } : {}),
 	};
@@ -1198,6 +1614,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		file,
 		entryCount: sources.length,
 		deletedCount: deleted.length,
+		moveCount: moves.length,
 		fileBytes: (await statFile(file))?.size ?? header.payloadBytes,
 		// 包里的目录 = 记着的空文件夹 ＋ 有文件那些目录（它们由文件写入顺带建出来）
 		dirCount: covered.size + emptyDirs.length,
@@ -1231,10 +1648,30 @@ function landedPointOf(
 	inventory: Inventory,
 	picked: string[],
 	deleted: BundleDeletedEntry[],
+	moves: BundleMove[],
 ): Record<string, FileRecord> {
 	if (checkpoint) return { ...(target?.files ?? {}) };
 	if (mode === 'full') return { ...Object.fromEntries(inventory.files) };
 	const point: Record<string, FileRecord> = { ...(anchor?.files ?? {}) };
+	// 移动/改名：先把起点清单里的旧路径换成新路径，再叠条目与删除
+	for (const move of moves) {
+		if (move.kind === 'file') {
+			const record = point[move.from];
+			if (record) {
+				delete point[move.from];
+				point[move.to] = record;
+			}
+			continue;
+		}
+		const fromPrefix = `${move.from}/`;
+		const toPrefix = `${move.to}/`;
+		for (const file of Object.keys(point)) {
+			if (!file.startsWith(fromPrefix)) continue;
+			const record = point[file];
+			delete point[file];
+			if (record) point[toPrefix + file.slice(fromPrefix.length)] = record;
+		}
+	}
 	for (const file of picked) {
 		const record = inventory.files.get(file);
 		if (record) point[file] = { size: record.size, mtime: record.mtime };
@@ -1543,4 +1980,47 @@ async function removeSupersededChanges(
 	removed.sort();
 	kept.sort((a, b) => a.name.localeCompare(b.name));
 	return { removed, kept };
+}
+
+/**
+ * 换基准时顺手导一份「旧基准 → 新完整包」的差量包。
+ *
+ * 为什么要它：完整包太大、按决定**不推 git**，可对端还站在旧基准上；没有这一份，
+ * 它下一次收到的更新包（从新基准算起）会被 `checkAncestor` 判成"基准对不上"，两边就卡住了。
+ * 差量包很小（只装这两份完整副本之间的差异），对端收下、应用完就站到新基准上 ——
+ * **它手里不需要有新的完整包**（`apply.ts` 的 `landedOnBaseline` 只认清单与指纹）。
+ *
+ * 调用时机：**导出一份完整包之后**（`beforeHash` 是导出前我站的那一份）。
+ * 没有旧基准（第一次立基准）、或者新包和旧基准是同一份（内容没动）时什么都不做。
+ * 失败不抛：把原因交回去，让界面如实说一句（别把已经导好的完整包也一起变成失败）。
+ */
+export async function exportRebaselineDiff(
+	options: ExportOptions,
+	beforeHash: string | null,
+	logNote = '换基准：把对方从旧基准带到新完整包',
+): Promise<{ outcome: ExportOutcome | null; error: string | null }> {
+	if (!beforeHash) return { outcome: null, error: null };
+
+	let after: string | null;
+	try {
+		after = (await loadState(options.stateFile)).bundle?.fullHash ?? null;
+	} catch (error) {
+		return { outcome: null, error: error instanceof Error ? error.message : String(error) };
+	}
+	if (!after || after === beforeHash) return { outcome: null, error: null };
+
+	try {
+		const outcome = await exportBundle({
+			...options,
+			mode: 'changes',
+			// 两端都钉死：起点是旧基准、终点是新完整包（内容是终点那份包的负载，不是现在的仓库）
+			baseFingerprint: beforeHash,
+			toFingerprint: after,
+			logNote,
+		});
+		if (outcome.file) return { outcome, error: null };
+		return { outcome: null, error: outcome.reason ?? '差量包没生成' };
+	} catch (error) {
+		return { outcome: null, error: error instanceof Error ? error.message : String(error) };
+	}
 }

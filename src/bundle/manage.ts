@@ -73,7 +73,12 @@ export interface ManagedBundle {
 	/** 头部读不出来时的原因 */
 	error?: string;
 	size: number;
+	/**
+	 * 文件修改时间：本机写的包≈导出时间；**从 git 拉下来的包是拉取时间**，只能当兜底。
+	 */
 	mtime: number;
+	/** 包头部记的导出时间（`header.created`）：列表排序与显示都该用它 */
+	created?: number;
 }
 
 /**
@@ -117,13 +122,21 @@ export async function listBundles(baseDir: string): Promise<ManagedBundle[]> {
 				mode: header?.mode ?? modeFromName(item.name),
 				header,
 				...(error ? { error } : {}),
+				...(header?.created ? { created: header.created } : {}),
 				size: item.size,
 				mtime: item.mtime,
 			});
 		}
 	}
-	out.sort((a, b) => b.mtime - a.mtime);
+	// 排序看**包里记的导出时间**：`git clone/checkout` 会把 mtime 全改成"拉取那一刻"，
+	// 照文件时间排的话，刚拉下来的老包会排到最前面（读不出头部的才退回 mtime）
+	out.sort((a, b) => bundleTime(b) - bundleTime(a));
 	return out;
+}
+
+/** 列表排序 / 显示都该用的时间：包里的导出时间优先，读不出才退回文件时间 */
+export function bundleTime(item: ManagedBundle): number {
+	return item.created ?? item.mtime;
 }
 
 export interface BundleGroup {
@@ -142,7 +155,7 @@ export interface BundleGroup {
  */
 export function groupBundles(items: ManagedBundle[]): BundleGroup[] {
 	const pick = (mode: BundleMode | null) =>
-		items.filter(item => item.mode === mode).sort((a, b) => b.mtime - a.mtime);
+		items.filter(item => item.mode === mode).sort((a, b) => bundleTime(b) - bundleTime(a));
 	return [
 		{ title: '更新包', items: pick('changes') },
 		{ title: '完整副本', items: pick('full') },
