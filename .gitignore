@@ -30,5 +30,12 @@ data.json
 # 本地 AI 工具配置
 .claude/
 
+# 本机的部署目标（写着自个儿的 vault 路径，不进版本库；模板是 deploy.local.example.json）
+deploy.local.json
+
+# 内部开发文档（本机的记录，不对外）
+docs/
+AGENTS.md
+
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store

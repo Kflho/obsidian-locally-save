@@ -78,9 +78,17 @@ for (const file of ['manifest.json', 'package.json', 'versions.json', 'styles.cs
 // 6. 仓库里没有构建产物（main.js 由 CI 发布，不进版本库）
 checkTrue('仓库里没有被提交的 main.js', !fs.existsSync(path.join('.git', '..', 'main.js')) || true, '');
 checkTrue(
-	'deploy 的目标目录名与插件 id 一致',
-	fs.readFileSync('deploy.mjs', 'utf8').includes(`plugins\\\\${String(manifest['id'])}`),
-	'deploy.mjs 的 DEFAULT_PLUGIN_DIR 里写的目录名要和 id 一样',
+	'deploy 的示例配置里目录名与插件 id 一致',
+	fs.readFileSync('deploy.local.example.json', 'utf8').includes(`plugins/${String(manifest['id'])}`),
+	'deploy.local.example.json 里的目录名要和 id 一样',
+);
+const deploySource = fs.readFileSync('deploy.mjs', 'utf8');
+checkTrue(
+	'deploy.mjs 从本机配置取插件目录，不写死路径',
+	deploySource.includes('OBSIDIAN_PLUGIN_DIR')
+		&& deploySource.includes('deploy.local.json')
+		&& !/[A-Za-z]:[\\/]/.test(deploySource),
+	'应该读 OBSIDIAN_PLUGIN_DIR / deploy.local.json，不要写死本机绝对路径',
 );
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
