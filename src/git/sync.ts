@@ -181,7 +181,7 @@ async function mergeFetched(git: GitRunner): Promise<void> {
 	const merge = await git(['merge', '--allow-unrelated-histories', '--no-edit', 'FETCH_HEAD']);
 	if (merge.code === 0) return;
 	await git(['merge', '--abort']);
-	throw new Error(`两边的包合不到一起（货架没动）：${(merge.stderr || rebase.stderr).trim()}`);
+	throw new Error(`两边的包合不到一起（文件夹没动）：${(merge.stderr || rebase.stderr).trim()}`);
 }
 
 /** 上一次留下的 rebase / merge 残局：先中止（插件从不做交互式合并，留着只会让每条命令都失败） */

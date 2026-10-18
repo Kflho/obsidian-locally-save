@@ -1027,20 +1027,30 @@ check(
 	0,
 );
 
-// 23. 目录里只有被排除规则挡住的东西 → **不列进删除**，而是报成"留着"
-// （清单里看不见 desktop.ini，rmdir 却会失败：不按磁盘复核的话就是"每轮都删但它就是不走"）
+// 23. 目录里只有被排除规则挡住的东西 → **这个目录不算内容**
+// （清单里看不见 desktop.ini；它搬不过去、也删不掉 —— 算进状态编号只会让它永远对不上：
+//  用户报的"应用完整副本后编号一直差一点、基准却显示站上了"）
 const W = path.join(ROOT, 'machineW');
 const STATE_W = path.join(ROOT, 'state-w.json');
 fs.mkdirSync(W, { recursive: true });
 write(W, '有隐藏东西的/desktop.ini', 'x');
 const wPlan = await planBundleApply(applyOptions(W, STATE_W, R_FILE, { strictness: 'mirror' }));
 check('不列进"要删"', wPlan.foldersToRemove, []);
-check('报成"留着"（界面会说明原因）', wPlan.report.foldersKept, 1);
-check('报告里的文件夹总数也说得清', [wPlan.report.bundleDirCount, wPlan.report.localDirCount], [4, 1]);
+check('也不报"留着"（它根本不在清单里）', wPlan.report.foldersKept, 0);
+check('报告里的文件夹数：本地 0 个（那个文件夹看不见）', [wPlan.report.bundleDirCount, wPlan.report.localDirCount], [4, 0]);
+const wScan = await scanTree(W, { exclude: ['desktop.ini'] });
+check('只有被排除文件的目录不进清单', [...wScan.dirs], []);
 const wResult = await executeBundlePlan(wPlan, applyOptions(W, STATE_W, R_FILE, { strictness: 'mirror' }));
 check('被排除的文件没被删', read(W, '有隐藏东西的/desktop.ini'), 'x');
 check('文件夹也还在', exists(W, '有隐藏东西的'), true);
 check('而且不算失败', wResult.failed.map(item => item.path), []);
+// 用户报的现场：应用 100 代完整副本之后编号一直差一点，列表却标着"← 本机现在的基准"。
+// 原因就是这种"只装着被排除文件"的目录——它不算内容之后，完整副本能真的落到基准。
+check('只装着被排除文件的目录：完整副本也能落到基准（编号一致）', wResult.stateIdCompare, 'match');
+const wState = await loadState(STATE_W);
+check('基准换过去了', wState.bundle?.fullFile, path.basename(R_FILE));
+check('基准指纹就是这份包自己的', wState.bundle?.fullHash, baselineOfBundle(qInfo.header));
+check('世代采纳包里的（不是"差一点"时那个 max）', wState.generation, qInfo.header.targetGeneration);
 
 // 24. 旧版本导的包（头部没记空文件夹）→ 文件夹**只建不删**
 // 它没法表达"我这边有哪些空文件夹"，拿它反推"本地多出来的都该删"会删错
@@ -1632,9 +1642,9 @@ check(
 	[foreignName, futureName].sort(),
 );
 check(
-	'理由分成两种：血脉 / 世代',
+	'理由分成两种：别的来源 / 世代',
 	[...new Set(kdFull.keptChanges.map(item => item.why))].sort(),
-	['不是同一条血脉的包（多半是另一台机器另立的基准）', '记的世代不比这次的新（导出过更晚的包）'].sort(),
+	['另一个来源的包（多半是另一台机器另立的基准）', '记的世代不比这次的新（导出过更晚的包）'].sort(),
 );
 
 // 38. 两台机器互相发更新包：应用后把"本机这半"导出来发回去，两边才收敛

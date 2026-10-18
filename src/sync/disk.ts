@@ -30,21 +30,33 @@ export interface ScanOptions {
  */
 export const CONFLICT_TRASH_DIR = '冲突';
 
-/** 递归扫描一个目录，返回「文件 → 大小 + 修改时间」与「见过的目录」 */
+/**
+ * 递归扫描一个目录，返回「文件 → 大小 + 修改时间」与「见过的目录」。
+ *
+ * **目录算不算内容**（`dirs`）：
+ * - 里面有看得见的东西（文件 / 子目录）→ 算；
+ * - **一个条目都没有** → 算（空文件夹也是内容，用户拍过板）；
+ * - 有条目、但**全被排除规则挡住**（`desktop.ini` / `*.lsave` / `.git`…）→ **不算**。
+ *   这种目录搬不过去、也删不掉（`rmdir` 非空），算进状态编号只会让它永远对不上：
+ *   用户报过"应用完整副本后编号一直差一点、基准却显示站上了"，就是这种目录搞的。
+ *   既然它里面没有一个字节参与同步，它本身也就不该参与"内容一不一样"的判断。
+ */
 export async function scanTree(root: string, options: ScanOptions): Promise<Inventory> {
 	const files = new Map<string, FileRecord>();
 	const dirs = new Set<string>();
 	const skip = new Set(options.skipTopLevelDirs ?? []);
 
-	async function walk(relDir: string): Promise<void> {
+	/** 返回这个目录算不算内容（true 时已经把自己加进 `dirs`） */
+	async function walk(relDir: string): Promise<boolean> {
 		let entries: fs.Dirent[];
 		try {
 			entries = await fs.promises.readdir(toNative(root, relDir), { withFileTypes: true });
 		} catch {
 			// 目录不存在或没权限：当作空的，不要把整次同步搞崩
-			return;
+			return false;
 		}
 
+		let visible = false;
 		for (const entry of entries) {
 			const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
 			// 符号链接一律跳过：可能绕成环，也可能指到仓库外面去
@@ -53,18 +65,28 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 			if (entry.isDirectory()) {
 				if (!relDir && skip.has(entry.name)) continue;
 				if (isExcluded(rel, options.exclude)) continue;
-				dirs.add(rel);
-				await walk(rel);
+				// 子目录算不算内容，由它自己回答（里面可能也只有被排除的东西）
+				if (await walk(rel)) visible = true;
 				continue;
 			}
 			if (!entry.isFile()) continue;
 			if (isExcluded(rel, options.exclude)) continue;
 
 			const record = await statFile(toNative(root, rel));
-			if (record) files.set(rel, record);
+			if (record) {
+				files.set(rel, record);
+				visible = true;
+			}
 			// 一万个文件的全库遍历也要让界面喘气：每 N 个文件让一步
 			if (files.size > 0 && files.size % YIELD_EVERY === 0) await yieldToUi();
 		}
+
+		// 见函数头那段：真空的算内容；有条目但一个可见的都没有 → 不算
+		if (visible || entries.length === 0) {
+			if (relDir !== '') dirs.add(relDir);
+			return true;
+		}
+		return false;
 	}
 
 	await walk('');

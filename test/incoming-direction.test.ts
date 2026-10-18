@@ -18,7 +18,7 @@ import type { PluginManifest } from 'obsidian';
 import { applyBundle } from '../src/bundle/apply';
 import type { ApplyOptions } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
-import { handleIncoming, pickIncoming } from '../src/bundle/incoming';
+import { handleIncoming, pickIncoming, unappliedIncoming } from '../src/bundle/incoming';
 import type { IncomingPolicy } from '../src/bundle/incoming';
 import { listBundles } from '../src/bundle/manage';
 import LocallySavePlugin from '../src/main';
@@ -250,6 +250,122 @@ async function main(): Promise<void> {
 	await exportFromSend2('changes');
 	check('插件级·仅推：不看收件箱', await checkIncomingBundles(plugin), false);
 	check('插件级·仅推：本地没动', read(RECV2, 'n/x.md'), 'X 改了');
+
+	// 9. **确认过就不能再拦**（用户报的"一台 108、一台 109，点同步都提示已经最新"）
+	//    双向策略是"先问一句"，用户点了「应用」＝ 看过会删几个 / 覆盖几个那份账；
+	//    后面那条 isDestructivePlan 兜底是给**没人问过**的自动路径准备的，不能再拦一次。
+	const SEND_R = path.join(ROOT, 'send-r');
+	const RECV_R = path.join(ROOT, 'recv-r');
+	const OUT_R = path.join(ROOT, 'bundles-r');
+	const STATE_SEND_R = path.join(ROOT, 'state-send-r.json');
+	const STATE_RECV_R = path.join(ROOT, 'state-recv-r.json');
+	for (const dir of [SEND_R, RECV_R, OUT_R]) fs.mkdirSync(dir, { recursive: true });
+	const exportR = (mode: 'full' | 'changes') => exportBundle({
+		settings: { ...DEFAULT_SETTINGS },
+		log,
+		vaultRoot: SEND_R,
+		vaultName: '对面R',
+		stateFile: STATE_SEND_R,
+		mode,
+		outDir: OUT_R,
+	});
+	const applyR = (file: string): ApplyOptions => ({
+		settings: { ...DEFAULT_SETTINGS },
+		log,
+		vaultRoot: RECV_R,
+		stateFile: STATE_RECV_R,
+		file,
+	});
+	for (const [rel, content] of [['n/one.md', 'ONE'], ['n/two.md', 'TWO']] as const) {
+		write(SEND_R, rel, content);
+		write(RECV_R, rel, content);
+	}
+	const seedR = await exportR('full');
+	await applyBundle(applyR(seedR.file as string));
+	const pickR = async (options?: { retryBlocked?: boolean }) => {
+		const state = await loadState(STATE_RECV_R);
+		return pickIncoming(await listBundles(OUT_R), state, options);
+	};
+
+	// 对面删一个、改一个：这份包是"会删文件"的那种
+	fs.rmSync(at(SEND_R, 'n/two.md'));
+	write(SEND_R, 'n/one.md', 'ONE 改了，更长');
+	await exportR('changes');
+	const riskyR = (await pickR())[0];
+	checkTrue('确认后应用：挑到了会删文件的包', riskyR !== undefined, '没有候选包');
+
+	// 双向 + 用户点了「应用」→ 必须真的应用，不能记成 needs-review
+	const confirmedApply = await handleIncoming(applyR(riskyR!.bundle.file), riskyR!, {
+		confirm: async () => true,
+	});
+	check('确认后应用：真的应用了（不再被"会删文件"拦下）', confirmedApply.kind, 'applied');
+	check('确认后应用：对面删掉的本地也删了', exists(RECV_R, 'n/two.md'), false);
+	check('确认后应用：对面改过的落地了', read(RECV_R, 'n/one.md'), 'ONE 改了，更长');
+
+	// 10. 手动同步会**重试**被拦下的包；取消过的不重试
+	const SEND_T = path.join(ROOT, 'send-t');
+	const RECV_T = path.join(ROOT, 'recv-t');
+	const OUT_T = path.join(ROOT, 'bundles-t');
+	const STATE_SEND_T = path.join(ROOT, 'state-send-t.json');
+	const STATE_RECV_T = path.join(ROOT, 'state-recv-t.json');
+	for (const dir of [SEND_T, RECV_T, OUT_T]) fs.mkdirSync(dir, { recursive: true });
+	const exportT = (mode: 'full' | 'changes') => exportBundle({
+		settings: { ...DEFAULT_SETTINGS },
+		log,
+		vaultRoot: SEND_T,
+		vaultName: '对面T',
+		stateFile: STATE_SEND_T,
+		mode,
+		outDir: OUT_T,
+	});
+	const applyT = (file: string): ApplyOptions => ({
+		settings: { ...DEFAULT_SETTINGS },
+		log,
+		vaultRoot: RECV_T,
+		stateFile: STATE_RECV_T,
+		file,
+	});
+	const pickT = async (options?: { retryBlocked?: boolean }) => {
+		const state = await loadState(STATE_RECV_T);
+		return pickIncoming(await listBundles(OUT_T), state, options);
+	};
+	write(SEND_T, 'n/one.md', 'ONE');
+	write(SEND_T, 'n/two.md', 'TWO');
+	write(RECV_T, 'n/one.md', 'ONE');
+	write(RECV_T, 'n/two.md', 'TWO');
+	const seedT = await exportT('full');
+	await applyBundle(applyT(seedT.file as string));
+	fs.rmSync(at(SEND_T, 'n/two.md'));
+	await exportT('changes');
+
+	const blocked = (await pickT())[0];
+	checkTrue('重试：挑到了会删文件的包', blocked !== undefined, '没有候选包');
+	const refused2 = await handleIncoming(applyT(blocked!.bundle.file), blocked!);
+	check('默认策略（没人问过）仍然只报 needs-review', refused2.kind, 'needs-review');
+	check('重试：自动节拍不再挑它', (await pickT()).length, 0);
+	check(
+		'还没应用的包会被数出来（「立即同步」那句总结靠它，别只说"已经最新"）',
+		unappliedIncoming(await listBundles(OUT_T), await loadState(STATE_RECV_T)).length,
+		1,
+	);
+	const retried = await pickT({ retryBlocked: true });
+	checkTrue(
+		'重试：手动同步会把它重新挑出来',
+		retried.some(item => item.bundle.header?.bundleId === blocked!.bundleId),
+		JSON.stringify(retried.map(item => item.bundle.file)),
+	);
+	const offered = retried.find(item => item.bundle.header?.bundleId === blocked!.bundleId)!;
+	check(
+		'重试：确认窗里点取消 → dismissed',
+		(await handleIncoming(applyT(offered.bundle.file), offered, { confirm: async () => false })).kind,
+		'dismissed',
+	);
+	check(
+		'重试：用户自己取消过的不再重挑',
+		(await pickT({ retryBlocked: true })).some(item => item.bundle.header?.bundleId === blocked!.bundleId),
+		false,
+	);
+
 
 	console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 	for (const message of failures.slice(0, 10)) console.log('\n❌ ' + message);

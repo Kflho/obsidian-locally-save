@@ -35,6 +35,20 @@ export interface IncomingCandidate {
 	bundleId: string;
 }
 
+/** `pickIncoming` 的选项 */
+export interface PickIncomingOptions {
+	/**
+	 * 把上次停在「要人看一眼 / 失败了」的包**重新挑出来**（`needs-review` / `failed`）。
+	 *
+	 * 谁开：**手动的「立即同步」**。用户明确点了同步，就该再试一次 —— 不然一个被拦下的包
+	 * 会永远躺在那里：两台机器的代数差着一截（用户报的 108 / 109），点同步却只说"已经最新"。
+	 * 自动节拍（每 30 秒）不开：那会每半分钟弹一次同一句。
+	 *
+	 * `applied`（做完了）与 `dismissed`（用户自己点的取消）**不重挑**：见下面 `pickIncoming` 的说明。
+	 */
+	retryBlocked?: boolean;
+}
+
 /**
  * 挑出**还没处理过**的包（新的排前面 —— `listBundles` 就是这么排的）。
  *
@@ -42,20 +56,54 @@ export interface IncomingCandidate {
  * - 头部读不出来（不是我们的包 / 传坏了）：界面里列得出来，但自动这条路不碰它；
  * - 我自己的导出 / 已经应用过的（`bundleLog` 里记着的）；
  * - 源头就是我这台机器（`source.copyId` 相同）—— 就算日志被裁掉了也认得出来；
- * - 已经决定过的（`state.incoming` 里有记录）。
+ * - 已经决定过的（`state.incoming` 里有记录）—— 只有 `retryBlocked` 时放行那两类
+ *   "还没做完"的（`needs-review` / `failed`）。
  *
  * 完整包**也在候选里**：它不自动应用，但要提示一句（不然用户以为自动那步坏了）。
  */
-export function pickIncoming(bundles: ManagedBundle[], state: PluginState): IncomingCandidate[] {
-	const decided = new Set((state.incoming ?? []).map(item => item.id));
+export function pickIncoming(
+	bundles: ManagedBundle[],
+	state: PluginState,
+	options: PickIncomingOptions = {},
+): IncomingCandidate[] {
+	// 同一个包可能被记过好几笔（先 needs-review、重试后 applied）：**以最后一笔为准**
+	const decided = new Map<string, string>();
+	for (const item of state.incoming ?? []) decided.set(item.id, item.note);
 	const logged = new Set((state.bundleLog ?? []).map(entry => entry.bundleId));
 	const out: IncomingCandidate[] = [];
 	for (const bundle of bundles) {
 		const header = bundle.header;
 		if (!header) continue;
-		if (decided.has(header.bundleId)) continue;
 		if (logged.has(header.bundleId)) continue;
 		if (header.source?.copyId === state.copyId) continue;
+		const note = decided.get(header.bundleId);
+		if (note !== undefined) {
+			const retry = options.retryBlocked === true && (note === 'needs-review' || note === 'failed');
+			if (!retry) continue;
+		}
+		out.push({ bundle, bundleId: header.bundleId });
+	}
+	return out;
+}
+
+/**
+ * 货架上**看过、但没应用成功**的那些（`needs-review` / `failed`）。
+ *
+ * 给「立即同步」那句总结用：不能让用户看到"没有新改动"就以为没事 ——
+ * 明明还有一份包躺着、两边的状态编号也不一样（用户报的"一台 108、一台 109，
+ * 点同步都提示已经最新"）。
+ */
+export function unappliedIncoming(bundles: ManagedBundle[], state: PluginState): IncomingCandidate[] {
+	const decided = new Map<string, string>();
+	for (const item of state.incoming ?? []) decided.set(item.id, item.note);
+	const logged = new Set((state.bundleLog ?? []).map(entry => entry.bundleId));
+	const out: IncomingCandidate[] = [];
+	for (const bundle of bundles) {
+		const header = bundle.header;
+		if (!header || logged.has(header.bundleId)) continue;
+		if (header.source?.copyId === state.copyId) continue;
+		const note = decided.get(header.bundleId);
+		if (note !== 'needs-review' && note !== 'failed') continue;
 		out.push({ bundle, bundleId: header.bundleId });
 	}
 	return out;
@@ -100,6 +148,8 @@ export interface IncomingPolicy {
 	 *
 	 * **只有「仅拉」才开**：那台机器的职责就是"变成对面那样"，
 	 * 本机被覆盖 / 删掉的东西进回收目录（`strictness: 'mirror'` 必然备份）。
+	 * 「双向」不靠它：那边是**逐包确认**（`confirm`）—— 用户点了「应用」就等于
+	 * 对这一份放了行，不必再开一个全局的 `force`。
 	 */
 	force?: boolean;
 	/** 完整副本也自动应用（默认不；「仅拉」才开 —— 它可能删掉本机独有的文件） */
@@ -116,8 +166,12 @@ export interface IncomingPolicy {
 /**
  * 处理一个包：算一遍 → 安全就自己应用，不安全就只报一句。
  *
+ * 「不安全」只对**没人问过**的那条路成立：默认策略里会删 / 会覆盖的包只记 `needs-review`
+ * （老的安全边界，一个字都不能松）。**问过并确认了**（`policy.confirm` 返回 true）就照做 ——
+ * 用户已经看过"会删几个、覆盖几个"那份账，再拦一次等于让他白点（见 `handleIncoming` 里那段）。
+ *
  * 无论走哪条路都会在状态文件里**记一笔**（`rememberIncoming`），
- * 所以同一个包只处理一次 —— 不会每 30 秒弹一遍。
+ * 所以同一个包只处理一次 —— 不会每 30 秒弹一遍（手动「立即同步」会重试 `needs-review` / `failed`）。
  */
 export async function handleIncoming(
 	options: ApplyOptions,
@@ -134,7 +188,7 @@ export async function handleIncoming(
 			return {
 				kind: 'needs-review',
 				file: name,
-				why: '它是完整副本（可能删掉你本机独有的文件），完整包从来不自动应用',
+				why: '完整副本可能会删掉你本机独有的文件，所以不自动应用',
 			};
 		}
 
@@ -142,20 +196,33 @@ export async function handleIncoming(
 		const plan = await planBundleApply(applyOptions);
 		const report = plan.report;
 
-		// 包里没有新东西（本地已经一致）：记一笔，不打扰
-		if (plan.actions.length === 0 && plan.foldersToRemove.length === 0) {
+		// 包里没有新东西（本地已经一致）：记一笔，不打扰。
+		// **"只有空文件夹要补建"也算有东西**：列出来的空目录也是内容（见 AGENTS），
+		// 只按文件动作判"已经有了"会把一份"新建空文件夹"的包直接记成 already、再也不碰它。
+		if (plan.actions.length === 0 && plan.foldersToRemove.length === 0 && report.foldersToCreate === 0) {
 			await rememberDecision(options.stateFile, candidate.bundleId, 'already', name);
 			return { kind: 'already', file: name };
 		}
 
-		// 「双向」：先问一句。取消就记一笔 dismissed —— 同一个包不再弹第二次
-		// （用户刚刚亲手做过选择，再弹就是烦人；想应用还能从「打开同步包并应用…」手动来）。
-		if (policy.confirm && !(await policy.confirm(candidate, plan))) {
-			await rememberDecision(options.stateFile, candidate.bundleId, 'dismissed', name);
-			return { kind: 'dismissed', file: name };
+		/**
+		 * 「双向」：先问一句。取消就记一笔 dismissed —— 同一个包不再弹第二次
+		 * （用户刚刚亲手做过选择，再弹就是烦人；想应用还能从「打开同步包并应用…」手动来）。
+		 *
+		 * **他点了「应用」＝ 看过这份账了**，下面那条"会删文件就不动手"的兜底**不能再用**：
+		 * 那份兜底是给**没人问过**的自动路径准备的。这里是"问过了、用户选了应用"，
+		 * 再拦一次等于让他白点一下 —— 而且包被记成 `needs-review`、以后再也不会被挑出来，
+		 * 两边就永远差着一代（用户报的"一台 108、一台 109，点同步都提示已经最新"）。
+		 */
+		let confirmed = false;
+		if (policy.confirm) {
+			if (!(await policy.confirm(candidate, plan))) {
+				await rememberDecision(options.stateFile, candidate.bundleId, 'dismissed', name);
+				return { kind: 'dismissed', file: name };
+			}
+			confirmed = true;
 		}
 
-		if (!policy.force && isDestructivePlan(plan)) {
+		if (!policy.force && !confirmed && isDestructivePlan(plan)) {
 			const parts: string[] = [];
 			if (report.deletes > 0) parts.push(`删 ${report.deletes} 个文件`);
 			if (plan.foldersToRemove.length > 0) parts.push(`删 ${plan.foldersToRemove.length} 个空文件夹`);

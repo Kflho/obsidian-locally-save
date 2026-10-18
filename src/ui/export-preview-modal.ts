@@ -32,7 +32,7 @@ export class ExportPreviewModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '导出预览' });
 		contentEl.createEl('p', {
-			text: '这一步只算不写：下面是按当前设置留包时会装进包里的东西。',
+			text: '只预览，不会写入。下面是按当前设置导出时会装进包里的内容。',
 			cls: 'locally-save-hint',
 		});
 
@@ -69,14 +69,14 @@ export class ExportPreviewModal extends Modal {
 
 			if (preview.existing) {
 				contentEl.createEl('p', {
-					text: `这一份已经导过了（${preview.existing}），不重复生成。`,
+					text: `这一份已经导过了（${preview.existing}），不会重复生成。`,
 					cls: 'locally-save-hint',
 				});
 				continue;
 			}
 
 			if (preview.fileCount === 0 && preview.deletedCount === 0 && preview.moves.length === 0) {
-				contentEl.createEl('p', { text: '起点与终点之间没有变化，这个包不会生成。' });
+				contentEl.createEl('p', { text: '起点与终点之间没有变化，不会生成这个包。' });
 				continue;
 			}
 			const list = contentEl.createDiv({ cls: 'locally-save-list' });
@@ -87,7 +87,7 @@ export class ExportPreviewModal extends Modal {
 			}
 			if (preview.files.length > MAX_ROWS) {
 				list.createDiv({
-					text: `…… 其余 ${preview.files.length - MAX_ROWS} 个文件已省略`,
+					text: `… 其余 ${preview.files.length - MAX_ROWS} 个文件已省略`,
 					cls: 'locally-save-more',
 				});
 			}
@@ -102,7 +102,7 @@ export class ExportPreviewModal extends Modal {
 		const nothing = this.previews.every(item => item.problem || (item.fileCount === 0 && item.deletedCount === 0));
 		if (nothing) {
 			contentEl.createEl('p', {
-				text: '要强行导一份完整副本（哪怕没有改动）：用命令「导出同步包…」，'
+				text: '要导一份完整副本（即使没有改动）：用命令「导出同步包…」，'
 					+ '或者在设置 → Locally Save → 同步包 里点「导出同步包…」。',
 				cls: 'locally-save-hint',
 			});
@@ -110,7 +110,7 @@ export class ExportPreviewModal extends Modal {
 
 		new Setting(contentEl)
 			.addButton(button => button
-				.setButtonText('留包')
+				.setButtonText('导出')
 				.setCta()
 				.setDisabled(nothing)
 				.onClick(() => {

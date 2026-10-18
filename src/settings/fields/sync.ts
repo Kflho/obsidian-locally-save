@@ -22,7 +22,7 @@ import type { FieldSection } from './types';
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '同步包',
-	desc: '留包 / 应用同步包。日常直接点左侧栏的「立即同步」就行，这一页只管东西放在哪',
+	desc: '同步包放在哪，以及手动导出、应用和管理。',
 	groups: [
 		{
 			heading: '包放在哪',
@@ -30,7 +30,7 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: '包放在哪个文件夹（绝对路径，库外面）。完整包进它的 full 子目录，更新包进 changes。必填',
+					desc: '仓库之外的文件夹。完整副本存到 full，更新包存到 changes。必填。',
 					control: { type: 'text', placeholder: 'D:\\备份\\同步包' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
 				},
@@ -42,7 +42,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '立即同步',
-					desc: '导出包 + 和远程推拉 + 应用拉下来的安全更新。和左侧栏第一个图标是同一件事',
+					desc: '导出包、推拉远程、应用拉到的包。',
 					button: '同步',
 					cta: true,
 					run: plugin => { void syncNow(plugin); },
@@ -57,7 +57,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '导出到文件',
-					desc: '把仓库打包成 .lsave，拷到别的机器上应用。完整副本与更新包是两个独立开关，可以都要',
+					desc: '把仓库或改动打包成 .lsave，拷到别的机器上应用。',
 					button: '导出同步包…',
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),
@@ -70,7 +70,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '管理已有的包',
-					desc: '列出包文件夹里的所有包：应用 / 打开文件夹 / 复制路径 / 挪进回收站 / 彻底删除',
+					desc: '查看、应用或删除已有的同步包。',
 					button: '管理同步包…',
 					run: plugin => { new BundleManagerModal(plugin.app, plugin).open(); },
 				},
@@ -82,7 +82,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '应用一个包',
-					desc: '选中包后先算一遍再给你看（同步程度、会改动哪些）；确认了才动文件',
+					desc: '先看报告，确认了才改动文件。',
 					button: '打开同步包并应用…',
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),
@@ -95,14 +95,14 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '把 .lsave 关联到 Obsidian',
-					desc: '双击 .lsave 用 Obsidian 打开并弹出应用对话框（往当前用户注册表写一条关联，不需要管理员权限）',
+					desc: '双击 .lsave 用 Obsidian 打开并弹出应用对话框。只写当前用户的注册表，不需要管理员权限。',
 					button: '设置关联',
 					run: plugin => { new AssociateModal(plugin.app, plugin.app.vault.getName()).open(); },
 					disabled: () => !associationSupported(),
 				},
 				{
-					name: '不知道怎么用？',
-					desc: '跨机器搬运的完整流程、两种包该用哪个、会不会弄丢东西',
+					name: '使用说明',
+					desc: '两种包该用哪个，以及跨机器搬运的完整流程。',
 					button: '看说明',
 					run: plugin => { new BundleHelpModal(plugin.app).open(); },
 				},

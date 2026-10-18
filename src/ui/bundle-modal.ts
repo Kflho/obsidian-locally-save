@@ -167,8 +167,7 @@ export class ExportBundleModal extends Modal {
 		if (this.fromState === '') {
 			const generation = this.mineGeneration();
 			if (generation === null) {
-				// 没有完整副本就没有起点：引擎会在导出时明确报错，这里先说一句
-				return '本次：还没有起点 —— 更新包要从一份完整副本算起，先导一份完整副本';
+				return '本次：还没有起点。更新包要从一份完整副本算起，先导一份完整副本';
 			}
 			return `本次：第 ${generation} 代 → ${toText}（从你站的那份完整副本算起${tail}）`;
 		}
@@ -190,7 +189,7 @@ export class ExportBundleModal extends Modal {
 		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整副本、再导更新包**）
 		new Setting(contentEl)
 			.setName('导出更新包')
-			.setDesc('只装自起点那份完整副本以来变过的文件。对方站在同一份完整副本上就能直接收下')
+			.setDesc('只装自起点那份完整副本以来变过的文件。对方站在同一份完整副本上就能收下')
 			.addToggle(toggle => toggle
 				.setValue(this.wantChanges)
 				.onChange(value => {
@@ -200,7 +199,7 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('导出完整副本')
-			.setDesc('整个仓库，也是更新包的起点（对方要先应用它）。体积大、每次都重写一遍')
+			.setDesc('整个仓库，也是更新包的起点。体积大，每次都重写一遍')
 			.addToggle(toggle => toggle
 				.setValue(this.wantFull)
 				.onChange(value => {
@@ -226,8 +225,7 @@ export class ExportBundleModal extends Modal {
 		// 两个下拉的选项＝那个目录里的完整副本（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
 		new Setting(contentEl)
 			.setName('更新包：从哪个状态')
-			.setDesc('从哪一份完整副本开始算。默认「自动」＝ 你站的那一份；'
-				+ '对方还停在更老的一份上时，照他「更新记录」里的基准指纹选那一项')
+			.setDesc('默认从你站的那份完整副本算起。对方还停在更老的一份上时，选它那一份')
 			.addDropdown(dropdown => {
 				this.fromDropdown = dropdown;
 				dropdown.onChange(value => {
@@ -239,7 +237,7 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('更新包：到哪个状态')
-			.setDesc('默认最新（当前仓库）；选一份完整副本则导到那一刻为止，内容取自那份包')
+			.setDesc('默认到最新（当前仓库）。选一份完整副本，则导出到那份为止，内容取自它')
 			.addDropdown(dropdown => {
 				this.toDropdown = dropdown;
 				dropdown.onChange(value => {
@@ -281,7 +279,7 @@ export class ExportBundleModal extends Modal {
 		const modes = this.wantedModes();
 		const base = this.effectiveDir();
 		if (!base) {
-			this.whereEl.setText('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
+			this.whereEl.setText('还没确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
 			return;
 		}
 		if (modes.length === 0) {
@@ -304,7 +302,7 @@ export class ExportBundleModal extends Modal {
 		// 这个窗口里没填就用设置里那个，不是"没填路径"
 		const outDir = this.effectiveDir();
 		if (!outDir) {
-			new Notice('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个');
+			new Notice('还没确定位置：先去设置里填「同步包文件夹」，或在这里填一个');
 			return;
 		}
 		const modes = this.wantedModes();
@@ -323,7 +321,7 @@ export class ExportBundleModal extends Modal {
 
 		for (const mode of modes) {
 			const label = mode === 'full' ? '完整副本' : '更新包';
-			this.statusEl.setText(`正在导出${label}……`);
+			this.statusEl.setText(`正在导出${label}…`);
 			// 一种失败不影响另一种：第一次用的人往往两个都勾，而"更新包"会因为
 			// 还没有基准而失败 —— 不该把"完整副本"也一起带崩
 			try {
@@ -350,35 +348,34 @@ export class ExportBundleModal extends Modal {
 				this.plugin.reportProgress(null);
 
 				if (!outcome.file) {
-					// 没生成的时候要把原因说清：两个都勾时更新包**必然是空的**（完整副本刚导过，
+					// 没生成时把原因说清：两个都勾时更新包必然是空的（完整副本刚导过，
 					// 它自己就是最新基准）；差量包则可能是"这一份已经导过了"
 					notes.push(`${label}没有生成：${outcome.reason ?? '没有需要导出的内容'}`
 						+ (mode === 'changes' && fullWritten && outcome.anchor?.checkpoint !== true
-							? '（刚导出的完整副本已经是当前仓库的完整样子，这时的更新包会是空的）'
+							? '（刚导出的完整副本已包含全部内容，更新包自然是空的）'
 							: ''));
 					continue;
 				}
 				written.push(outcome.file);
 				if (mode === 'full') fullWritten = true;
 				anySuccess = true;
-				// 没清掉的老更新包要说清为什么 —— 不然用户以为"清理开关没生效"，
-				// 或者当成偶发 bug（报过：同一个操作第一遍没清、第二遍清了）
-				// 别的机器发来的更新包要留着（那是它那一半改动，删了就丢）——
-				// 所以这里不是"没清掉"，而是"本来就要留"，如实列一下让用户心里有数
+				// 别的机器发来的更新包要留着（那是它那一半改动，删了就丢），
+				// 所以这里不是"没清掉"，而是"本来就要留" —— 如实列出来
 				const keptNote = outcome.keptChanges.length > 0
-					? `；changes 里另有 ${outcome.keptChanges.length} 个包留着（`
+					? `；changes 里另有 ${outcome.keptChanges.length} 个包保留（`
 						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}）`
 					: '';
 				// 起点平时就是你站的那份完整副本：说明一句，用户拿着那个号就能跟对方手里的对上
 				const startNote = describeExportStart(outcome.anchor?.start);
 				notes.push(
-					`${label} ${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
+					`${label}：${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
 					+ (outcome.moveCount > 0 ? `、${outcome.moveCount} 处移动/改名` : '')
-					+ `${outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空的）` : ''}`
-					+ `、${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）`
-					+ `${describeExportRange(outcome)}${startNote ? ` · ${startNote}` : ''} → ${outcome.file}`
+					+ (outcome.emptyDirCount > 0 ? `（其中 ${outcome.emptyDirCount} 个是空文件夹）` : '')
+					+ `，${formatBytes(outcome.payloadBytes)}（${formatDuration(outcome.durationMs)}）`
+					+ `${describeExportRange(outcome)}${startNote ? `，${startNote}` : ''}`
+					+ `。位置：${outcome.file}`
 					+ (outcome.superseded.length > 0
-						? `；顺手清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
+						? `；清掉 ${outcome.superseded.length} 个被它取代的旧更新包`
 						: '')
 					+ keptNote,
 				);
@@ -464,19 +461,19 @@ export class ApplyBundleModal extends Modal {
 		focusWindow();
 		contentEl.createEl('h2', { text: '打开同步包' });
 		contentEl.createEl('p', {
-			text: '选一个 .lsave 文件，这里会先算一遍"应用之后会变成什么样"，确认无误再动手。',
+			text: '选一个 .lsave 文件，先看应用后的结果，再决定要不要动手。',
 			cls: 'locally-save-hint',
 		});
 
 		// 拖放区：从资源管理器直接把包拖进来，等同于在下面粘路径
 		const dropZone = contentEl.createDiv({ cls: 'locally-save-drop' });
 		dropZone.createSpan({ text: '把 .lsave 同步包拖到这里' });
-		dropZone.createSpan({ text: '（等同于在下面粘路径）', cls: 'locally-save-drop-sub' });
+		dropZone.createSpan({ text: '也可以在下面粘贴路径', cls: 'locally-save-drop-sub' });
 		this.wireDropTarget(contentEl, dropZone);
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('默认用设置里那个「同步包文件夹」。会列出它的 full（完整副本）与 changes（更新包）两个子目录')
+			.setDesc('默认用设置里那个；会列出它的 full 与 changes 两个子目录')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
@@ -491,7 +488,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('包文件路径')
-			.setDesc('也可以直接粘一个完整路径')
+			.setDesc('也可以直接粘贴完整路径')
 			.addText(text => {
 				this.pathInput = text;
 				text
@@ -507,9 +504,8 @@ export class ApplyBundleModal extends Modal {
 		// "应用完这个仓库就是包里的样子"是唯一一条能保证两边状态编号当场一致的语义，
 		// 所以这一段只是一个说明，不是控件。
 		contentEl.createEl('p', {
-			text: '应用方式：严格同步 —— 包里点名的文件一律用包里的版本，'
-				+ '包里点名删掉的照删，本地多出来的也挪进回收目录。应用完这个仓库就是包送到的样子；'
-				+ '被换掉的本地版本进回收目录，捞得回来',
+			text: '应用方式：严格同步。包里的版本覆盖本地，包里没有的本地文件挪进回收目录，'
+				+ '应用完仓库就是包送到的样子；被换掉的本地版本也进回收目录',
 			cls: 'locally-save-hint',
 		});
 
@@ -525,7 +521,7 @@ export class ApplyBundleModal extends Modal {
 				this.current = null;
 				this.plan = null;
 				this.applyButton?.setDisabled(true);
-				this.reportEl.setText('刚选中的那个包已经被挪进回收站了，重新选一个吧。');
+				this.reportEl.setText('选中的包已被挪进回收站，重新选一个。');
 			},
 			// 回收站那一行也显示：在这里删掉的包，得能在这儿看见、也能在这儿清掉
 			showTrash: true,
@@ -535,7 +531,6 @@ export class ApplyBundleModal extends Modal {
 		});
 		this.reportEl = contentEl.createDiv({ cls: 'locally-save-report' });
 		this.reportEl.setText('还没有选择同步包。');
-
 		new Setting(contentEl)
 			.addButton(button => {
 				this.applyButton = button
@@ -572,7 +567,7 @@ export class ApplyBundleModal extends Modal {
 		this.plan = null;
 		this.applyButton?.setDisabled(true);
 		this.reportEl.empty();
-		this.reportEl.setText('正在检查这个包……');
+		this.reportEl.setText('正在检查这个包…');
 		await this.replan();
 	}
 
@@ -685,27 +680,10 @@ export class ApplyBundleModal extends Modal {
 			+ `${report.bundle.emptyDirCount > 0 ? `（其中 ${report.bundle.emptyDirCount} 个是空文件夹）` : ''}`
 			+ `${report.bundleDirsUnknown ? '（旧版包没记空文件夹，只能数到有文件的那些）' : ''}`);
 
-		// 两种包都说清"应用完会变成什么样"：严格档下这是确定的
-		// （更新包的起点必须与本机站的那份完整副本完全相等，`checkAncestor` 拦在前面）
-		if (report.bundle.mode !== 'full') {
-			this.reportEl.createEl('p', {
-				text: '更新包：只装自它起点那份完整副本以来变过的文件。应用方式是严格同步 —— '
-					+ '包里点名的用包里的版本、点名的删除照删，其余按"你站的那份完整副本 ＋ 这些条目 − 这些删除"补全'
-					+ '（不在这份状态里的本地文件挪进回收目录）。',
-				cls: 'locally-save-hint',
-			});
-		} else {
-			this.reportEl.createEl('p', {
-				text: '完整副本：完全镜像 —— 包里没有的本地文件全挪进回收目录，'
-					+ '仓库会变成和那个包一模一样（本机改过的、自己新建的都不留）。',
-				cls: 'locally-save-hint',
-			});
-		}
-
 		// 旧版本导的包：它没记空文件夹，所以这次目录只建不删（否则会删错）
 		if (report.bundleDirsUnknown) {
 			this.reportEl.createEl('p', {
-				text: '⚠ 旧版本导的包（没记空文件夹）：文件夹这次只建不删',
+				text: '⚠ 旧版本导的包没记空文件夹：这次只建不删',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -717,30 +695,28 @@ export class ApplyBundleModal extends Modal {
 			if (report.viaMine) {
 				// 合并过历史遗留的小包之后常见：我站在被并掉的那个状态上，而这个包正好从那儿经过
 				this.reportEl.createEl('p', {
-					text: `✓ 这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
-						+ '你站的那份完整副本正好在它的路线上：应用它会直接把你送到它送到的状态。',
+					text: `这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
+						+ '你站的那份完整副本正好在它的路线上：应用后直接落到它送到的状态。',
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'match') {
 				this.reportEl.createEl('p', {
-					text: `基准：✓ 与这个包同一份完整副本（${baseGenText}）—— 接着应用是确定的`,
+					text: `基准：与这个包同一份完整副本（${baseGenText}），应用结果是确定的。`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.targetIsMine) {
-				// 这个包要送到的地方**正好就是我站的那份完整副本**：它点名要送的东西我全都有。
-				// 实测遇到过：对方把"32 → 36"的包发给一台已经站在 36 上的机器，
-				// 那边只看到"基准对不上"，看不出其实是白跑一趟 —— 这里说清并给出下一步。
+				// 这个包要送到的地方正好就是我站的那份完整副本：它点名要送的东西我全都有。
 				this.reportEl.createEl('p', {
-					text: `✓ 这个包要送到的那份完整副本（第 ${plan.info.header.targetGeneration} 代 · 基准 ${report.targetBaseline}）`
-						+ '就是你站的那一份：里面没有你缺的内容，应用它不会改动任何文件。'
-						+ `要拿对方后来的改动，让他按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重新导一份`,
+					text: `这个包要送到的那份完整副本（第 ${plan.info.header.targetGeneration} 代 · 基准 ${report.targetBaseline}）`
+						+ '就是你站的那一份：包里没有你缺的内容，应用它不会改动文件。'
+						+ `要拿对方后来的改动，请对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份。`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'mismatch') {
 				this.reportEl.createEl('p', {
-					text: `⚠ 基准对不上：这个包从「${report.bundleBaseline}」这份完整副本算起，你站的是「${report.myBaseline}」。`
-						+ '应用完你会落到这个包送到的状态，不是从你这份往外延伸的结果。'
-						+ `让对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份（认指纹，别只看第几代）`,
+					text: `⚠ 基准对不上：这个包从「${report.bundleBaseline}」算起，你站的是「${report.myBaseline}」。`
+						+ '应用完会落到包送到的状态，不是从你这份往外延伸的结果。'
+						+ `请对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份。`,
 					cls: 'locally-save-warn',
 				});
 				const actions = this.reportEl.createDiv({ cls: 'locally-save-bundle-actions' });
@@ -760,16 +736,14 @@ export class ApplyBundleModal extends Modal {
 				});
 			} else {
 				this.reportEl.createEl('p', {
-					text: '基准：这个包没记基准指纹（旧版本导的）—— 应用时按它送到的状态严格同步',
+					text: '这个包没记基准指纹（旧版本导的），应用时按它送到的状态严格同步。',
 					cls: 'locally-save-hint',
 				});
 			}
 		} else {
 			this.reportEl.createEl('p', {
-				text: `基准：应用之后，你这台就站在第 ${plan.info.header.targetGeneration} 代那份完整副本上。`
-					+ '完整副本是镜像，不合并：包里没有的本地文件会挪进回收目录（捞得回来），'
-					+ '本机改过的会被包里那一版覆盖（旧的同样进回收目录）—— 应用完这个仓库就是那个包。'
-					+ '两边站的完整副本是同一份，之后互发更新包才不会对不上。',
+				text: `应用之后，你这台就站在第 ${plan.info.header.targetGeneration} 代那份完整副本上。`
+					+ '完整副本是完全镜像：包里没有的本地文件、被覆盖的本地版本都会进回收目录。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -779,10 +753,8 @@ export class ApplyBundleModal extends Modal {
 		if (plan.alignToPeer) {
 			this.reportEl.createEl('p', {
 				text: report.restored > 0
-					? `只拉不推：这次会把本机误改的 ${report.restored} 个文件恢复成基准那一版`
-						+ '（你改的那份挪进回收目录）—— 应用完与对方严格相等。'
-					: '只拉不推：应用完与对方严格相等；本机在包里没点名的文件上一旦有改动，'
-						+ '会从基准完整副本恢复（你改的那份挪进回收目录），不会当成"我这一半"留着。',
+					? `仅拉：会把本机误改的 ${report.restored} 个文件恢复成基准那一版，你改的那份进回收目录。`
+					: '仅拉：应用完与对方严格相等。包外的本机改动会从基准完整副本恢复，不会当成“我这一半”留着。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -792,12 +764,12 @@ export class ApplyBundleModal extends Modal {
 		// 都回答不了这句话，用户专门提过要这么个编号。
 		if (report.peerStateId) {
 			this.reportEl.createEl('p', {
-				text: `包里的状态编号：${describeStateId(report.peerStateId)} —— 应用完算一个自己的跟它比，一样就是完全一致`,
+				text: `包里的状态编号：${describeStateId(report.peerStateId)}。应用完会再算一个跟它比，一样就说明两边内容一致。`,
 				cls: 'locally-save-hint',
 			});
 		} else {
 			this.reportEl.createEl('p', {
-				text: '旧版包没记状态编号，应用完没法对账',
+				text: '旧版包没记状态编号，应用完没法对账。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -806,8 +778,8 @@ export class ApplyBundleModal extends Modal {
 		// （报过：拿到对方发来的包、打开一看"没应用"，其实本地早就是那一版了）
 		if (plan.actions.length === 0 && plan.foldersToRemove.length === 0) {
 			this.reportEl.createEl('p', {
-				text: `✓ 包里的东西你这边都已经有了（${report.synchronized}/${report.bundle.entryCount} 个文件一致），`
-					+ '应用它不会改动任何文件',
+				text: `包里的东西你这边都已经有了（${report.synchronized}/${report.bundle.entryCount} 个文件一致），`
+					+ '应用不会改动文件。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -821,30 +793,30 @@ export class ApplyBundleModal extends Modal {
 			const details = this.reportEl.createEl('details', { cls: 'locally-save-details' });
 			const listed = Math.min(entries.length, MAX_LISTED);
 			details.createEl('summary', {
-				text: `包里点名了这 ${entries.length} 个文件`
+				text: `包里点名了 ${entries.length} 个文件`
 					+ `${deletedNames.length > 0 ? `，另有 ${deletedNames.length} 个删除` : ''}`
-					+ '（展开看清单 —— 找不到你关心的那个，就是对方没打包它）',
+					+ '（展开查看；清单里没有的，包里也没有）',
 			});
 			const list = details.createEl('ul', { cls: 'locally-save-facts' });
 			for (const entry of entries.slice(0, listed)) {
 				list.createEl('li', { text: `${entry.path}（${formatBytes(entry.size)}）` });
 			}
 			if (entries.length > listed) {
-				list.createEl('li', { text: `…… 其余 ${entries.length - listed} 个已省略`, cls: 'locally-save-more' });
+				list.createEl('li', { text: `… 其余 ${entries.length - listed} 个已省略`, cls: 'locally-save-more' });
 			}
 			for (const path of deletedNames.slice(0, MAX_LISTED)) {
 				list.createEl('li', { text: `删除：${path}`, cls: 'locally-save-warn' });
 			}
 			if (deletedNames.length > MAX_LISTED) {
-				list.createEl('li', { text: `…… 其余 ${deletedNames.length - MAX_LISTED} 个删除已省略`, cls: 'locally-save-more' });
+				list.createEl('li', { text: `… 其余 ${deletedNames.length - MAX_LISTED} 个删除已省略`, cls: 'locally-save-more' });
 			}
 		}
 
 		// 同步程度：接收方最关心的一个数（文件与文件夹分开说，别只报文件）
 		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
-			text: `${report.synchronized} / ${report.bundle.entryCount} 个文件已经和本地一致`
-				+ `；文件夹 ${report.foldersInSync} / ${report.bundleDirCount} 个已经在两边都有`,
+			text: `${report.synchronized} / ${report.bundle.entryCount} 个文件已一致`
+				+ `；文件夹 ${report.foldersInSync} / ${report.bundleDirCount} 个两边都有`,
 			cls: 'locally-save-hint',
 		});
 
@@ -853,7 +825,7 @@ export class ApplyBundleModal extends Modal {
 		line(`新增 ${report.adds} 个`);
 		line(`覆盖 ${report.overwrites} 个`);
 		if (report.forcedOverwrites > 0) {
-			line(`其中 ${report.forcedOverwrites} 个是本地也改过的（严格同步用包里那一版覆盖，本地那份进回收目录）`);
+			line(`其中 ${report.forcedOverwrites} 个本地也改过：用包里的版本覆盖，旧版进回收目录`);
 		}
 		if (report.historyMatches > 0) {
 			line(`其中 ${report.historyMatches} 个：本地停在对方发过的中间版本上，直接覆盖`);
@@ -865,56 +837,44 @@ export class ApplyBundleModal extends Modal {
 		if (report.moves > 0) line(`改名 / 移动 ${report.moves} 个`);
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹`);
-		if (report.foldersKept > 0) line(`留着 ${report.foldersKept} 个本地文件夹：磁盘上还有东西（多半被排除规则挡住了）`);
+		if (report.foldersKept > 0) {
+			// **把路径写出来**：这几个文件夹就是"应用完编号还对不上"的全部线索，
+			// 只说"留着 N 个"用户没法处理（里面被排除规则挡住的东西删不掉，得他自己清）
+			const shown = plan.foldersKept.slice(0, 5);
+			const more = plan.foldersKept.length > shown.length ? ` … 等 ${plan.foldersKept.length} 个` : '';
+			line(`留着 ${report.foldersKept} 个本地文件夹：${shown.join('、')}${more}`
+				+ '（里面有被排除规则挡住的文件，清掉后再应用一次）');
+		}
 
 		// 两台机器互相发包时，每台只握着改动的一半 —— 应用前就把"我这半还剩多少"摊开
 		if (report.pendingChanges !== null && (report.pendingChanges > 0 || (report.pendingDeletes ?? 0) > 0)) {
 			line(`你这边还有 ${report.pendingChanges} 个改动`
 				+ `${(report.pendingDeletes ?? 0) > 0 ? `、${report.pendingDeletes} 个删除` : ''}`
-				+ '是对方没有的 —— 下次导出更新包会一起带过去');
+				+ '是对方没有的，下次导出更新包会带上');
 		}
 		// 这个包的起点不是我站的那一份（但内容上我正好在它的路线上）：应用完我就接在它那份起点上
 		if (report.baselineAdopted) {
-			line(`应用完你站的完整副本会落到第 ${report.baselineAdopted.generation} 代`
-				+ `（${report.baselineAdopted.hash}）—— 这个包就是从它算起的，接上它两边才在同一份完整副本上`);
+			line(`应用完你会站在第 ${report.baselineAdopted.generation} 代那份完整副本上`
+				+ `（${report.baselineAdopted.hash}）；这个包就是从它算起的`);
 		}
-
-		// 走哪条路、按什么规则处理
-		this.reportEl.createEl('h3', { text: '会怎么处理' });
-		this.reportEl.createEl('p', {
-			text: '严格同步：包里点名的文件一律用包里的版本、点名的删除照删、'
-				+ '本地多出来的（包送到的状态里没有的）也挪进回收目录；'
-				+ '动到的东西全在回收目录里（仓库/.trash/locally-save），捞得回来。',
-			cls: 'locally-save-hint',
-		});
-
-		const mode = this.reportEl.createEl('p');
-		if (report.mode === 'fast') {
-			mode.setText('方式：按包直接写入（你与这个包站在同一份完整副本上）');
-		} else {
-			mode.setText('方式：逐文件比对（逐个确认本地那一份是不是还停在包所基于的版本上）');
-		}
-		mode.addClass('locally-save-hint');
 
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
-				text: '注意：这个包不是从你站的那份完整副本算起的（多半来自另一台独立打包的机器）。'
-					+ '应用它之后，你会以它送到的状态为准。',
+				text: '这个包不是从你站的那份完整副本分出来的，应用后以它送到的状态为准。',
 				cls: 'locally-save-warn',
 			});
 		}
 		if (!report.parentMatches && report.bundle.mode === 'changes') {
 			this.reportEl.createEl('p', {
-				text: '这个包不是接着你上次应用的那一份算的（中间多半还有一份包没到）。'
-					+ '插件不猜着合 —— 先把缺的那一份拷过来，或者让对方从你站的那份完整副本重导一份。',
+				text: '这个包不是接着你上次应用的那一份算的，中间可能还有一份没到。'
+					+ '先把缺的那份拷过来，或者让对方从你站的那份完整副本重导一份。',
 				cls: 'locally-save-hint',
 			});
 		}
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
 				text: `⚠ 你还没站到这个包所基于的那份完整副本上（差 ${report.generationGap} 代）。`
-					+ '插件不猜着合：请对方从你站的那份完整副本重导一份，'
-					+ '或者把这份包所基于的那份完整副本发过来（应用它会镜像覆盖本机内容）。',
+					+ '请对方从你站的那份完整副本重导一份，或者把那份完整副本发过来（应用它会镜像覆盖本机内容）。',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -932,12 +892,6 @@ export class ApplyBundleModal extends Modal {
 		}
 		await this.runApply();
 	}
-
-	/**
-	 * 应用完的那句话已经缩到一句（"已应用同步包 · 两边一致"）；
-	 * 编号差的细节在更新记录里，不在通知里讲小作文。
-	 */
-
 
 	/**
 	 * **动手前先把"我这边的东西"存成一个包**（用户要的："本地最新更新保存为一个更新包"）。
@@ -968,7 +922,7 @@ export class ApplyBundleModal extends Modal {
 		const plan = this.plan;
 		const file = this.current;
 		if (!plan || !file) return;
-		this.reportEl.setText('正在应用……');
+		this.reportEl.setText('正在应用…');
 		try {
 			/**
 			 * 严格档会覆盖 / 挪走我这边的东西 → 先把"我这一半"存成一个包。
@@ -984,9 +938,9 @@ export class ApplyBundleModal extends Modal {
 			 * 从基准完整副本恢复进回收目录；再存一份回传包等于把误改当成要发出去的东西。
 			 */
 			if (strict && !plan.alignToPeer) {
-				this.reportEl.setText('正在把你这边的东西先存成一个包……');
+				this.reportEl.setText('正在先存下你这边的东西…');
 				parked = await this.parkLocalChanges(plan);
-				this.reportEl.setText('正在应用……');
+				this.reportEl.setText('正在应用…');
 			}
 			const result = await executeBundlePlan(plan, {
 				...this.optionsFor(file),
@@ -1018,24 +972,43 @@ export class ApplyBundleModal extends Modal {
 			if (result.failed.length > 0) {
 				// 失败的要**列出来**，只说"失败 N 个"等于没说
 				const shown = result.failed.slice(0, 5).map(item => `${item.path}（${item.error}）`);
-				const more = result.failed.length > shown.length ? ` …… 等 ${result.failed.length} 个` : '';
+				const more = result.failed.length > shown.length ? ` … 等 ${result.failed.length} 个` : '';
 				parts.push(`失败 ${result.failed.length}：${shown.join('；')}${more}`);
 			}
 
 			// 欠账式回传：**不立刻生成回礼包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
 			// 只在通知里提一句"你这边还有 N 个改动没发出去"，它们会随下次导出更新包一起带过去。
 			// （`parked` 那条路例外：改动已经进包了，说"没发出去"没意义）
+			/**
+			 * **完整副本 / 差量包没落准**：有文件没写成、或者有文件夹删不掉。
+			 * 这时**基准不会换过去**（见 `apply.ts` 里 `landedOnBaseline` 那段）——
+			 * 必须当面说，否则用户会以为"已经回到 100 代了"（用户报的现场）。
+			 * 删不掉的文件夹就是下一趟要处理的全部线索，直接列出来。
+			 *
+			 * 注意判据**不是**"状态编号不一致"：站在一个点上的机器允许有本地改动
+			 * （检查点走合并档时会留着），那不算没落到。
+			 */
+			const wantsBaseline = plan.info.header.mode === 'full' || plan.info.header.targetFullBundle === true;
+			const landedCleanly = result.failed.length === 0 && plan.foldersKept.length === 0;
+			if (wantsBaseline && !landedCleanly) {
+				parts.push('⚠ 没落到这份基准：有文件没写成或有文件夹删不掉，基准没有换过去');
+				if (plan.foldersKept.length > 0) {
+					const shown = plan.foldersKept.slice(0, 5);
+					const more = plan.foldersKept.length > shown.length ? ` … 等 ${plan.foldersKept.length} 个` : '';
+					parts.push(`删不掉的文件夹：${shown.join('、')}${more}`
+						+ '（里面有被排除规则挡住的文件，例如 desktop.ini、*.lsave；清掉后再应用一次）');
+				}
+			}
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
-			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去（下次导出更新包会一起带上）`);
+			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去，下次导出更新包会带上`);
 
 			// 我这一半的去处：存下来的那一份**起点就是这份包送到的状态**，
 			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一个状态上）应用＝同理。
 			// 注意别说成"接在刚应用到的基准点上"：**应用更新包不动基准**（0.14 起只有完整包会动它）
 			if (parked) {
-				parts.push(`你这边的改动已存成 ${parked}（从这份包送到的状态算起：`
-					+ '你自己应用它就把改动加回来，发给对方、他站在同一个状态上应用也一样）');
+				parts.push(`你这边的改动已存成 ${parked}（从这份包送到的状态算起；自己应用或发给对方都能把改动加回来）`);
 			} else if (strict) {
-				parts.push('你这边跟那份状态本来就没有差别，所以没有另存包');
+				parts.push('你这边跟那份状态没有差别，没有另存包');
 			}
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
@@ -1044,10 +1017,14 @@ export class ApplyBundleModal extends Modal {
 			// 别报成"写入 0、跳过 N"那样让人以为应用失败了
 			const didNothing = result.written === 0 && result.deleted === 0 && result.moved === 0
 				&& result.restored === 0 && result.foldersCreated === 0 && result.foldersRemoved === 0;
-			if (didNothing && result.failed.length === 0) {
+			const matched = result.stateIdCompare === 'match' || !plan.info.header.stateId;
+			// **没写任何东西 ≠ 两边一样**：可能正是"删不掉的文件夹 / 写不进去的文件"让编号对不上
+			if (didNothing && result.failed.length === 0 && matched && landedCleanly) {
 				new Notice('没有改动 · 本地已经是最新', 5000);
 			} else {
-				const same = result.stateIdCompare === 'match' ? '两边一致' : '编号还差一点';
+				const same = result.stateIdCompare === 'match'
+					? '两边一致'
+					: (wantsBaseline && !landedCleanly ? '没落到基准（看报告）' : '编号还差一点');
 				new Notice(`已应用同步包 · ${same}`, 6000);
 			}
 			this.close();
@@ -1102,7 +1079,7 @@ async function copyLine(text: string): Promise<void> {
 		await navigator.clipboard.writeText(text);
 		new Notice(`已复制：${text}`, 12000);
 	} catch {
-		new Notice(`没能写进剪贴板，这句话是：${text}`, 15000);
+		new Notice(`没能写进剪贴板，内容如下：${text}`, 15000);
 	}
 }
 
@@ -1127,40 +1104,42 @@ class ConfirmApplyModal extends Modal {
 		const { report } = this.plan;
 		contentEl.empty();
 		contentEl.addClass('locally-save-modal');
-		contentEl.createEl('h2', { text: '确认应用：会动到本地已有的文件' });
+		contentEl.createEl('h2', { text: '确认应用' });
 
 		const deleting = this.plan.actions.filter(action => action.kind === 'delete').map(action => action.path);
 		const paths = deleting;
 
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
-		facts.createEl('li', {
-			text: `两边都改过的：${report.conflicts} 个（用包里那一版覆盖，你改过的那份挪进回收目录）`,
-		});
+		if (report.conflicts > 0) {
+			facts.createEl('li', {
+				text: `两边都改过：${report.conflicts} 个。用包里的版本覆盖，你改过的那份进回收目录。`,
+			});
+		}
 		if (report.forcedOverwrites > 0) {
 			facts.createEl('li', { text: `会覆盖 ${report.forcedOverwrites} 个本地改动过的文件` });
 		}
 		if (report.restored > 0) {
 			facts.createEl('li', {
-				text: `会恢复 ${report.restored} 个你这边误改的文件（只拉不推：与对方严格相等；旧版本挪进回收目录）`,
+				text: `会恢复 ${report.restored} 个你误改的文件（仅拉：与对方严格相等；旧版本进回收目录）`,
 			});
 		}
 		if (paths.length > 0) {
 			facts.createEl('li', {
 				text: `会删除 ${paths.length} 个本地文件`
 					+ (report.localExtras > 0
-						? `（其中 ${report.localExtras} 个是你本地多出来的：包里送到的状态里没有它们）`
+						? `（其中 ${report.localExtras} 个是你本地多出来的）`
 						: ''),
 			});
 		}
 		if (this.plan.foldersToRemove.length > 0) {
 			facts.createEl('li', {
-				text: `会删掉 ${this.plan.foldersToRemove.length} 个本地空文件夹（包里没有它们）`,
+				text: `会删掉 ${this.plan.foldersToRemove.length} 个本地空文件夹`,
 			});
 		}
 		facts.createEl('li', {
 			text: report.keepBackup
-				? '被覆盖 / 删掉 / 冲突输掉的本地版本都会进回收目录（仓库/.trash/locally-save），还能捞回来'
-				: '⚠ 回收目录已关：被覆盖 / 删掉的本地版本会直接消失',
+				? '被覆盖、删掉或冲突的本地版本都会进回收目录（仓库/.trash/locally-save），能捞回来。'
+				: '⚠ 回收目录已关：被覆盖或删掉的本地版本会直接消失。',
 		});
 
 		if (paths.length > 0) {
@@ -1170,7 +1149,7 @@ class ConfirmApplyModal extends Modal {
 				list.createDiv({ text: item, cls: 'locally-save-row is-delete' });
 			}
 			if (paths.length > MAX_ROWS) {
-				list.createDiv({ text: `…… 其余 ${paths.length - MAX_ROWS} 个已省略`, cls: 'locally-save-more' });
+				list.createDiv({ text: `… 其余 ${paths.length - MAX_ROWS} 个已省略`, cls: 'locally-save-more' });
 			}
 		}
 
@@ -1181,7 +1160,7 @@ class ConfirmApplyModal extends Modal {
 				list.createDiv({ text: `${item}/`, cls: 'locally-save-row is-delete' });
 			}
 			contentEl.createEl('p', {
-				text: '只删空的：里面但凡还有东西就删不动（用的是 rmdir，不是递归删除）。',
+				text: '只删空文件夹；里面还有东西就跳过。',
 				cls: 'locally-save-hint',
 			});
 		}

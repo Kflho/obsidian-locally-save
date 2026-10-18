@@ -80,7 +80,7 @@ export default class LocallySavePlugin extends Plugin {
 		// 写错了只会静默显示成空白方块，见 ui/ribbon.ts）
 		this.ribbonSyncEl = this.addRibbonIcon(
 			pickIcon(['package-plus', 'archive', 'save']),
-			'Locally Save：立即同步（导出包 + 推拉）',
+			'Locally Save：立即同步',
 			() => { void syncNow(this); },
 		);
 		this.ribbonExportEl = this.addRibbonIcon(
@@ -208,7 +208,17 @@ export default class LocallySavePlugin extends Plugin {
 		await maybeGitSync(this);
 		if (this.bundleBusy || this.incomingBusy) return;
 		const acted = await checkIncomingBundles(this);
-		if (acted || this.bundleBusy || this.incomingBusy) return;
+		if (acted) {
+			/**
+			 * 刚应用完：**立刻把"我已经落到这一代"写进货架并推上去**。
+			 * 不推的话要等下一拍（30 秒）才有人写 peer 文件 —— 这半分钟里对面拉到的
+			 * 还是应用前的状态，状态栏会写"对方：不同步"（用户报的就是应用完之后仍报不同步）。
+			 * 这一拍仍然**不留包**：刚应用完就留包等于马上回礼，两边容易来回搬运。
+			 */
+			await maybeGitSync(this);
+			return;
+		}
+		if (this.bundleBusy || this.incomingBusy) return;
 		this.tickExport();
 	}
 

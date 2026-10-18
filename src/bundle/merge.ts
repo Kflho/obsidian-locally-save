@@ -220,7 +220,7 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 			const info = await readBundleInfo(file);
 			links.push({ name, file, header: info.header, payloadOffset: info.payloadOffset });
 		} catch (error) {
-			throw new Error(`合并要用的「${name}」现在读不出包信息了（${describe(error)}）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
+			throw new Error(`合并要用的「${name}」现在读不出包信息（${describe(error)}）。包目录可能刚被改动过，重新打开这个窗口再看一遍。`);
 		}
 	}
 	const first = links[0];
@@ -231,11 +231,11 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 		const link = links[index] as (typeof links)[number];
 		const expected = index === 0 ? plan.anchorHash : (links[index - 1] as (typeof links)[number]).header.targetBaselineHash;
 		if (link.header.mode !== 'changes' || (link.header.baselineHash ?? null) !== expected) {
-			throw new Error(`合并要用的这几环现在接不上了（「${link.name}」的起点对不上）—— 包目录刚被动过？重新打开这个窗口再看一遍`);
+			throw new Error(`合并要用的这几环现在接不上了（「${link.name}」的起点对不上）。包目录可能刚被改动过，重新打开这个窗口再看一遍。`);
 		}
 	}
 	if ((last.header.targetBaselineHash ?? null) !== plan.targetHash) {
-		throw new Error(`合并要送到的那一点变了（「${last.name}」的落点对不上）—— 重新打开这个窗口再看一遍`);
+		throw new Error(`合并要送到的那一点变了（「${last.name}」的落点对不上）。重新打开这个窗口再看一遍。`);
 	}
 
 	/**

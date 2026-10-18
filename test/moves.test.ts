@@ -268,6 +268,60 @@ async function scenario(name: string): Promise<{
 	check('源文件被改：B 的源文件一个字节没动', fs.readFileSync(path.join(s.b, '旧文件夹/一.md'), 'utf8'), 'B 自己改过的内容，长度不同');
 }
 
+// ---------------------------------------------------------------- 漏掉中间那份移动包：接收方停在基准上
+// 用户报的现场：对面站在第 100 代基准上，应用最新累积包时报「包里要把 X 改名成 Y，
+// 但本地两个路径都不在」。原因是链式移动有两条（旧 → 中间、中间 → 新），接收方手里只有"旧"：
+// 第一条把它搬到"中间"之后，计划阶段必须**按顺序演一遍**才能让第二条看见那个中间路径。
+{
+	const s = await scenario('skip-middle-file');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹/一.md'), path.join(s.a, '旧文件夹/一-改名.md'));
+	const first = await s.exportChanges();
+	checkTrue('漏掉中间包（文件）：第一份移动包有内容', first.file !== null, '第一份没导出');
+	// **B 不应用第一份**，仍停在基准上
+	fs.mkdirSync(path.join(s.a, '新文件夹'), { recursive: true });
+	fs.renameSync(path.join(s.a, '旧文件夹/一-改名.md'), path.join(s.a, '新文件夹/一-改名.md'));
+	const second = await s.exportChanges();
+	checkTrue('漏掉中间包（文件）：累积包带着两条移动', (second.header?.moves ?? []).length >= 2,
+		JSON.stringify(second.header?.moves));
+	let message = '';
+	try {
+		await applyBundle({ settings, log, vaultRoot: s.b, stateFile: s.stb, file: second.file as string, strictness: 'mirror' });
+	} catch (error) {
+		message = error instanceof Error ? error.message : String(error);
+	}
+	check('漏掉中间包（文件）：停在基准上也能应用', message, '');
+	checkTrue('漏掉中间包（文件）：落到最终路径', fs.existsSync(path.join(s.b, '新文件夹/一-改名.md')), '');
+	checkTrue('漏掉中间包（文件）：旧路径没了', !fs.existsSync(path.join(s.b, '旧文件夹/一.md')), '');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('漏掉中间包（文件）：两边状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// ---------------------------------------------------------------- 漏掉中间那份移动包：目录连改两次名
+{
+	const s = await scenario('skip-middle-dir');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '中间名'));
+	const first = await s.exportChanges();
+	checkTrue('漏掉中间包（目录）：第一份移动包有内容', first.file !== null, '第一份没导出');
+	// B 不应用第一份
+	fs.renameSync(path.join(s.a, '中间名'), path.join(s.a, '最终名'));
+	const second = await s.exportChanges();
+	let message = '';
+	try {
+		await applyBundle({ settings, log, vaultRoot: s.b, stateFile: s.stb, file: second.file as string, strictness: 'mirror' });
+	} catch (error) {
+		message = error instanceof Error ? error.message : String(error);
+	}
+	check('漏掉中间包（目录）：停在基准上也能应用', message, '');
+	checkTrue('漏掉中间包（目录）：落到最终目录', fs.existsSync(path.join(s.b, '最终名/一.md')), '');
+	checkTrue('漏掉中间包（目录）：旧目录没了', !fs.existsSync(path.join(s.b, '旧文件夹')), '');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('漏掉中间包（目录）：两边状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures) console.log(`\n❌ ${message}`);
 if (failures.length > 0) process.exitCode = 1;

@@ -11,6 +11,7 @@ import {
 	trashBundles,
 } from '../bundle/manage';
 import type { ManagedBundle } from '../bundle/manage';
+import { baselineOfBundle } from '../bundle/baseline';
 import { describeLocalState } from '../bundle/log';
 import { dirExists } from '../sync/disk';
 import { loadState } from '../sync/state';
@@ -155,11 +156,11 @@ export class BundleListView {
 		this.renderPosition();
 
 		if (!base) {
-			this.noteEl.setText('还没法确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
+			this.noteEl.setText('还没确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
 			return;
 		}
 		if (!this.baseExists) {
-			this.noteEl.setText(`这个文件夹不存在：${base}（检查一下路径，或者直接在下面粘包文件路径）`);
+			this.noteEl.setText(`文件夹不存在：${base}（检查路径，或直接粘贴包文件路径）`);
 			return;
 		}
 		const full = this.items.filter(item => item.mode === 'full').length;
@@ -167,9 +168,9 @@ export class BundleListView {
 		const unknown = this.items.filter(item => item.mode === null).length;
 		this.headEl.createSpan({
 			text: this.items.length > 0
-				? `已有的同步包：${this.items.length} 个（更新 ${changes} · 完整 ${full}`
-					+ `${unknown > 0 ? ` · 读不出包信息 ${unknown}` : ''}）`
-				: '已有的同步包',
+				? `同步包 ${this.items.length} 个：更新 ${changes}、完整 ${full}`
+					+ `${unknown > 0 ? `、读不出信息 ${unknown}` : ''}`
+				: '同步包',
 		});
 		const refreshButton = this.headEl.createEl('button', { text: '重新列出', cls: 'locally-save-mini' });
 		refreshButton.addEventListener('click', () => { void this.refresh(); });
@@ -197,7 +198,7 @@ export class BundleListView {
 		}
 		if (this.items.length > shown) {
 			this.listEl.createDiv({
-				text: `…… 其余 ${this.items.length - shown} 个已省略（它们仍在文件夹里，删的时候去资源管理器按时间找）`,
+				text: `… 其余 ${this.items.length - shown} 个已省略（仍在文件夹里，可在资源管理器按时间找）`,
 				cls: 'locally-save-more',
 			});
 		}
@@ -213,8 +214,13 @@ export class BundleListView {
 		row.setAttribute('title', item.error ? `读不出包信息：${item.error}` : item.file);
 		// 类型由分组标题说了，行里只写**看包的判据**：第几代 → 第几代 · 状态编号 · 大小 · 时间
 		row.createSpan({ text: this.describeRow(item), cls: 'locally-save-reason' });
-		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"
-		if (this.local?.bundle?.fullFile === item.name) {
+		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"。
+		// **光比文件名不够**：应用完整副本时如果有一批文件没写成，`fullFile` 可能已经指过去、
+		// 内容却没落到（老版本留下的状态就这样），再标"本机现在的基准"就是骗人 ——
+		// 还要比对基准指纹（那份包自己的清单算出来的）。
+		if (this.local?.bundle?.fullFile === item.name
+			&& item.header
+			&& this.local.bundle.fullHash === baselineOfBundle(item.header)) {
 			row.createSpan({ text: '← 本机现在的基准', cls: 'locally-save-current' });
 		}
 
@@ -320,9 +326,8 @@ export class BundleListView {
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）`,
 			],
-			note: `文件会挪到 ${root}/时间戳/ ，需要时还能手动捞回来；`
-				+ '确认没用了就点旁边的「彻底删除」（那个不进回收站），'
-				+ '或者在列表上面的回收站那一行点「清空回收站」。',
+			note: `文件会挪到 ${root}/时间戳/，需要时还能捞回来。`
+				+ '确认没用了，可以用旁边的「彻底删除」，或在回收站那一行点「清空回收站」。',
 			confirmText: '挪进回收站',
 			onConfirm: async () => {
 				const outcome = await trashBundles(this.options.baseDir(), [item.file]);
@@ -350,7 +355,7 @@ export class BundleListView {
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被直接删掉，不进回收站`,
 			],
-			note: '这一步之后就捞不回来了。只是想把它从列表里清走的话，用旁边的「挪进回收站」—— 那一步还能捞回来。',
+			note: '删除后捞不回来。只想清出列表的话，用旁边的「挪进回收站」。',
 			confirmText: '彻底删除',
 			onConfirm: async () => {
 				const outcome = await deleteBundles([item.file]);
@@ -375,7 +380,7 @@ export class BundleListView {
 		if (contents.count === 0) {
 			host.createSpan({ text: '回收站：空的' });
 			host.createSpan({
-				text: '（点某个包的「挪进回收站」会把它挪到这里，还能手动捞回来）',
+				text: '（删掉的包会挪到这里，还能捞回来）',
 				cls: 'locally-save-hint',
 			});
 			return;
@@ -386,7 +391,7 @@ export class BundleListView {
 			new ConfirmBundleModal(this.plugin.app, {
 				title: '清空回收站？',
 				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被真正删掉`],
-				note: '这一步之后就捞不回来了。只想真删某一个包的话，用那一行里的「彻底删除」；这里是把回收站整个清掉。',
+				note: '清空后捞不回来。只想删某一个包的话，用那一行的「彻底删除」。',
 				confirmText: '彻底删除',
 				onConfirm: async () => {
 					await emptyBundleTrash(this.options.baseDir());
