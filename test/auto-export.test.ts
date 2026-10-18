@@ -149,6 +149,19 @@ checkTrue(
 	Object.keys(plugin.settings).join(', '),
 );
 
+// 6. 「立即同步」的默认导出：两个自动留包开关都关、有基准、有改动 → 更新包（不重写完整包），
+//    并且 silent 模式不自己弹通知（总结由 syncNow 拼一句）
+plugin.settings.autoExportChanges = false;
+plugin.settings.autoExportFull = false;
+fs.writeFileSync(path.join(VAULT, 'notes', 'a.md'), 'AAAA 立即同步改的，长度不同');
+const fullCountBefore = bundleFiles('full').length;
+noticeLog.length = 0;
+const syncExport = await exportBundlesNow(plugin, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+checkTrue('默认导出了更新包（没有重写完整包）', syncExport?.fullWritten === false, JSON.stringify(syncExport));
+check('完整包数量没变', bundleFiles('full').length, fullCountBefore);
+checkTrue('changes 里有包', bundleFiles('changes').length >= 1, JSON.stringify(bundleFiles('changes')));
+check('silent 模式不弹通知（总结由 syncNow 说）', noticeLog.length, 0);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);

@@ -53,6 +53,37 @@ export const BUNDLE_MODE_OPTIONS: Record<string, string> = {
 };
 
 /**
+ * 「多久拉一次 git 远程」的可选值（分钟；`0` ＝ 只手动）。
+ *
+ * 拉取只是 `git fetch`，没变化时几乎不花流量；但没必要每 30 秒都去问一次。
+ * 推送不受这个限制 —— 本机留了新包，下一个 30 秒的节拍就会推。
+ */
+export const GIT_PULL_OPTIONS: Record<string, string> = {
+	'0': '只手动',
+	'1': '每 1 分钟',
+	'5': '每 5 分钟',
+	'15': '每 15 分钟',
+	'30': '每 30 分钟',
+	'60': '每 1 小时',
+};
+
+/**
+ * **同步方向**（0.8.0 之前也有这一项，那会儿管的是"本地副本"；现在管 git 货架）。
+ *
+ * 三种取值不是"冲突策略"，而是"这台机器负责哪一半"（0.15 起是硬边界）：
+ * - `both`：收发都做 —— 收到先弹窗确认，应用后把本机改动导出回传；
+ * - `upload`：只推 —— 只发不收，不应用对方的包；
+ * - `download`：只拉 —— 只收不发，收到直接应用（本机改动进回收目录），**也不导出任何包**。
+ */
+export type SyncDirection = 'both' | 'upload' | 'download';
+
+export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
+	both: '双向：收发都做（收到先确认，应用后把本机改动回传）',
+	upload: '仅推：只发不收（对面要自己应用）',
+	download: '仅拉：只收不发（收到直接应用，本机改动进回收目录）',
+};
+
+/**
  * 「更新包攒到多大就提醒立新基准」的可选值：**0 ＝ 不提醒**（键是存进 data.json 的 MB 数）。
  *
  * 更新包是"自起点那份完整包累积"的，攒大了就该导一份新的完整副本换基准 ——
@@ -143,6 +174,30 @@ export interface PluginSettings {
 	 */
 	bundleSizeWarnLimit: number;
 
+	// ------------------------------------------------------------ git 远程（0.15）
+	/**
+	 * **把包文件夹接到一个 git 仓库**（默认关）。
+	 *
+	 * 关着时插件一个网络请求都不发；打开后也只是"包文件夹"这一个 git 工作区在推拉 ——
+	 * **整库永远不进 git**，库多大都不影响。
+	 */
+	gitEnabled: boolean;
+	/** 远程地址：HTTPS 或 SSH。**只在"接入"动作里写进 `.git/config`**，不会自动改已有的 */
+	gitRemote: string;
+	/** 分支名（默认 `main`） */
+	gitBranch: string;
+	/**
+	 * **方向**：`both` 互相应用、`upload` 只推、`download` 只拉。
+	 *
+	 * 字段名沿用 0.8.0 之前那一项（老 `data.json` 里的 `both/upload/download` 正好接着用）：
+	 * 那时管的是"本地副本"，现在管 git 货架 —— 语义还是"谁准"。
+	 */
+	syncDirection: SyncDirection;
+	/** 每隔多久 `git fetch` 一次（分钟，`0` ＝ 只手动）；推送不受它限制 */
+	gitPullMinutes: number;
+	/** git 程序路径；留空 ＝ 从 PATH 里找 */
+	gitPath: string;
+
 	// ------------------------------------------------------------ 界面
 	/** 左侧栏：立即留包（按两个「自动留包」开关留一次） */
 	ribbonSyncIcon: boolean;
@@ -179,6 +234,14 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	// 更新包搬过 20 MB 就提醒"该立新完整包了"；0 ＝ 不提醒
 	bundleSizeWarnLimit: 20,
 
+	// git 远程：默认关（关着时一个网络请求都不发）；包文件夹就是一个 git 工作区
+	gitEnabled: false,
+	gitRemote: '',
+	gitBranch: 'main',
+	syncDirection: 'both',
+	gitPullMinutes: 5,
+	gitPath: '',
+
 	ribbonSyncIcon: true,
 	ribbonExportIcon: true,
 	ribbonApplyIcon: true,
@@ -210,6 +273,11 @@ export function coerceText(value: unknown, fallback = ''): string {
 
 export function coerceLogLevel(value: unknown): LogLevel {
 	return coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel);
+}
+
+/** 方向：只认那三个值，其余回落默认（`both`） */
+export function coerceDirection(value: unknown): SyncDirection {
+	return coerceChoice(value, ['both', 'upload', 'download'] as const, DEFAULT_SETTINGS.syncDirection);
 }
 
 export function coerceBundleMode(value: unknown): 'full' | 'changes' {
@@ -295,6 +363,18 @@ export function settingsFrom(data: unknown): PluginSettings {
 			Object.keys(SIZE_WARN_OPTIONS).map(Number),
 			DEFAULT_SETTINGS.bundleSizeWarnLimit,
 		),
+
+		gitEnabled: coerceBoolean(raw.gitEnabled, DEFAULT_SETTINGS.gitEnabled),
+		gitRemote: coerceText(raw.gitRemote, DEFAULT_SETTINGS.gitRemote),
+		// 分支名留空没意义：落到 main（真正的合法性检查在引擎里，非法值会明确报错）
+		gitBranch: coerceText(raw.gitBranch, DEFAULT_SETTINGS.gitBranch).trim() || DEFAULT_SETTINGS.gitBranch,
+		syncDirection: coerceDirection(raw.syncDirection),
+		gitPullMinutes: coerceNumberChoice(
+			raw.gitPullMinutes,
+			Object.keys(GIT_PULL_OPTIONS).map(Number),
+			DEFAULT_SETTINGS.gitPullMinutes,
+		),
+		gitPath: coerceText(raw.gitPath, DEFAULT_SETTINGS.gitPath),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认
 		ribbonSyncIcon: coerceBoolean(raw.ribbonSyncIcon ?? raw.ribbonIcon, DEFAULT_SETTINGS.ribbonSyncIcon),

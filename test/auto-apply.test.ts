@@ -21,7 +21,7 @@ import { exportBundle } from '../src/bundle/export';
 import type { ExportOutcome } from '../src/bundle/export';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import { loadState } from '../src/sync/state';
-import { checkIncomingBundles } from '../src/ui/actions';
+import { checkIncomingBundles, exportBundlesNow } from '../src/ui/actions';
 import { createLogger } from '../src/utils/log';
 
 // -------------------------------------------------------------------- 断言
@@ -110,8 +110,10 @@ async function seedBaseline(plugin: LocallySavePlugin, file: string, vault: stri
 }
 
 // -------------------------------------------------------------------- 用例
-// 两边一开始内容一样
-for (const [rel, content] of [['notes/a.md', 'AAA'], ['notes/b.md', 'BBB']] as const) {
+// 两边一开始内容一样。
+// `其他/c.md` 是**更新包碰不到**的目录：应用完更新包后，目录基准必须仍然包含它，
+// 否则"立即同步"的 hasChanges 会以为仓库多了个目录，把同一份更新包再导一遍。
+for (const [rel, content] of [['notes/a.md', 'AAA'], ['notes/b.md', 'BBB'], ['其他/c.md', 'CCC']] as const) {
 	write(OTHER, rel, content);
 	write(VAULT, rel, content);
 }
@@ -151,6 +153,25 @@ checkTrue('更新包：通知里说清"已自动应用"', noticeLog.some(m => m.
 const afterApplied = await loadState(plugin.stateFile());
 check('更新包：更新记录里有一条"应用"', afterApplied.bundleLog.at(-1)?.direction, 'apply');
 check('更新包：也记了一笔"已应用"', afterApplied.incoming.at(-1)?.note, 'applied');
+
+// 3b. 应用完别人的更新包后，点「立即同步」里的"导出"这一步**不许**再导一份同样的包。
+//     用户报的现场：对面应用完 100→101，再点同步，又导出一份 100→101。
+const changesDir = path.join(OUT, 'changes');
+const countChanges = (): number => fs.existsSync(changesDir)
+	? fs.readdirSync(changesDir).filter(name => name.endsWith('.lsave')).length
+	: 0;
+const beforeExport = countChanges();
+const syncExport = await exportBundlesNow(plugin, '立即同步', {
+	quiet: true,
+	silent: true,
+	defaultWhenOff: true,
+});
+check('应用完更新包：再同步不导出新包', countChanges(), beforeExport);
+checkTrue(
+	'应用完更新包：明确判成"没有变化"',
+	syncExport?.noChanges === true,
+	JSON.stringify(syncExport),
+);
 
 // 4. 同一个包不会处理第二遍（不会每 30 秒弹一次）
 noticeLog.length = 0;

@@ -29,6 +29,12 @@ function addSubHeading(containerEl: HTMLElement, text: string) {
 	wrapper.createEl('h4', { text });
 }
 
+/** 动作的说明：静态字符串直接给；函数按当前插件现算（"连接状态"那行要靠它） */
+function actionDesc(action: ActionSpec, plugin: LocallySavePlugin): string {
+	if (!action.desc) return '';
+	return typeof action.desc === 'function' ? action.desc(plugin) : action.desc;
+}
+
 export class LocallySaveSettingTab extends PluginSettingTab {
 	plugin: LocallySavePlugin;
 
@@ -84,7 +90,8 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 	 */
 	private renderAction(containerEl: HTMLElement, action: ActionSpec, settings: PluginSettings): void {
 		const setting = new Setting(containerEl).setName(action.name);
-		if (action.desc) setting.setDesc(action.desc);
+		const desc = actionDesc(action, this.plugin);
+		if (desc) setting.setDesc(desc);
 		const disabled = action.disabled?.(settings) === true;
 		setting.addButton(button => {
 			button.setButtonText(action.button).onClick(() => action.run(this.plugin));
@@ -214,9 +221,10 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 	 */
 	private buildAction(action: ActionSpec): SettingDefinitionItem {
 		const settings = () => this.plugin.settings;
+		const desc = actionDesc(action, this.plugin);
 		const definition = {
 			name: action.name,
-			...(action.desc ? { desc: action.desc } : {}),
+			...(desc ? { desc } : {}),
 			render: (setting: Setting) => {
 				setting.addButton(button => {
 					button.setButtonText(action.button).onClick(() => action.run(this.plugin));

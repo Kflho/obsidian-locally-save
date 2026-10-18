@@ -91,12 +91,25 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **自上次留包以来没有任何变化时一个包都不写**（完整包一写就是整库重写）。
   没有变化、没有基准、两个开关都没开，都要**如实说一句**，不能静默。
   自动触发加 `{ quiet: true }`：没有变化这种正常结果只写状态栏与日志，不弹通知。
-- **自动应用收到的包**（`bundle/incoming.ts` + `autoApplyIncoming` 设置，默认关）：这是"接收端
-  不用手点"的那一步，`main.tick()` 每 30 秒调一次 `checkIncomingBundles()`。安全边界是硬的，改它之前先读这段：
-  - **只自动应用"不会动到本地已有东西"的更新包** —— 判据是 `apply.ts` 的 `isDestructivePlan()`
-    （要删文件 / 删空文件夹 / 覆盖本地改动 / 会产生冲突副本，四者任一即算），
-    它与应用对话框的确认框**共用同一个函数**，别各写一份；
-  - **完整副本从来不自动应用**（可能删掉本机独有的文件），只提示一句；
+- **收包按「方向」分**（`bundle/incoming.ts` 的 `IncomingPolicy` ＋ `ui/actions.ts` 的
+  `incomingPolicy`，0.15 起）：`main.tick()` 每 30 秒调一次 `checkIncomingBundles()`。
+  **方向是硬边界，不只是提示文案**，改它之前先读这段：
+  - `upload`（仅推）：**根本不看收件箱**（`wantsIncoming` 为 false）—— `autoApplyIncoming`
+    只对没开 git 的机器有用；
+  - `download`（仅拉）：**收到就应用**（完整副本也收）—— `IncomingPolicy.force` ＋ `allowFull`
+    ＋ `apply: { strictness: 'mirror', alignToPeer: true }`，目标是对面那一点，
+    本机被覆盖 / 删掉的东西进回收目录（用户拍板："直接应用，不弹窗"）。
+    这个方向**不导出任何包**（`isReceiveOnly()`：启动 / 定时 / 保存后的自动留包、「立即同步」、
+    回礼全都不写；手动「导出同步包…」仍是用户的明确动作）；
+  - `both`（双向）：先弹**一句确认**（`policy.confirm` → `ui/actions.ts` 的 `confirmIncomingApply`），
+    确认后才应用；取消记 `dismissed`，同一个包不再问。应用完只有"本地还差一点"
+    （`stateIdCompare !== 'match'`）才把本机改动导出回传；
+  - 没开 git：退回 `autoApplyIncoming` 的老边界 —— **只自动应用"不会动到本地已有东西"的更新包**
+    （判据 `isDestructivePlan()`），完整副本只提示一句；
+  - **默认策略一个字没松**：不传 `force` / `allowFull` / `apply` 时行为与 0.14 完全一样
+    （`test/incoming-direction.test.ts` 守着"默认策略对会删文件的包只报 needs-review"）；
+  - **完整副本**：只有「仅拉」开 `allowFull` 才自动镜像（可能删掉本机独有文件，这是那个方向的职责）；
+    别的方向 / 没开 git 时只提示一句。
   - **按基准收，同一基准按源头分组取最新**（`sweepIncoming`，0.14 起；0.11–0.13 是"按链条一环一环接"）：
     只挑"起点正好是本机站的**那一份完整副本**"的包（`checkAncestor` 那条硬规矩）。
     同一份基准上**按源头分组**（`header.source.copyId`），**每个源头只取终点世代最大的那一份**应用；
@@ -106,7 +119,8 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
     那装的是各自那一半改动，漏一份就丢数据。
     接不上的（缺那份完整副本）**不记账、不动它**，只提示一句，而且同一个包只提示一次
     （`ui/actions.ts` 里的 `waitingNotified`，重启后最多再提示一遍）。
-    碰上"要删文件 / 要覆盖本地改动"的那一份也停在那儿并报一句（其余照旧搁着）；
+    默认策略下碰上"要删文件 / 要覆盖本地改动"的那一份停在那儿并报一句（其余照旧搁着）；
+    仅拉照做、双向先确认（用户按方向明确选的，不算放宽）；
   - 跳过：头部读不出（不是我们的包 / 传坏了）、我导出或应用过的（`bundleLog`）、
     源头就是我这台机器（`header.source.copyId === state.copyId`，日志被裁掉也认得出来）、
     以及 `state.incoming` 里记过的 —— **每个包只处理一次**，不然每 30 秒弹一遍；
@@ -549,7 +563,15 @@ Obsidian 插件 **locally-save**（仓库 `Kflho/obsidian-locally-save`，默认
   **行里的指纹要截断成 `HASH_KEEP`（16 位）**再喂进哈希 —— 缓存里存的是 16 位、现算的是 64 位，
   不统一就会"同一个仓库算两次得到两个编号"（踩过：应用完整副本之后两边对不上）。
   这一步**不报进度**（进度只认"打进包里几个文件"），但它会读盘（冷缓存），所以按时间让帧。
-- **状态栏那句话只有一个真相来源**：`bundleLog` 的最后一条（`describeLastActivity`）。
+- **状态栏那句话分两层，各有唯一来源**（0.15.3 起，`ui/status.ts`）：
+  - **前半句 = git 推拉本身**：`state.git` → `已推送 / 已拉取 / 已推拉 / 远程已是最新 / 同步失败`。
+    **不要写"已同步"**：推上去只说明远程有我的包，对方没拉、没应用之前内容不一定一样；
+  - **后半句 = 内容状态**：`.lsave-peers` + `state.stateId`（判据在 `git/peers.ts` 的 `peerMatch`）
+    → `对方：一致 / 不同步 / 待上报 / 没上报`。`待上报` 是"我这边刚应用/导出，它还没报新状态"，
+    不能当成"不同步"（用户看到应用完立刻写"对方未同步"就是这么来的）。多台逐台计数。
+  - 没有 git 时才退回 `bundleLog` 的最后一条（`describeLastActivity`）。
+  - 应用完必须走 `refreshStatusBar`；**别手写 `setSummary` 把"对方：…"盖掉**。
+  - 悬停显示每台详情；点状态栏 / 命令 `sync-status` 打开「各台电脑同步状态」。
   启动时 `main.ts` 的 `restoreLastActivity()` 从状态文件读回来 —— 以前那句只活在内存里，
   一重启就变回"尚未留包"（0.8.0 之前是"尚未同步"），用户会以为记录丢了。
 - **应用完整副本时，新基准只能从「这个包自己的清单」里建**（`apply.ts` 的 `freshAnchor`，
@@ -674,12 +696,14 @@ test/              测试（manifest / exclude / diff / bundle / chain / auto-ex
   `rememberFingerprints` / `pruneSupersededBundles`）—— 删掉的字段留在旧 `data.json` 里
   不读即可，`settingsFrom` 不会把它们带进内存。**`test/settings.test.ts` 会核对
   字段表不多不少**，加 / 删字段必须同时改它。
-- 现在的设置分四页：「通用」「同步包」「自动留包」「界面与交互」。
-  「同步包」页里的分组：包放在哪 · 自动留包 · **更新包从哪个状态到哪个状态** ·
-  手动导出 · 管理 · 应用同步包 · 用 Obsidian 直接打开。
-  那一组的两个下拉**选项是动态的**（`ControlSpec.dropdown.options` 允许给函数，
-  `fields/types.ts` 的 `dropdownOptions()` 在两条渲染路径上都解析它）——
-  "本地有几份完整包"要到渲染那一刻才知道。
+- 现在的设置分五页：「通用」「同步包」「Git 远程」「自动留包」「高级」。
+  「通用」页装的是**插件自身**那几项：总开关 · 日志级别 · 左侧栏三个图标 · 状态栏。
+  曾经把后两组单独拆成一页「界面与交互」，但两页各只有一两个开关、说明又都以"插件…"
+  开头，看起来像同一件事被劈成两半，已经合回「通用」（别再拆开）。
+  「同步包」页里的分组：包放在哪 · 同步 · 手动导出 · 管理 · 应用同步包 · 用 Obsidian 直接打开。
+  「更新包从哪个状态到哪个状态」在「高级」页；那两个下拉**选项是动态的**
+  （`ControlSpec.dropdown.options` 允许给函数，`fields/types.ts` 的 `dropdownOptions()`
+  在两条渲染路径上都解析它）——"本地有几份完整包"要到渲染那一刻才知道。
 
 ## 改代码的流程
 

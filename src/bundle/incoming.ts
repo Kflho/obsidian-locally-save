@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { executeBundlePlan, isDestructivePlan, planBundleApply } from './apply';
+import { executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply } from './apply';
 import type { ApplyOptions, ApplyPlan } from './apply';
 import { baselineOfBundle } from './baseline';
 import { listBundles } from './manage';
@@ -14,14 +14,15 @@ import type { PluginState } from '../sync/state';
  * （打开 Obsidian → 选包 → 看报告 → 应用）。文件搬过来了却没人点，两边就不一致 ——
  * 这是包通道唯一的"手感缺口"。补法不是把副本通道请回来，而是：
  *
- * **每 30 秒看一眼同步包文件夹，只有完全不会动到本地已有东西时才自己应用**：
- * - 只认**更新包 / 差量包**（它们只动点名的文件）；完整包永远不自动应用 ——
- *   它可能删掉你本机独有的文件；
+ * **每 30 秒看一眼同步包文件夹，按「方向」决定怎么处理**（策略见 `IncomingPolicy`）：
+ * - 默认（没开 git、或 direction 都不是）＝只认**更新包 / 差量包**、只做不会动到本地已有东西的：
+ *   要删文件 / 删空目录 / 覆盖本地改动 / 会产生冲突副本 → 一律不动手，只提示一句；
+ * - **仅拉**（`download`，只收不发）＝跟对面保持一致：完整副本也收，会删 / 覆盖的也照做，
+ *   本机改动进回收目录（`apply.strictness = 'mirror'` ＋ `alignToPeer`）—— 调用方开 `force`；
+ * - **双向**（`both`）＝先弹一句确认（`confirm`），确认后才应用；应用完由调用方把本机改动回传。
  * - **按基准收**（0.14 起）：只有"起点正好是本机站的那一份完整副本"的包才收得下；
  *   同一份基准上同一个源头只取**最新**那一份（更新包是累积的，先应用旧的就等于往回退一格），
  *   别的源头的各自都要应用（那是各自那一半改动）；
- * - 要删文件 / 删空目录 / 覆盖本地改动 / 会产生冲突副本 → **一律不自动动手**，
- *   只提示一句，让人自己打开看；
  * - 我自己的导出、已经处理过的包，一律跳过（见 `pickIncoming`）；
  * - 每处理一个包都在状态文件里记一笔（`state.incoming`），所以不会每 30 秒重复提示。
  *
@@ -71,11 +72,46 @@ export type IncomingOutcome =
 	/** 包里的东西本地已经有了（没有动作） */
 	| { kind: 'already'; file: string }
 	/** 自己应用完了 */
-	| { kind: 'applied'; file: string; plan: ApplyPlan; written: number; deleted: number; stateIdCompare: string; pending: number }
+	| {
+		kind: 'applied';
+		file: string;
+		plan: ApplyPlan;
+		written: number;
+		deleted: number;
+		restored: number;
+		stateIdCompare: string;
+		pending: number;
+	}
 	/** 会动到本地已有的东西：没自动应用，等用户自己决定 */
 	| { kind: 'needs-review'; file: string; why: string }
+	/** 用户在确认窗里点了取消：记一笔就不再问，也不提示（他刚刚才做过选择） */
+	| { kind: 'dismissed'; file: string }
 	/** 试了但失败了 */
 	| { kind: 'failed'; file: string; error: string };
+
+/**
+ * 收包策略：**由「方向」决定**（拼装见 `ui/actions.ts` 的 `incomingPolicy`）。
+ *
+ * 默认一个都不开 ＝ 老的安全边界（只自动应用不会动本地已有东西的更新包）。
+ */
+export interface IncomingPolicy {
+	/**
+	 * 会删文件 / 删空目录 / 覆盖本地改动 / 产生冲突副本时也照做。
+	 *
+	 * **只有「仅拉」才开**：那台机器的职责就是"变成对面那样"，
+	 * 本机被覆盖 / 删掉的东西进回收目录（`strictness: 'mirror'` 必然备份）。
+	 */
+	force?: boolean;
+	/** 完整副本也自动应用（默认不；「仅拉」才开 —— 它可能删掉本机独有的文件） */
+	allowFull?: boolean;
+	/** 覆盖应用参数（「仅拉」用 `strictness: 'mirror'` ＋ `alignToPeer`：目标 ＝ 对面那一点） */
+	apply?: Partial<ApplyOptions>;
+	/**
+	 * 动手前问一句；返回 false ＝ 这次不应用（`kind: 'dismissed'`）。
+	 * 「双向」用它在界面弹确认窗 —— 注意这里是**异步**的，窗口开着时这一轮收包就停在这儿。
+	 */
+	confirm?: (candidate: IncomingCandidate, plan: ApplyPlan) => Promise<boolean>;
+}
 
 /**
  * 处理一个包：算一遍 → 安全就自己应用，不安全就只报一句。
@@ -83,12 +119,17 @@ export type IncomingOutcome =
  * 无论走哪条路都会在状态文件里**记一笔**（`rememberIncoming`），
  * 所以同一个包只处理一次 —— 不会每 30 秒弹一遍。
  */
-export async function handleIncoming(options: ApplyOptions, candidate: IncomingCandidate): Promise<IncomingOutcome> {
+export async function handleIncoming(
+	options: ApplyOptions,
+	candidate: IncomingCandidate,
+	policy: IncomingPolicy = {},
+): Promise<IncomingOutcome> {
 	const file = candidate.bundle.file;
 	const name = path.basename(file);
 	try {
-		// 完整包从来不自动应用：它可能删掉本机独有的文件，只提示一句让人自己看
-		if (candidate.bundle.header?.mode !== 'changes') {
+		// 完整包默认不自动应用：它可能删掉本机独有的文件，只提示一句让人自己看。
+		// 「仅拉」是"变成对面那样"，调用方会开 allowFull —— 那不是悄悄删，是用户的明确选择。
+		if (candidate.bundle.header?.mode !== 'changes' && !policy.allowFull) {
 			await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
 			return {
 				kind: 'needs-review',
@@ -97,7 +138,8 @@ export async function handleIncoming(options: ApplyOptions, candidate: IncomingC
 			};
 		}
 
-		const plan = await planBundleApply(options);
+		const applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
+		const plan = await planBundleApply(applyOptions);
 		const report = plan.report;
 
 		// 包里没有新东西（本地已经一致）：记一笔，不打扰
@@ -106,7 +148,14 @@ export async function handleIncoming(options: ApplyOptions, candidate: IncomingC
 			return { kind: 'already', file: name };
 		}
 
-		if (isDestructivePlan(plan)) {
+		// 「双向」：先问一句。取消就记一笔 dismissed —— 同一个包不再弹第二次
+		// （用户刚刚亲手做过选择，再弹就是烦人；想应用还能从「打开同步包并应用…」手动来）。
+		if (policy.confirm && !(await policy.confirm(candidate, plan))) {
+			await rememberDecision(options.stateFile, candidate.bundleId, 'dismissed', name);
+			return { kind: 'dismissed', file: name };
+		}
+
+		if (!policy.force && isDestructivePlan(plan)) {
 			const parts: string[] = [];
 			if (report.deletes > 0) parts.push(`删 ${report.deletes} 个文件`);
 			if (plan.foldersToRemove.length > 0) parts.push(`删 ${plan.foldersToRemove.length} 个空文件夹`);
@@ -117,7 +166,7 @@ export async function handleIncoming(options: ApplyOptions, candidate: IncomingC
 			return { kind: 'needs-review', file: name, why };
 		}
 
-		const result = await executeBundlePlan(plan, options);
+		const result = await executeBundlePlan(plan, applyOptions);
 		await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
 		return {
 			kind: 'applied',
@@ -125,6 +174,7 @@ export async function handleIncoming(options: ApplyOptions, candidate: IncomingC
 			plan,
 			written: result.written,
 			deleted: result.deleted,
+			restored: result.restored,
 			stateIdCompare: result.stateIdCompare,
 			pending: (report.pendingChanges ?? 0) + (report.pendingDeletes ?? 0),
 		};
@@ -154,9 +204,18 @@ async function rememberDecision(
 /** 一次"看一眼收到的包"的结果：给界面报账用 */
 export interface IncomingSweep {
 	/** 自己接下来了的（起点正好是本机站的那一份完整副本） */
-	applied: { file: string; written: number; deleted: number; stateIdCompare: string; pending: number }[];
+	applied: {
+		file: string;
+		written: number;
+		deleted: number;
+		restored: number;
+		stateIdCompare: string;
+		pending: number;
+	}[];
 	/** 要人看的：会动本机东西 / 是完整副本 / 试了失败（理由照旧） */
 	review: { file: string; why: string; kind: 'needs-review' | 'failed'; full: boolean }[];
+	/** 用户在确认窗里取消的（记了一笔就不再问，也不提示） */
+	dismissed: string[];
 	/** 起点不是本机站的那一份完整副本、先搁着的（等对方按本机这份基准重导，或者补一份完整副本） */
 	waiting: string[];
 }
@@ -176,22 +235,28 @@ export interface IncomingSweep {
  * 剩下的同源旧包记一笔"不用管"（它们的内容确实过时了）。不同源头的各自都要应用 ——
  * 那装的是各自那一半改动，漏一份就丢数据。
  *
- * 安全边界不变（在 `handleIncoming` 里）：只自动应用不会动本机已有东西的更新包；
- * 碰上"要删文件 / 要覆盖本地改动"的那一份就停下报一句（其余照旧搁着）。
+ * 每条路的安全边界（在 `handleIncoming` 里）：默认只自动应用不会动本机已有东西的更新包，
+ * 碰上"要删文件 / 要覆盖本地改动"的那一份就停下报一句（其余照旧搁着）；
+ * 「仅拉」的 `force` 与「双向」的 `confirm` 是**用户按方向明确选的**，不是悄悄放宽。
  */
 export async function sweepIncoming(
 	optionsFor: (file: string) => ApplyOptions,
 	stateFile: string,
 	candidates: IncomingCandidate[],
+	policy: IncomingPolicy = {},
 ): Promise<IncomingSweep> {
-	const sweep: IncomingSweep = { applied: [], review: [], waiting: [] };
+	const sweep: IncomingSweep = { applied: [], review: [], dismissed: [], waiting: [] };
 	const pending = [...candidates];
 
-	// 完整副本：从来不自动应用（它可能删掉本机独有的文件）—— 照旧报一句、记一笔，不在自动那条线上
+	// 完整副本：默认不自动应用（它可能删掉本机独有的文件）；「仅拉」开了 allowFull 才收
 	for (const item of [...pending]) {
 		if (item.bundle.header?.mode !== 'full') continue;
 		pending.splice(pending.indexOf(item), 1);
-		const outcome = await handleIncoming(optionsFor(item.bundle.file), item);
+		const outcome = await handleIncoming(optionsFor(item.bundle.file), item, policy);
+		if (outcome.kind === 'dismissed') {
+			sweep.dismissed.push(outcome.file);
+			continue;
+		}
 		if (outcome.kind !== 'applied' && outcome.kind !== 'already') {
 			sweep.review.push({
 				file: outcome.file,
@@ -237,12 +302,17 @@ export async function sweepIncoming(
 			await rememberDecision(stateFile, item.bundleId, 'already', path.basename(item.bundle.file));
 		}
 
-		const outcome = await handleIncoming(optionsFor(chosen.bundle.file), chosen);
+		const outcome = await handleIncoming(optionsFor(chosen.bundle.file), chosen, policy);
+		if (outcome.kind === 'dismissed') {
+			sweep.dismissed.push(outcome.file);
+			continue;
+		}
 		if (outcome.kind === 'applied') {
 			sweep.applied.push({
 				file: outcome.file,
 				written: outcome.written,
 				deleted: outcome.deleted,
+				restored: outcome.restored,
 				stateIdCompare: outcome.stateIdCompare,
 				pending: outcome.pending,
 			});
@@ -254,6 +324,50 @@ export async function sweepIncoming(
 			cursor = (await loadState(stateFile)).bundle?.fullHash ?? cursor;
 			continue;
 		}
+		sweep.review.push({
+			file: outcome.file,
+			why: outcome.kind === 'needs-review' ? outcome.why : outcome.error,
+			kind: outcome.kind === 'needs-review' ? 'needs-review' : 'failed',
+			full: false,
+		});
+	}
+
+	/**
+	 * **起点不是我站的那一份、但落点算出来对得上的包**：也要能自动接。
+	 *
+	 * 用户报的现场：只拉那台误改了一行，对方（只推）导了一份"从旧完整副本到最新"的恢复包；
+	 * 只拉那台的起点已经被它自己导出的完整副本挪走了 —— 按上面的"起点严格相等"永远挑不到它，
+	 * 只能手动应用。可这份包的内容是确定的：**我现在的清单 ＋ 条目 − 删除**正好等于它头部报的
+	 * 落点指纹（`landsOnTarget`），应用完一定落到那道状态，不会"猜着合"。
+	 *
+	 * 只处理落点对得上的，最多 16 份（防御坏目录）；同一轮里按目标世代从大到小挑，
+	 * 应用一份后状态变了，其余候选下一轮再算 —— 不拿旧计划硬套新状态。
+	 */
+	for (let guard = 0; guard < 16 && pending.length > 0; guard++) {
+		const state = await loadState(stateFile);
+		const candidates = pending.filter(item => item.bundle.header?.mode === 'changes'
+			&& landsOnTarget(state, item.bundle.header));
+		if (candidates.length === 0) break;
+		const chosen = candidates.sort((a, b) => generationOf(b) - generationOf(a))[0]!;
+		pending.splice(pending.indexOf(chosen), 1);
+
+		const outcome = await handleIncoming(optionsFor(chosen.bundle.file), chosen, policy);
+		if (outcome.kind === 'dismissed') {
+			sweep.dismissed.push(outcome.file);
+			continue;
+		}
+		if (outcome.kind === 'applied') {
+			sweep.applied.push({
+				file: outcome.file,
+				written: outcome.written,
+				deleted: outcome.deleted,
+				restored: outcome.restored,
+				stateIdCompare: outcome.stateIdCompare,
+				pending: outcome.pending,
+			});
+			continue;
+		}
+		if (outcome.kind === 'already') continue;
 		sweep.review.push({
 			file: outcome.file,
 			why: outcome.kind === 'needs-review' ? outcome.why : outcome.error,

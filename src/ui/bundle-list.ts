@@ -258,7 +258,9 @@ export class BundleListView {
 	 */
 	private describeRow(item: ManagedBundle): string {
 		const size = formatBytes(item.size);
-		const time = formatTime(item.mtime);
+		// 时间用**包里记的导出时间**：从 git 拉下来的包，文件 mtime 是拉取那一刻，
+		// 照 mtime 显示的话所有远程包都会变成"刚刚导出"
+		const time = formatTime(item.created ?? item.mtime);
 		return item.header
 			? `${this.describeGeneration(item)} · ${size} · ${time}`
 			: `${size} · ${time} · 读不出包信息（可能不是本插件的包）`;

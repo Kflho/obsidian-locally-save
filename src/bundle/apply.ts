@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { readBundleInfo, verifyBundle } from './format';
+import { readBundleInfo, readBundleInfoSync, verifyBundle } from './format';
 import type { BundleEntry, BundleHeader, BundleInfo } from './format';
-import { baselineOfBundle, compareBaseline, listingHashOfFiles } from './baseline';
+import { baselineOfBundle, baselineOfFullBundle, compareBaseline, listingHashOfFiles } from './baseline';
 import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
@@ -117,6 +117,14 @@ export interface ApplyOptions {
 	file: string;
 	/** 配置目录名（运行时才知道，用户可能改过） */
 	configDir?: string;
+	/**
+	 * 同步包文件夹（`settings.bundleDir`）。
+	 *
+	 * 只给「仅拉/对齐到对面」那条路用：要把本机误改的文件恢复成基准里的版本，
+	 * 得找到**起点那份完整副本**（`state.bundle.fullFile`）并读它负载里的旧内容。
+	 * 普通互相应用不会读它。
+	 */
+	bundleDir?: string;
 	/** 本次临时覆盖冲突裁决；只有合并那条路（`strictness: 'normal'`）会用到 */
 	conflictStrategy?: ConflictStrategy;
 	/**
@@ -133,6 +141,15 @@ export interface ApplyOptions {
 	 * 排除规则命中的东西（配置目录等）都不动。
 	 */
 	strictness?: ApplyStrictness;
+	/**
+	 * **目标是"对方那一份状态"**：不把本机改动接在包上，而是按"基准 ＋ 包里的条目 − 包点名的删除"
+	 * 算出对方那一点，然后严格镜像过去。
+	 *
+	 * 用在「让我和对面一致」/「让对面和我一致」那种**单向对齐**上（`syncDirection` 的
+	 * upload / download）：本机改过的、多出来的文件都会先进回收目录（备份），最后两边**状态编号一致**。
+	 * 平时的应用**不要**开它 —— 默认语义是"我的内容 ＋ 对方的改动"，那才是互相应用。
+	 */
+	alignToPeer?: boolean;
 	/** 本次临时覆盖"删不删多余文件"；只有 `normal` 那条路会用到 */
 	propagateDeletions?: boolean;
 	/**
@@ -241,6 +258,14 @@ export interface ApplyReport {
 	 * "删 3 个"里有 2 个其实是我自己新建的、包里送到的状态里没有它们。
 	 */
 	localExtras: number;
+	/**
+	 * **本机误改、这次从基准完整副本恢复回去**的文件数（只出现在"对齐到对面"那条路）。
+	 *
+	 * 只拉不推的机器规则是"跟对面严格相等"：对方包里只装变过的文件，本机在没被点名的
+	 * 文件上误改了，正常镜像会把它当成"我这一半"留着 —— 状态编号就永远差一点。
+	 * 这一档会从起点那份完整副本里读回原版、把误改挪进回收目录，应用完编号才对得上。
+	 */
+	restored: number;
 	/** 本地与包已经完全一致的条目数 */
 	synchronized: number;
 	/**
@@ -293,7 +318,20 @@ export type ApplyAction =
 	/** 两边都改过：留两份，新的占原名 */
 	| { kind: 'conflict'; path: string; entry: BundleEntry; winner: 'local' | 'remote' }
 	/** 对方改名/挪了位置：本地跟着改名，不重传内容 */
-	| { kind: 'rename'; path: string; from: string };
+	| { kind: 'rename'; path: string; from: string; dir?: boolean }
+	/**
+	 * 本机误改、但**这个包没点名**的路径：从起点那份完整副本读回原版。
+	 *
+	 * 只在"对齐到对面"（只拉不推）时出现。内容和 `write` 一样落盘，区别是内容来自
+	 * **另一份包**（`sourceFile` / `sourceInfo`），不是当前这份更新包。
+	 */
+	| {
+		kind: 'restore';
+		path: string;
+		entry: BundleEntry;
+		sourceFile: string;
+		sourceInfo: BundleInfo;
+	} ;
 
 export interface ApplyPlan {
 	info: BundleInfo;
@@ -335,10 +373,23 @@ export interface ApplyPlan {
 	 */
 	adoptBaseline: { files: Record<string, FileRecord>; generation: number; hash: string } | null;
 	/**
+	 * 这一趟是不是「对齐到对面」（只拉不推的机器）：应用完**与对方严格相等** ——
+	 * 本机在包里没点名的文件上误改的，这次会从基准完整副本恢复，不是留着当"我这一半"。
+	 *
+	 * 调用方据此决定：应用前**不要**把本机改动存成回传包（那是双向语义）。
+	 */
+	alignToPeer: boolean;
+	/**
 	 * **这一趟送到的那一点上有哪些目录**（严格镜像的收尾照它办：那一点上没有的目录都清掉，
 	 * 有的一个不少）。空目录也是内容的一部分，所以这份名单必须与那一点完全一致。
 	 */
 	deliveredDirs: string[];
+	/**
+	 * **想删却没删掉的目录**（磁盘上不空，多是被排除规则挡住的文件）——
+	 * 它们还在，就得记进目录基准；否则下一轮 `hasChanges` 会把它当成"仓库多了个目录"，
+	 * 把刚应用完的更新包又导一遍。
+	 */
+	foldersKept: string[];
 	/** 执行阶段照着做的策略 */
 	options: { conflictStrategy: ConflictStrategy; propagateDeletions: boolean; keepBackup: boolean };
 }
@@ -352,7 +403,7 @@ export interface ApplyPlan {
  *   一旦要删东西就退回去让人自己看。删除是唯一不可逆的动作，不赌。
  */
 export function isDestructivePlan(plan: ApplyPlan): boolean {
-	return plan.actions.some(action => action.kind === 'delete')
+	return plan.actions.some(action => action.kind === 'delete' || action.kind === 'restore')
 		|| plan.foldersToRemove.length > 0
 		|| plan.report.conflicts > 0
 		|| plan.report.forcedOverwrites > 0;
@@ -364,6 +415,8 @@ export interface ApplyResult {
 	conflicts: number;
 	deleted: number;
 	moved: number;
+	/** 从基准完整副本恢复回去的本机误改文件数（只拉不推那条路） */
+	restored: number;
 	/** 新建的目录（包里记着的空文件夹） */
 	foldersCreated: number;
 	/** 删空之后顺手收拾掉的空目录 */
@@ -415,6 +468,24 @@ type AncestorCheck =
  * 旧包（那会儿还没记指纹）在更新包这一条上判不出来 → 拒绝，并说清下一步：
  * 让对方用新版本重导一份，或者删掉本机状态文件从零开始（那等于"重新装机"）。
  */
+/**
+ * **"算一遍落点"对不对**：我现在的清单 ＋ 这个包的条目 − 点名的删除，
+ * 算出来的指纹等于包头部报的 `targetBaselineHash` → 应用完正好落到对方那一点。
+ *
+ * 同一个判据两处用：`checkAncestor`（应用前放行）与 `incoming.ts`（自动收包时，
+ * 起点不是我站的那一份、但落点对得上的恢复包也要能接）。**只读、只看头部与状态记录**，
+ * 不扫仓库 —— 自动收包每 30 秒都要跑，不能因为一个候选就扫一遍整库。
+ * 有 `moves` 的包这里算不出移动（与 `checkAncestor` 的口径一致）：恢复包用 `noMoves` 导，
+ * 避免带着移动来走这条路。
+ */
+export function landsOnTarget(state: PluginState, header: BundleHeader): boolean {
+	if (header.mode !== 'changes' || header.targetBaselineHash === undefined) return false;
+	const landed: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	for (const entry of header.entries) landed[entry.path] = { size: entry.size, mtime: entry.mtime };
+	for (const item of header.deleted) delete landed[item.path];
+	return listingHashOfFiles(landed) === header.targetBaselineHash;
+}
+
 function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck {
 	const mine = state.bundle?.fullHash ?? null;
 	// 第一次用（没有基准）：只收完整副本 —— 更新包没有起点，算都算不出来
@@ -479,10 +550,7 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		 * 于是"沿来路认点"就认不出对方站在哪 —— 而内容上他确实在路线上，算一遍就能证明。
 		 * （0.14 起新包不再写 `viaHashes` 了，这一条判据是主力。）
 		 */
-		const landed: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
-		for (const entry of header.entries) landed[entry.path] = { size: entry.size, mtime: entry.mtime };
-		for (const item of header.deleted) delete landed[item.path];
-		if (header.targetBaselineHash !== undefined && listingHashOfFiles(landed) === header.targetBaselineHash) {
+		if (landsOnTarget(state, header)) {
 			return { ok: true, kind: 'update', viaLanding: true };
 		}
 		/**
@@ -551,6 +619,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : requested;
 	/** 严格档：应用完**仓库 == 包送到的状态**（完整副本自带完整清单；更新包按起点清单补全） */
 	const strict = strictness === 'mirror' || strictness === 'bundle-wins';
+	/**
+	 * **对齐到对面**（只拉不推）：目标是"对方那一点"，不是"我的内容 ＋ 对方的改动"。
+	 * 只跟严格档一起用 —— 合并档没有"严格相等"这回事，也就无从恢复。
+	 */
+	const alignToPeer = options.alignToPeer === true && !mirrorFull && strictness === 'mirror';
 	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
 	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
 	// 合并那条路（`normal`）只剩自动收包与接链在用（界面上一律走严格档）：
@@ -590,7 +663,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
 	// （包说"我以为你原来是这样"，对一台新机器来说这就是它的基准）
-	const baseline: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	// 对齐到对面时，目标是"我站的完整副本 ＋ 这个包"：底稿必须是**基准**，
+	// 不能是"我现在的样子"（后者会把本机误改当成目标的一部分，永远撤不掉）。
+	const baseline: Record<string, FileRecord> = {
+		...((alignToPeer ? state.bundle?.fullFiles : state.bundle?.files) ?? {}),
+	};
 	/**
 	 * 包**自己带的 base 优先**（它比本机那份记录更贴近事实）。
 	 *
@@ -849,7 +926,17 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 完整副本比 —— 更新包不推进基准，那份完整副本会比我的内容旧，早先几份更新包
 	 * 带来的文件会被整片当成"我改过的"（用户报过的"对面明明一致、却导出我的改动包"）。
 	 */
-	const contentBefore: Record<string, FileRecord> = { ...(state.bundle?.files ?? {}) };
+	const contentBefore: Record<string, FileRecord> = {
+		/**
+		 * **对齐到对方**时，底稿换成"我站的那份完整副本"（`anchor`）：
+		 * 目标状态 ＝ 基准 ＋ 包里的条目 − 点名删除，正好是对方那一点；
+		 * 本机改过的、多出来的文件都不在目标里 → 严格档会把它们挪进回收目录。
+		 *
+		 * 平时（互相应用）仍然用"我这边内容的样子"：对方只握着改动的一半，
+		 * 我这一半必须接上，不能拿旧基准顶替（见下面那段注释）。
+		 */
+		...((alignToPeer && anchor ? anchor : (state.bundle?.files ?? {}))),
+	};
 	let pendingChanges = 0;
 	let pendingDeletes = 0;
 	/**
@@ -889,6 +976,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			if (localDeleted.has(file)) continue;
 			pendingDeletes++;
 		}
+	}
+	/**
+	 * 对齐到对面时**没有"我这一半"要回传**：本机跟目标不一样的改动，这一趟要么被包覆盖、
+	 * 要么从基准恢复（下面的 `restore`）—— 它们不是要发给对方的东西。
+	 */
+	if (alignToPeer) {
+		pendingChanges = 0;
+		pendingDeletes = 0;
 	}
 	for (const item of header.deleted) {
 		const here = local.files.get(item.path);
@@ -940,9 +1035,176 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		for (const entry of header.entries) deliveredFiles[entry.path] = { size: entry.size, mtime: entry.mtime };
 		for (const item of header.deleted) delete deliveredFiles[item.path];
 	}
+
+	/**
+	 * **移动/改名操作**（包版本 2）：包里没有这些文件的内容，接收方直接改名。
+	 *
+	 * 硬前提：源文件必须还在、且与我记录的版本一致（`size + mtime`），目标不能已存在。
+	 * 缺一条就**整包拒绝**（不是跳过这一条）—— 包里没有内容，硬做只会落一个错误的状态。
+	 * 自动收包那条路会把它当成"要人看"，不会动手。
+	 */
+	const moveActions: ApplyAction[] = [];
+	const caseOnly = (a: string, b: string): boolean => a !== b && a.toLowerCase() === b.toLowerCase();
+	const moveSpecs = header.moves ?? [];
+	for (let moveIndex = 0; moveIndex < moveSpecs.length; moveIndex++) {
+		const move = moveSpecs[moveIndex]!;
+		/** 后面的移动会不会接着把目标送到（链式改名：旧 → 中间 → 最终） */
+		const laterReaches = moveSpecs.slice(moveIndex + 1).some(next =>
+			next.to === move.to
+			|| next.to.startsWith(`${move.to}/`)
+			|| move.to.startsWith(`${next.to}/`)
+			|| next.from === move.to
+			|| next.from.startsWith(`${move.to}/`)
+			|| move.to.startsWith(`${next.from}/`));
+		const fromAbs = toNative(options.vaultRoot, move.from);
+		const toAbs = toNative(options.vaultRoot, move.to);
+		if (move.from === move.to || move.to.startsWith(`${move.from}/`)) {
+			throw new Error(`包里的移动操作不合法：${move.from} → ${move.to}`);
+		}
+		if (move.kind === 'file') {
+			const disk = local.files.get(move.from);
+			const targetRecord = local.files.get(move.to);
+			// 这一份是**累积**更新包：同一条移动可能早在上一份包里就做过了。
+			// 源没了、目标在 → 当成"已经搬过"，不重复做，也不报错。
+			if (!disk && targetRecord) {
+				if (deliveredFiles[move.from]) delete deliveredFiles[move.from];
+				deliveredFiles[move.to] = { size: targetRecord.size, mtime: targetRecord.mtime };
+				continue;
+			}
+			// 源和目标都没有：可能后面还有一条"上一份状态 → 现在"的链式移动接着搬（见导出端）；
+			// 没有的话就是真对不上（漏了包 / 本地删过），报出来，别悄悄落一个不完整的状态。
+			if (!disk && !targetRecord) {
+				if (laterReaches) continue;
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地两个路径都不在：先补上漏掉的更新包，或让对方重发带内容的包`);
+			}
+			const base = contentBefore[move.from];
+			if (!disk) {
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地没有源文件：让对方重发一份带内容的包`);
+			}
+			if (!base || !sameRecord(disk, base, TOLERANCE)) {
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地这份源文件已经改过：先处理冲突，或让对方重发带内容的包`);
+			}
+			if (move.size !== undefined
+				&& (disk.size !== move.size || (move.mtime !== undefined && Math.abs(disk.mtime - move.mtime) > TOLERANCE))) {
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地源文件与包记录的版本不一致`);
+			}
+			if (!caseOnly(move.from, move.to) && await pathExists(toAbs)) {
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它挪走`);
+			}
+			const record = deliveredFiles[move.from];
+			if (record) {
+				delete deliveredFiles[move.from];
+				deliveredFiles[move.to] = record;
+			}
+			moveActions.push({ kind: 'rename', path: move.to, from: move.from });
+			moves++;
+			continue;
+		}
+
+		// 目录移动：整棵子树都要没被本地改过，目标事先不存在
+		if (move.from === '' || move.to === '') throw new Error('包里的目录移动操作缺少路径');
+		const sourceDir = await dirExists(fromAbs);
+		const targetDir = await pathExists(toAbs);
+		// 累积包里重复出现的移动：上一份已经搬过（源没了、目标在）→ 跳过
+		if (!sourceDir && targetDir) continue;
+		// 两边都没有：可能后面还有一条链式移动（旧状态 → 新状态）；没有就报错
+		if (!sourceDir && !targetDir) {
+			if (laterReaches) continue;
+			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地两个路径都不在：先补上漏掉的更新包，或让对方重发带内容的包`);
+		}
+		if (!sourceDir) {
+			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有这个文件夹：让对方重发一份带内容的包`);
+		}
+		if (!caseOnly(move.from, move.to) && targetDir) {
+			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它挪走`);
+		}
+		const fromPrefix = `${move.from}/`;
+		const toPrefix = `${move.to}/`;
+		const oldUnder = Object.keys(contentBefore).filter(file => file.startsWith(fromPrefix));
+		if (oldUnder.length === 0) {
+			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有它下面的文件`);
+		}
+		for (const file of oldUnder) {
+			const disk = local.files.get(file);
+			const base = contentBefore[file];
+			if (!disk || !base || !sameRecord(disk, base, TOLERANCE)) {
+				throw new Error(`包里的文件夹移动 ${move.from} → ${move.to} 做不了：${file} 在本地被改过或不见了`);
+			}
+			const toPath = toPrefix + file.slice(fromPrefix.length);
+			if (!caseOnly(move.from, move.to) && await pathExists(toNative(options.vaultRoot, toPath))) {
+				throw new Error(`包里的文件夹移动 ${move.from} → ${move.to} 做不了：目标 ${toPath} 已经存在`);
+			}
+		}
+		for (const file of local.files.keys()) {
+			if (file.startsWith(fromPrefix) && !contentBefore[file]) {
+				throw new Error(`包里的文件夹移动 ${move.from} → ${move.to} 做不了：本地多出了 ${file}`);
+			}
+		}
+		for (const file of oldUnder) {
+			const record = deliveredFiles[file];
+			const toPath = toPrefix + file.slice(fromPrefix.length);
+			if (record) {
+				delete deliveredFiles[file];
+				deliveredFiles[toPath] = record;
+			}
+		}
+		moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true });
+		moves++;
+	}
+	actions.unshift(...moveActions);
 	const deliveredDirs = new Set<string>(header.emptyDirs ?? []);
 	for (const file of Object.keys(deliveredFiles)) deliveredDirs.add(dirnameRel(file));
 	deliveredDirs.delete('');
+
+	/**
+	 * **对齐到对面时，本机误改的文件要恢复成"那一点上的版本"**。
+	 *
+	 * 为什么普通镜像做不到：更新包只装"自起点以来变过的"文件；本机在**没被点名**的文件上
+	 * 改过之后，那个路径不在条目里，严格镜像不会动它（它被当成"我这一半"）。双向同步这是
+	 * 对的（要回传），**只拉不推**就不对了 —— 规则是"和另一半严格相等"，留着误改编号永远差一点。
+	 *
+	 * 恢复的内容从**起点那份完整副本**里读（它才是"那一点上的原版"）。没有那份包文件就
+	 * **明确报错**，不能假装恢复/悄悄删掉：删掉只会让目标里少一个文件，编号照样对不上。
+	 */
+	const restoreActions: ApplyAction[] = [];
+	if (alignToPeer && anchor) {
+		const touched = new Set<string>([...entriesByPath.keys(), ...localDeleted]);
+		for (const move of header.moves ?? []) {
+			touched.add(move.from);
+			touched.add(move.to);
+		}
+		const candidates: { path: string; record: FileRecord }[] = [];
+		for (const [file, record] of Object.entries(anchor)) {
+			// 包点名的（条目 / 删除 / 移动）交给原来的动作；这里只管"谁都没提、本机却改了"的
+			if (touched.has(file)) continue;
+			// 目标那一点上已经没有它（被删 / 被移走）→ 不是恢复的事
+			if (!deliveredFiles[file]) continue;
+			const here = local.files.get(file);
+			if (here && sameRecord(here, record, TOLERANCE)) continue;
+			candidates.push({ path: file, record });
+		}
+		if (candidates.length > 0) {
+			const source = findBaselineBundle(state, options, candidates.length);
+			const byPath = new Map(source.info.header.entries.map(entry => [entry.path, entry]));
+			for (const candidate of candidates) {
+				const entry = byPath.get(candidate.path);
+				if (!entry) {
+					throw new Error(
+						`要恢复 ${candidate.path}，但基准完整副本「${path.basename(source.file)}」里没有这个文件：`
+						+ '状态里记的基准和磁盘上那份包不是同一份，先把对应的完整副本放回包目录再应用',
+					);
+				}
+				restoreActions.push({
+					kind: 'restore',
+					path: candidate.path,
+					entry,
+					sourceFile: source.file,
+					sourceInfo: source.info,
+				});
+			}
+			actions.push(...restoreActions);
+		}
+	}
 
 	/**
 	 * **应用完我就接在这个包的起点上**（见 `ApplyPlan.adoptBaseline`）——
@@ -991,6 +1253,20 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		foldersKept.push(...picked.kept);
 	}
 
+	/**
+	 * 文件移动把文件从旧目录挪走之后，旧目录可能空了，而计划阶段它里面还有文件
+	 * （`filled` 把它排除了）—— 这里补进删除清单，执行收尾时再 rmdir；
+	 * 非空删不动，所以多列了也安全。目录移动本身会把整棵旧树 rename 走，不用补。
+	 */
+	for (const action of moveActions) {
+		if (action.kind !== 'rename' || action.dir) continue;
+		let dir = dirnameRel(action.from);
+		while (dir !== '' && !deliveredDirs.has(dir)) {
+			if (!foldersToRemove.includes(dir)) foldersToRemove.push(dir);
+			dir = dirnameRel(dir);
+		}
+	}
+
 	const report: ApplyReport = {
 		mode: fastPath ? 'fast' : 'merge',
 		sameLineage,
@@ -1032,6 +1308,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		keptDeletes,
 		extraDeletes,
 		localExtras,
+		restored: restoreActions.length,
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
 		pendingChanges: anchor ? pendingChanges : null,
@@ -1058,7 +1335,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		foldersToRemove,
 		contentBefore,
 		adoptBaseline,
+		alignToPeer,
 		deliveredDirs: [...deliveredDirs].sort(),
+		foldersKept: [...foldersKept].sort(),
 		options: { conflictStrategy, propagateDeletions, keepBackup },
 	};
 }
@@ -1104,6 +1383,80 @@ function startPointOf(
 	return { files: start, generation: header.baseGeneration ?? fallbackGeneration, hash: declared };
 }
 
+/** 找到"我站的那一份完整副本"的包文件（恢复本机误改时读它的负载） */
+interface BaselineBundleSource {
+	file: string;
+	info: BundleInfo;
+}
+
+/**
+ * 找本机基准对应的**完整副本文件** —— 只给"对齐到对面"那条恢复路径用。
+ *
+ * 怎么认：完整包自带完整清单，所以**重算它的基准指纹**（`baselineOfFullBundle`）
+ * 跟 `state.bundle.fullHash` 比。不能信任文件名，也不能拿"最新的那份完整包"顶替：
+ * 状态里记的基准可能不是磁盘上最新的那一份（用户可能又导过一份完整包、换过基准）。
+ *
+ * 找的地方按"最可能"排：包目录的 `full/`、包目录本身、当前包旁边的 `full/`、当前包所在目录。
+ * 找不到就**抛错并指路**，绝不悄悄拿别的完整包恢复 —— 那会把内容写成另一份状态。
+ */
+function findBaselineBundle(
+	state: PluginState,
+	options: ApplyOptions,
+	needed: number,
+): BaselineBundleSource {
+	const hash = state.bundle?.fullHash ?? null;
+	if (!hash) {
+		throw new Error(
+			`本机有 ${needed} 个改动不在这份包里，但本机还没有基准完整副本，没法把它们恢复成"对面那一版"：`
+			+ '先应用一份完整副本立基准，再让对方按那份基准重导更新包',
+		);
+	}
+	const dirs = new Set<string>();
+	if (options.bundleDir) {
+		dirs.add(path.join(options.bundleDir, 'full'));
+		dirs.add(options.bundleDir);
+	}
+	const near = path.dirname(options.file);
+	dirs.add(path.join(near, '..', 'full'));
+	dirs.add(near);
+
+	const wanted = state.bundle?.fullFile ?? null;
+	const candidates = new Set<string>();
+	if (wanted) {
+		for (const dir of dirs) candidates.add(path.join(dir, wanted));
+	}
+	for (const dir of dirs) {
+		let names: string[];
+		try {
+			names = fs.readdirSync(dir);
+		} catch {
+			continue;
+		}
+		for (const name of names) {
+			if (name.toLowerCase().endsWith('.lsave')) candidates.add(path.join(dir, name));
+		}
+	}
+
+	for (const file of candidates) {
+		let info: BundleInfo;
+		try {
+			info = readBundleInfoSync(file);
+		} catch {
+			continue;
+		}
+		if (info.header.mode !== 'full') continue;
+		if (baselineOfFullBundle(info.header.entries) !== hash) continue;
+		return { file, info };
+	}
+
+	throw new Error(
+		`本机有 ${needed} 个改动不在这份包里；要按"只拉不推＝跟对面严格相等"把它们恢复成基准那一版，`
+		+ `得读基准完整副本「${wanted ?? hash}」的原版内容，但它不在包目录里。\n`
+		+ '下一步：把那份完整包放回同步包文件夹的 full/ 再应用；'
+		+ '或者让对方导一份新的完整副本过来（完整清单自带基准，谁都能应用）',
+	);
+}
+
 /**
  * 包里"有哪些目录"：记着的空文件夹 ＋ 每个条目的上级目录。
  *
@@ -1132,6 +1485,16 @@ function dirsInBundle(header: BundleInfo['header']): Set<string> {
  */
 let applying = false;
 
+/**
+ * 现在有没有一次"应用"正在进行。
+ *
+ * git 同步要避开：`pull`/`rebase` 可能在应用正读某个包的时候把它挪走（或者把文件换掉）。
+ * 界面那条路没有插件级的 busy 标记，所以只能问这里。
+ */
+export function isApplying(): boolean {
+	return applying;
+}
+
 export async function executeBundlePlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyResult> {
 	if (applying) throw new Error('另一次应用还在进行中：等它跑完再点');
 	applying = true;
@@ -1153,6 +1516,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		conflicts: 0,
 		deleted: 0,
 		moved: 0,
+		restored: 0,
 		foldersCreated: 0,
 		foldersRemoved: 0,
 		bytesWritten: 0,
@@ -1198,6 +1562,31 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					result.bytesWritten += action.entry.size;
 					break;
 				}
+				case 'restore': {
+					/**
+					 * 本机误改的版本先进回收目录（跟冲突输的那一份同一个去处）：
+					 * 用户可能只是手滑改了，捞得回来；留在原地会跟着下一次同步传出去。
+					 */
+					if (await dirExists(target)) {
+						await moveToTrash(
+							target,
+							toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`),
+							action.path,
+							stamp,
+						);
+					} else if (keepBackup && await pathExists(target)) {
+						await moveToTrash(
+							target,
+							toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`),
+							action.path,
+							stamp,
+						);
+					}
+					await extractEntry(action.sourceFile, action.sourceInfo, action.entry, target);
+					result.restored++;
+					result.bytesWritten += action.entry.size;
+					break;
+				}
 				case 'delete': {
 					/**
 					 * 它可能**已经被这次应用里的前一个动作挪走了**：完整副本镜像时，
@@ -1216,12 +1605,21 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 				case 'rename': {
 					const from = toNative(options.vaultRoot, action.from);
 					await ensureDir(path.dirname(target));
-					try {
-						await fs.promises.rename(from, target);
-					} catch {
-						// 跨盘 / 权限问题：退回"复制 + 删旧的"
-						await fs.promises.copyFile(from, target);
-						await fs.promises.rm(from, { force: true });
+					if (action.dir) {
+						// 目录移动：整棵 rename。跨盘时不能退回 copyFile（那只能复制文件），明确报错
+						try {
+							await fs.promises.rename(from, target);
+						} catch (error) {
+							throw new Error(`文件夹改名失败（${action.from} → ${action.path}）：${describe(error)}`);
+						}
+					} else {
+						try {
+							await fs.promises.rename(from, target);
+						} catch {
+							// 跨盘 / 权限问题：退回"复制 + 删旧的"
+							await fs.promises.copyFile(from, target);
+							await fs.promises.rm(from, { force: true });
+						}
 					}
 					result.moved++;
 					break;
@@ -1317,10 +1715,6 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * `removeSupersededChanges` 那边也不受影响：更新包只有在"基准世代 ≤ 本机世代"时才收得下，
 	 * 所以世代**更高**的更新包一定是更晚的内容，那条"比我新的不删"照样守得住。
 	 */
-	state.generation = plan.info.header.targetGeneration;
-	// 高水位只增不减：应用别人的包时把它报过的号一并算进来（回退那一趟不会把水位拉低，
-	// 于是"回退之后再导出"不会去撞历史上用过的号，见 sync/state.ts 的 maxGeneration）
-	raiseGeneration(state, plan.info.header.targetGeneration, plan.info.header.baseGeneration);
 	state.lastBundleId = plan.info.header.bundleId;
 
 	/**
@@ -1347,6 +1741,24 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	result.stateId = { ...stateIdInfo, at: Date.now() };
 	result.stateIdCompare = compareStateId(stateIdInfo, plan.info.header.stateId ?? null);
 	state.stateId = result.stateId;
+
+	/**
+	 * **世代 ＝ 内容在这个血脉里的版本号**。
+	 *
+	 * - 应用完的内容正好等于包的目标（`match`）→ 采纳包说的那一代；
+	 * - 内容里还留着**本机独有的改动**（合并了，编号对不上）→ 取"本机与包"较大的那个，
+	 *   **绝不往回退**。踩过：B 已经导出过第 102 代、再应用 A 的第 101 代（B 的改动留在合并结果里），
+	 *   旧代码直接把 B 的号改回 101 —— A 那边应用 B 的 102 包后是 102，两边内容一样、代数却不同。
+	 *   取 max 之后两边都停在 102，且不会出现"后应用的那台把号拉低"。
+	 * - 旧包没记状态编号 → 只能按"内容就是包"处理（照旧采纳目标的号）。
+	 */
+	const exactTarget = plan.info.header.stateId ? result.stateIdCompare === 'match' : true;
+	state.generation = exactTarget
+		? plan.info.header.targetGeneration
+		: Math.max(state.generation, plan.info.header.targetGeneration);
+	// 高水位只增不减：应用别人的包时把它报过的号一并算进来（回退那一趟不会把水位拉低，
+	// 于是"回退之后再导出"不会去撞历史上用过的号，见 sync/state.ts 的 maxGeneration）
+	raiseGeneration(state, plan.info.header.targetGeneration, plan.info.header.baseGeneration);
 
 	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
 	// 所以中间版本记录重置；应用更新包则保留
@@ -1384,6 +1796,27 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	const contentBefore: Record<string, FileRecord> = { ...plan.contentBefore };
 	/** 这次**真的写成了一致**的那些条目（新清单由它拼出来） */
 	const freshAnchor: Record<string, FileRecord> = {};
+	/**
+	 * 移动操作已经执行完了：把新路径记进来、旧路径从清单里划掉。
+	 * 这一步必须在条目循环之前做 —— `nextFullFiles` 由 `contentBefore + freshAnchor` 拼出来。
+	 */
+	for (const action of plan.actions) {
+		if (action.kind !== 'rename') continue;
+		if (action.dir) {
+			const fromPrefix = `${action.from}/`;
+			const toPrefix = `${action.path}/`;
+			for (const file of Object.keys(contentBefore).filter(item => item.startsWith(fromPrefix))) {
+				const toPath = toPrefix + file.slice(fromPrefix.length);
+				const current = await statFile(toNative(options.vaultRoot, toPath));
+				if (current) freshAnchor[toPath] = current;
+				delete contentBefore[file];
+			}
+		} else {
+			const current = await statFile(toNative(options.vaultRoot, action.path));
+			if (current) freshAnchor[action.path] = current;
+			delete contentBefore[action.from];
+		}
+	}
 	for (const entry of plan.info.header.entries) {
 		const current = await statFile(toNative(options.vaultRoot, entry.path));
 		const agreed = current
@@ -1394,16 +1827,39 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		if (!agreed) continue;
 		freshAnchor[entry.path] = { size: entry.size, mtime: entry.mtime };
 	}
+	/**
+	 * 从基准恢复的路径：照样**只有真写成了一致才记进清单**。
+	 * 恢复失败（文件被占用 / 权限）时不能声称"我这边就是基准那一版"，
+	 * 否则下一次应用会按一个假记录判断"没变过"。
+	 */
+	for (const action of plan.actions) {
+		if (action.kind !== 'restore') continue;
+		delete contentBefore[action.path];
+		const current = await statFile(toNative(options.vaultRoot, action.path));
+		const agreed = current
+			&& current.size === action.entry.size
+			&& Math.abs(current.mtime - action.entry.mtime) <= TOLERANCE;
+		if (agreed) freshAnchor[action.path] = { size: action.entry.size, mtime: action.entry.mtime };
+	}
 	for (const item of plan.info.header.deleted) {
 		delete contentBefore[item.path];
 	}
 
-	// 目录基准同理：只记**两边都见过**的目录（包里点了名的，且这次真的在本地）
-	const keepDirs: string[] = [];
-	for (const dir of dirsInBundle(plan.info.header)) {
-		if (await dirExists(toNative(options.vaultRoot, dir))) keepDirs.push(dir);
+	// 目录基准：**照"这一趟送到的那一点"记**（`plan.deliveredDirs`），不是只记包里点过名的。
+	//
+	// 踩过：更新包只带"变过的文件"，`dirsInBundle` 里只有这些文件的上级目录；
+	// 一台有多层目录的机器应用完更新包后，`state.bundle.dirs` 只剩那一小撮目录 ——
+	// 下一次 `hasChanges` 一看"仓库里 200 个目录、记录里 3 个"，判定有变化，
+	// 于是把刚应用完的同一份更新包又导了一遍（用户报的"100→101 导了两次"）。
+	const keepDirs = new Set<string>();
+	for (const dir of plan.deliveredDirs) {
+		if (await dirExists(toNative(options.vaultRoot, dir))) keepDirs.add(dir);
 	}
-	keepDirs.sort();
+	// 想删却没删掉的（被排除规则挡住的）也还在：记进基准，别让下一轮以为是"新目录"
+	for (const dir of plan.foldersKept) {
+		if (await dirExists(toNative(options.vaultRoot, dir))) keepDirs.add(dir);
+	}
+	const sortedDirs = [...keepDirs].sort();
 	/**
 	 * **只有落到一份真基准点上时，"我站的那一份完整包"才往前走**（0.14，用户拍板，
 	 * 见 `docs/只有完整包才算基准点-实施计划.md`）：
@@ -1443,7 +1899,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			? path.basename(options.file)
 			: (adopt ? null : (state.bundle?.fullFile ?? path.basename(options.file))),
 		history: isFull ? {} : (state.bundle?.history ?? {}),
-		dirs: keepDirs,
+		dirs: sortedDirs,
 	};
 	if (adopt) {
 		options.log.debug(
@@ -1463,6 +1919,9 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		target: plan.info.header.targetGeneration,
 		entries: plan.info.header.entries.length,
 		deleted: plan.info.header.deleted.length,
+		...(plan.info.header.moves && plan.info.header.moves.length > 0
+			? { moves: plan.info.header.moves.length }
+			: {}),
 		stateId: stateIdInfo.id,
 	});
 
@@ -1542,6 +2001,8 @@ export function describeAction(action: ApplyAction): string {
 			return '写入';
 		case 'delete':
 			return '删除';
+		case 'restore':
+			return '恢复';
 		case 'conflict':
 			return action.winner === 'remote' ? '冲突（以包为准）' : '冲突（以本地为准）';
 		case 'rename':

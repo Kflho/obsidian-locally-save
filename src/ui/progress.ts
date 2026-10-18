@@ -17,22 +17,33 @@ export interface SyncProgress {
 }
 
 /**
- * 状态栏那一格：同步中显示进度，平时显示上次同步的结果。
+ * 状态栏那一格：平时写一句结果，跑长活时写进度 / 阶段。
  *
- * 进度与结果共用一个元素是刻意的 —— 用户只关心"现在在干什么 / 上次干得怎么样"，
- * 分两格反而要来回找。
+ * 优先级：**进度（n/m）> 阶段（"推拉中…"）> 上次结果**。
+ * 用户提过右下角太啰嗦 —— 所以平时只有一句 `已同步 12:31 · 对方一致`，
+ * 细节（上次留包几个文件、攒了多大）在更新记录 / 通知里。
  */
 export class SyncStatusBar {
 	private el: HTMLElement;
-	private summary = '尚未留包';
+	private summary = '尚未同步';
+	/** 悬停时显示的详情（每台机器一行；点击还能打开完整窗口） */
+	private detail = '';
 	private visible = true;
+	/** 阶段文案（"正在拉取…"）；null ＝ 没在跑长活 */
+	private activity: string | null = null;
+	/** 进度文案（"导出中 12/100"）；空闲时是空串 */
+	private progressText = '';
 	/** 上一次真的写了 DOM 的时间与文字（进度更新要节流，见 showProgress） */
 	private lastProgressAt = 0;
 	private lastProgressText = '';
 
-	constructor(el: HTMLElement) {
+	constructor(el: HTMLElement, onClick?: () => void) {
 		this.el = el;
 		this.el.addClass('locally-save-status');
+		if (onClick) {
+			this.el.addClass('locally-save-status-clickable');
+			this.el.addEventListener('click', () => onClick());
+		}
 		this.render();
 	}
 
@@ -48,16 +59,18 @@ export class SyncStatusBar {
 	 * 光是这些 DOM 写入就够让界面发顿（用户报的"卡界面"里有它一份）。
 	 * 所以 100 毫秒内的重复更新直接丢掉，收工那一次（null）一定会写。
 	 *
-	 * 动词由调用方给（同步中 / 导出中 / 应用中）：同一个数字在不同的活里
+	 * 动词由调用方给（导出中 / 应用中）：同一个数字在不同的活里
 	 * 意思不一样，别让用户在导出时看到"同步中"。
 	 */
 	showProgress(progress: SyncProgress | null): void {
 		if (!progress) {
+			this.progressText = '';
 			this.lastProgressText = '';
 			this.render();
 			return;
 		}
 		const text = `${progress.label ?? '处理中'} ${progress.done}/${progress.total}`;
+		this.progressText = text;
 		if (text === this.lastProgressText) return;
 		const now = Date.now();
 		if (progress.done < progress.total && now - this.lastProgressAt < PROGRESS_THROTTLE_MS) return;
@@ -66,16 +79,35 @@ export class SyncStatusBar {
 		this.el.setText(text);
 	}
 
+	/**
+	 * 阶段文案（"同步中：拉取远程…"），用于**没有文件计数**的步骤（git 推拉）。
+	 * 传 null 收工，回到上次结果。
+	 */
+	showActivity(text: string | null): void {
+		this.activity = text;
+		this.lastProgressText = '';
+		this.render();
+	}
+
 	/** 收工后写一句结果 */
 	setSummary(text: string): void {
 		this.summary = text;
 		this.render();
 	}
 
+	/** 悬停提示：每台机器一行（没有多台时为空） */
+	setDetail(text: string): void {
+		this.detail = text;
+		this.render();
+	}
+
 	private render(): void {
 		this.el.toggleClass('locally-save-hidden', !this.visible);
 		if (!this.visible) return;
-		this.el.setText(this.summary);
-		this.el.setAttribute('aria-label', `Locally Save：${this.summary}`);
+		// 进度 > 阶段 > 上次结果
+		const text = this.progressText !== '' ? this.progressText : (this.activity ?? this.summary);
+		this.el.setText(text);
+		this.el.setAttribute('aria-label', `Locally Save：${text}`);
+		this.el.setAttribute('title', this.detail !== '' ? this.detail : `Locally Save：${text}`);
 	}
 }

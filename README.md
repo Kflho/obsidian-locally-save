@@ -47,21 +47,29 @@ carry on a USB drive, a cloud folder or a chat app, and applies it on the other 
 - **Automatic modes** (off by default): auto-keep a bundle on a schedule / after edits, and
   auto-apply an incoming changes bundle — the latter only when it would not delete or overwrite
   anything you already have. Full copies are never applied automatically.
+- **Optional git transport** (off by default, desktop + system `git`): the bundle folder itself can be
+  a git worktree. New bundles are committed and pushed, the other machine's are pulled and applied;
+  each machine also publishes a tiny status file (`.lsave-peers/`) so both sides can tell whether they
+  are at the same state. **Full copies are never pushed** (too large) — you still carry the first one
+  on a USB drive. Applying is always the same strict, whole-state bundle logic; git is only the truck.
+  With it off, the plugin makes no network requests at all.
 - **Install** from the Obsidian community plugin browser, or download `main.js`, `manifest.json` and
   `styles.css` from [Releases](https://github.com/Kflho/obsidian-locally-save/releases) and put them
   in `<vault>/.obsidian/plugins/locally-save/`. Requires Obsidian 1.7+ on desktop.
 
 ### Privacy and permissions
 
-- **No network requests at all.** No telemetry, no account, no server. The only things it reads and
-  writes are your vault, the bundle folder you configure, and its own state file inside the plugin
-  directory.
+- **No network requests unless you turn on the optional git transport.** No telemetry, no account, no
+  server. The git mode runs the `git` you installed against the remote you configured; credentials stay
+  in your system git (the plugin never stores them). Everything else only touches your vault, the bundle
+  folder you configure, and its own state file inside the plugin directory.
 - **Filesystem access outside the vault** is the core feature (that is what `isDesktopOnly` is for):
   it copies files to/from the bundle folder you pick, and moves replaced or deleted files into a
   trash folder inside the vault.
-- **Shell execution**: only one feature uses it — the optional *"associate `.lsave` with Obsidian"*
-  button (Windows only), which writes a per-user file association under `HKCU\Software\Classes` by
-  running `reg.exe`. It never runs unless you click that button.
+- **Shell execution**: only the optional features use it — the *"associate `.lsave` with Obsidian"*
+  button (Windows only, runs `reg.exe`); the optional git transport (runs your installed `git`); and
+  the optional SSH setup (runs `ssh-keygen` / `ssh`, and `gh` only if you have GitHub CLI installed
+  and logged in). None of them runs unless you click the corresponding button or turn git on.
 - **Clipboard**: the *"copy path"* button writes a file path to the system clipboard; nothing is ever
   read from it.
 - Every action that modifies files is off by default and asks for confirmation before it runs;
@@ -99,6 +107,41 @@ The rest of this document is in Chinese (the plugin's UI language).
 > 第一次给别人机器搬家时用**完整副本**；对方应用完，两台机器就站在同一个**基准点**上，
 > 从此互相发更新包才对得上号。
 
+## 用 git 搬包（可选，0.15.0）
+
+不想每次拷文件？把**同步包文件夹**接到一个**私有** git 仓库（GitHub / Gitee / 自建都行）：
+
+1. 设置 → Git 远程 → 打开「启用 git 传输」→ 填远程地址（HTTPS 或 SSH）→「接入这个远程…」；
+2. 平时点左侧栏第一个图标「**立即同步**」：**先拉一次对方状态 → 发号 → 导出 → 推拉 → 收包**，
+   一步到位（导哪种看自动留包开关；都没开时有基准导更新包、没基准导完整包）；
+3. **方向决定这台机器负责哪一半**（是硬边界，不只是提示）：
+   - **仅拉**（只收不发）：拉下来直接应用 —— 连会删文件 / 删空文件夹 / 覆盖本地改动的包也照做，
+     目标是"变成对面那样"（本机被覆盖 / 删掉的文件先进回收目录）；
+     **和对面严格相等**：本机在包里没点名的文件上误改的，应用时从基准完整副本恢复
+     （旧版本进回收目录），不会当成"我这一半"留着；应用完把新状态写进货架。
+     这台机器**不导出任何包**（自动留包、「立即同步」都不写包）；
+   - **双向**：收到包先弹一句确认（写清会写 / 删 / 覆盖几个），确认后才应用；
+     应用完把本机这边的改动导成更新包回传，对面拉到就齐了；
+   - **仅推**：只发不收，收件箱不看（对方的包要对面自己应用）；
+4. 想完全自动化：留包会自动提交推送，定时拉取；收包按上面的方向处理；
+5. **完整包不推**（太大），仍用 U 盘搬一次；之后日常只有几十 KB 到几 MB 的更新包走 git；
+6. **发号不撞车**：导出前会看货架上已知的最高代（对方的 peer 状态 + 现有包），
+   后发的那一份从它后面发号。A 先发第 101 代，B 同步时先拉到 101，再发就是第 102 代；
+   应用包如果合并了本地改动（状态编号对不上包的目标），世代取两边的较大值，不会把号改回去。
+
+**双向**下两边改到同一个文件时，确认窗会写"N 处两边都改过"：应用时以包的版本为准，
+你那一版留在冲突副本里（回收目录），捞得回来。想把方向定死、不要合并，就用
+「让对面和我一致」/「让我和对面一致」这两个单向按钮，结果完全确定、两边状态编号一致。
+
+每台机器还会往货架里放一份很小的状态（`.lsave-peers/`：状态编号 / 站在哪份完整副本上 / 主机名），
+所以同步完就能看到"对方在哪一步、两边一样了没有"。两机测试步骤见
+`docs/git货架-两机测试.md`。
+
+**多台电脑怎么对账**：状态栏后半句会逐台计数（`对方：2 台一致 · 1 台不同步`）；
+悬停能看到每台的 `状态编号 / 第几代 / 基准 / 最后上报时间`；点状态栏或命令
+「查看各台电脑同步状态…」开完整窗口。每台机器的「最后上报」时间是它最近一次
+和货架同步的时间——超过一阵没报，先让它同步一次，再看是"待上报"还是真"不同步"。
+
 ## 两种同步包
 
 | | 完整副本 | 更新包 |
@@ -112,6 +155,30 @@ The rest of this document is in Chinese (the plugin's UI language).
 导出的两个勾选是**各自独立**的，可以都要。两个都勾时**先导完整副本、后导更新包** ——
 完整副本刚把整个仓库装走，这时的更新包按它算必然是空的，所以**不会生成空包**，
 结果里会说明一句。想要"传一个小文件过去"，就只勾更新包。
+
+### 改名 / 移动文件夹不再重传内容（包版本 2）
+
+以前把一个文件夹改个名，导出会把它当成"旧路径全删 + 新路径全是新文件"，
+每个文件的字节都重新装一遍 —— 1 MB 的文件夹改名，更新包就是 1 MB。
+现在包里写的是**移动操作**（`moves`），文件内容不进负载：
+
+| 操作 | 包里装什么 | 接收方 |
+|---|---|---|
+| 整个文件夹改名 / 移动（内容都没变） | 一条 `dir` 操作 | 整棵子树 rename，0 字节内容 |
+| 单个文件改名 / 移动 | 一条 `file` 操作 | rename，0 字节内容 |
+| 移动后又改了某个文件 | 没改的走移动，改过的那一个才带内容 | 先 rename，再写改过的那一个 |
+| 移动后又删了文件 | 旧路径和新路径各一条删除 | 两边谁有就删谁 |
+
+- **普通包仍是版本 1**，老插件照样读；**带移动操作的包是版本 2**，老插件会明确拒绝
+  （不会把"移动"误当成删除/新增）—— 所以两台机器都要用这一版插件；
+- 移动操作只认**源文件还在、且大小/修改时间没变**的机器；源被改过、目标已存在，
+  应用会**在计划阶段拒绝**并说清原因，不会做半套（包里没带内容，硬做只会落错误的状态）；
+- 累积更新包里重复出现的移动会**跳过已经做过的**；连续改名（旧 → 中间 → 最终）会带链式移动；
+- **更新包是按顺序接力的**：一台机器如果漏掉了中间那份移动包，最新那份可能提示"两个路径都不在"——
+  先补上漏掉的那份，或者导一份完整副本；插件不会静默落一个错乱的状态；
+- **改动历史**在「同步包更新记录…」里：每次导出 / 应用都有一行（世代、状态编号、文件数、移动处数）。
+  `changes/` 里同一台机器、同一基准的旧**累积**更新包会被最新那份取代（内容已被它包含），
+  别的机器导的、别的基准的包会保留。
 
 ### 基准点：只有完整副本才算
 
@@ -147,7 +214,7 @@ The rest of this document is in Chinese (the plugin's UI language).
 
 ### 之后：日常来回搬（更新包）
 
-1. **A 机**：`导出同步包…`（只勾「更新包」）→ 或者点左侧栏第一个图标「立即留包」；
+1. **A 机**：`导出同步包…`（只勾「更新包」）→ 或者点左侧栏第一个图标「立即同步」（导出 + 推拉 + 收包）；
 2. 拷到 B 机 → 打开并应用。B 机没动过的话，报告会显示同步程度 100%；
 3. **B 机把自己这半也导出来发回给 A**，A 应用 —— 这样 A 才拿得到 B 那边的改动。
 
@@ -252,28 +319,39 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
 
 ### 自动留包（默认关）
 
-- **留哪种包**在「同步包」页：`留更新包`（推荐，几乎不额外花时间）/ `留完整包`（每次都把整个仓库
+- **留哪种包**在「自动留包」页：`留更新包`（推荐，几乎不额外花时间）/ `留完整包`（每次都把整个仓库
   重写一遍，大库会明显变慢）。两个开关各自独立。
 - **什么时候留**在「自动留包」页：启动后一次 / 定时（每 5 分钟到 3 小时）/ 保存后停顿若干秒。
 - **自上次留包以来没有任何变化时，一个包都不写**，只如实说一句。
 - 第一次必须先导一次完整副本 —— 更新包要有起点才算得出来。
 
-### 自动应用收到的包（默认关）
+### 收包与自动应用（按方向）
 
-打开后，插件每 30 秒看一眼「同步包文件夹」，有人把包放进去就自己处理。边界是硬的：
+**git 方向**决定收到包怎么处理（没开 git 时由「自动应用收到的更新包」这个开关决定）：
 
-- **只在完全不会动到本地已有东西时才自己应用**：不删文件、不删空文件夹、不覆盖你改过的内容。
-  要删东西或两边都改过时，只提示一句，让你用「打开同步包并应用…」自己看；
-- **完整副本从来不自动应用**（它可能删掉你本机独有的文件），只提示一句；
-- **按基准收**：只自动应用"起点正好是本机站的那份完整副本"的包；同一份基准上每个来源只取
-  最新那一份，别的先搁着；
-- 同一个包只处理一次，不会每 30 秒弹一遍。
+- **仅拉**：收到就应用（完整副本也收）—— 连会删文件 / 删空文件夹 / 覆盖本地改动的也照做，
+  目标是对面那一点；本机被覆盖 / 删掉的文件先进回收目录。这个方向**不导出任何包**
+  （自动留包与「立即同步」都不写）；
+- **双向**：收到先弹一句确认，确认后才应用；应用完把本机这边的改动导成更新包回传；
+- **仅推**：不看收件箱（只发不收）。
+
+没开 git 时保持老边界：只自动应用"不会删东西、也不会覆盖你改过的内容"的更新包；
+完整副本、要删东西的、两边都改过的一律只提示一句。两种情况下都**按基准收**
+（起点正好是本机站的那份完整副本；同一份基准上每个来源只取最新那一份），
+同一个包只处理一次，不会每 30 秒弹一遍。
 
 ### 状态栏
 
-- 平时显示**更新记录里最后一条**：`上次留包 <时间> · 更新包 N 个文件（含 M 个删除）`；
-- 导出 / 应用进行中显示进度（已经装进包 / 写进仓库几个文件，一共几个）；
-- 不想要这一格就在「界面与交互」页关掉。
+- **前半句是 git 推拉本身**：`已推送 12:31` / `已拉取 12:31` / `已推拉 12:31` /
+  `远程已是最新 12:31` / `同步失败 12:31`。不再写"已同步"——推上去只说明远程有我的包，
+  对方没拉、没应用之前，内容并不一定一样；
+- **后半句是内容状态**：`对方：一致` / `对方：不同步` / `对方：待上报`
+  （我刚应用完、它还没报新状态）/ `对方：还没上报`；多台时逐台计数，
+  例如 `对方：2 台一致 · 1 台不同步`；
+- **悬停**看每台电脑的状态编号、第几代、基准、最后上报时间；**点一下**打开
+  「各台电脑同步状态」窗口（命令面板里也有「查看各台电脑同步状态…」）；
+- 跑长活时有进度：导出 / 应用是 `导出中 3/10`、`应用中 2/5`；git 推拉是 `同步中：拉取远程…` 这类阶段；
+- 不想要这一格就在「通用」页关掉。
 
 ### 三个左侧栏图标
 
@@ -281,7 +359,7 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
 
 | 图标 | 点一下 |
 |---|---|
-| 包裹加号 | **立即留包**（按两个「自动留包」开关留一次） |
+| 包裹加号 | **立即同步**（导出包 + git 推拉；git 没开时只留包） |
 | 包裹 | **导出同步包**（打开导出对话框） |
 | 开箱 | **打开同步包并应用**（选包 → 看报告 → 再应用） |
 
@@ -307,11 +385,12 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
 
 | 命令 | 干什么 |
 |---|---|
-| 立即留包 | 按两个「自动留包」开关立即留一次；都没开时提示去设置里选一种 |
+| 立即同步 | 导出包（有基准导更新包、没基准导完整包）+ git 推拉 + 应用拉下来的安全更新 |
 | 预览：这次会留什么包 | 列出这次会装进包里的文件、点名要删的清单、约多大。**只算不写** |
 | 导出同步包… | 打开导出对话框（完整副本与更新包两个独立勾选） |
 | 打开同步包并应用… | 选包 → 先看报告 → 再点应用 |
 | 管理同步包… | 列出所有包：应用 / 打开文件夹 / 复制路径 / 挪进回收站 / 彻底删除 / 清空回收站 |
+| 查看各台电脑同步状态… | 每台的状态编号 / 第几代 / 基准 / 最后上报时间，标出一致、不同步、待上报 |
 | 同步包更新记录… | 像 git log 一样列出每次导出 / 应用 |
 | 启用 / 停用插件 | 总开关（关掉后上面的入口都不干活，设置面板还能打开） |
 
@@ -364,14 +443,15 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
 
 ## 设置说明
 
-设置按"你要干什么"分成四页：
+设置按"你要干什么"分成五页：
 
 | 页 | 里面有什么 |
 |---|---|
-| **通用** | 启用插件 · 日志级别 |
-| **同步包** | 包放在哪（同步包文件夹 · 不进包的文件）· 自动留包（留更新包 / 留完整包）· 更新包（从哪个状态开始 · 到哪个状态为止 · 攒大了提醒立新基准）· 手动导出 · 管理 · 应用同步包（自动应用收到的更新包 · 拖入 .lsave 即打开 · 应用前校验完整性）· 用 Obsidian 直接打开 · 看说明 |
-| **自动留包** | 触发时机：启动后留包一次 · 定时留包 · 保存后留包 |
-| **界面与交互** | 左侧栏三个图标 · 状态栏 |
+| **通用** | 启用插件 · 日志级别 · 左侧栏三个图标 · 状态栏 |
+| **同步包** | 同步包文件夹 · 立即同步 · 手动导出 · 管理同步包 · 应用同步包 · 关联/说明 |
+| **Git 远程** | 启用 git 传输 · 远程地址 · 方向 · 状态与接入（检查/接入/连通性/SSH）· 同步动作 |
+| **自动留包** | 触发时机（启动后一次 · 定时 · 保存后）· 留哪种包（更新包 / 完整包） |
+| **高级** | 不进包的文件 · 更新包起点/终点 · 攒大了提醒 · 自动应用 · 拖入即打开 · 应用前校验 · git 分支/拉取间隔/路径 |
 
 几个容易忽略的：
 
@@ -427,23 +507,26 @@ B 收到后接着改再导出发回给 A（`55 → 57`）—— 两趟之后两�
   插件看不见它们、也就删不动，这时会**明确报出来**，而不是反复尝试；
 - **打开包文件夹**依赖系统文件管理器，拿不到时会弹一条含路径的通知让你手动复制；
 - 打开同步包对话框时只会**把 Obsidian 叫到前台**，不会动你的窗口大小与位置；
-- **接收端默认要手动点一下**：想省这一步就打开「自动应用收到的更新包」（见上面那节）。
+- **接收端默认要手动点一下**：开 git 时按方向走（仅拉直接收 / 双向确认后收）；
+  没开 git 时打开「自动应用收到的更新包」（见上面那节）。
 
 ## 隐私
 
-**这个插件不发起任何网络请求。** 没有遥测，没有账号，不上传任何东西。
+**不开 git 传输时，这个插件不发起任何网络请求。** 没有遥测，没有账号，不上传任何东西；
+开了 git 也只是跑你装的 `git` 跟你的远程通信（凭据留在系统 git 里）。
 
 它碰的东西只有三处：
 
 - **仓库之外的文件**：这正是它的功能（包要写到仓库外、被替换的文件要挪进回收目录），
   所以它用 Node 的文件系统读写。它只会碰你指定的**同步包文件夹**、仓库本身、
   以及仓库里的 `.trash/locally-save` 回收目录；
-- **系统命令**：只有一处 —— 「把 .lsave 关联到 Obsidian」按钮（仅 Windows），
-  跑 `reg.exe` 往 `HKCU\Software\Classes` 写一条当前用户的文件关联。**不点这个按钮就不会执行**，
-  也不需要管理员权限，不想要了点「解除关联」；
+- **系统命令**：只有可选项才用 —— 「把 .lsave 关联到 Obsidian」按钮（仅 Windows，跑 `reg.exe`
+  写当前用户的文件关联，不要管理员权限）、git 传输（跑你装的 `git`）、SSH 设置（跑
+  `ssh-keygen` / `ssh`，装了 GitHub CLI 才会用 `gh`）。不点对应按钮 / 不开 git 就不会执行；
 - **剪贴板**：只有「复制路径」「复制指纹发给对方」会往里写一句话，从不读剪贴板。
 
-所有**会改文件**的动作默认都是关的（自动留包、自动应用都如此），真正动手之前还有确认框。
+所有**会改文件**的功能默认都是关的；只有你明确选了「仅拉」方向时，收到包才会不弹窗直接应用
+（本机被覆盖 / 删掉的文件进回收目录，捞得回来）。
 
 ## 许可
 

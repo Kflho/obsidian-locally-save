@@ -75,6 +75,8 @@ check("命令 ID 是稳定接口", stub.commands.map(c => c.id), [
 	'apply-bundle',
 	'manage-bundles',
 	'bundle-log',
+	'git-sync',
+	'sync-status',
 	'toggle-enabled',
 ]);
 check("每条命令都有名字", stub.commands.filter(c => !c.name).length, 0);
