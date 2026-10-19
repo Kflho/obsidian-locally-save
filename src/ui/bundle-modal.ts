@@ -870,13 +870,13 @@ export class ApplyBundleModal extends Modal {
 				cls: 'locally-save-warn',
 			});
 		}
-		if (!report.parentMatches && report.bundle.mode === 'changes') {
-			this.reportEl.createEl('p', {
-				text: '这个包不是接着你上次应用的那一份算的，中间可能还有一份没到。'
-					+ '先把缺的那份拷过来，或者让对方从你站的那份完整副本重导一份。',
-				cls: 'locally-save-hint',
-			});
-		}
+		/**
+		 * **不再拿 `parentBundleId` 判"漏了中间那份包"**：它是导出方"上一次导出的是哪一份"，
+		 * 不是"我上一次应用的是哪一份"。基准点模型里两边都站在同一份完整副本上往外长，
+		 * 这两个 ID 对不上是常态 —— 提示只会在正常现场误报（用户报的：回退到第 112 代
+		 * 完整副本、内容严格等于 112，再应用「112 → 最新」却被说"中间可能还有一份没到"）。
+		 * 真该拦的（基准不是同一份）由 `checkAncestor` 在前面拦下并指路。
+		 */
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
 				text: `⚠ 你还没站到这个包所基于的那份完整副本上（差 ${report.generationGap} 代）。`

@@ -7,11 +7,15 @@
  * - 改名后再改一个文件 → 只装改过的那一个，其余走移动；
  * - 应用端源文件被改 / 目标已存在 → 计划阶段拒绝，不做半套；
  * - 应用完两边状态编号一致。
+ * - **本机手工把文件夹改过名 / 搬过文件之后再应用累积包**：目标那边的东西一个都不能删
+ *   （严格镜像按"送到的点"判，不按"我上次记下的样子"判）；
+ * - **改名执行失败不许把状态里的记录划掉**：下一份累积包会按"点上没有它"把它删掉；
+ * - 目标目录已存在时**按文件并进去**，不整棵替换（整棵替换会扫掉目标里已经在该在的东西）。
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { applyBundle, planBundleApply } from '../src/bundle/apply';
+import { applyBundle, executeBundlePlan, planBundleApply } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import { DEFAULT_SETTINGS } from '../src/settings/model';
 import { compareStateId } from '../src/sync/state-id';
@@ -296,6 +300,8 @@ async function scenario(name: string): Promise<{
 	const sa = await loadState(s.sta);
 	const sb = await loadState(s.stb);
 	check('漏掉中间包（文件）：两边状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+	checkTrue('漏掉中间包（文件）：状态记录里没有假路径',
+		phantomRecords(s.b, sb.bundle?.files).length === 0, phantomRecords(s.b, sb.bundle?.files).join('、'));
 }
 
 // ---------------------------------------------------------------- 漏掉中间那份移动包：目录连改两次名
@@ -329,6 +335,11 @@ async function scenario(name: string): Promise<{
 // 两边都在（这正是包说的那一点）。第二次再应用同一份累积包时，旧版本只看"源在 + 目标在"
 // 就报「本地目标已经存在」，整包拒绝 —— 而且之后的每一份累积包都会带着这条移动，
 // 那台机器就永远卡住了。移动的幂等判据必须是**这个源还是不是我记录里的那一份**。
+/** 状态记录里有没有"磁盘上已经不在"的路径（假记录会让下一份包算错落点） */
+function phantomRecords(vault: string, files: Record<string, unknown> | undefined): string[] {
+	return Object.keys(files ?? {}).filter(file => !fs.existsSync(path.join(vault, ...file.split('/'))));
+}
+
 function trashHas(vault: string, content: string): boolean {
 	const root = path.join(vault, '.trash', 'locally-save');
 	const walk = (dir: string): boolean => {
@@ -487,27 +498,42 @@ async function applyCatching(
 	check('严格档：应用完与包一致', compareStateId(sa.stateId, sb.stateId), 'match');
 }
 
-// 严格档 replace + 目标里有个改过的条目：rename 会把目标换成源那一份，
-// 所以条目必须**补写一遍**（否则状态编号对不上 —— 真机恢复时最后差一个文件就是这个）
+// 严格档 + 目标目录里已经有东西：**按文件并进去**，不整棵替换
+// （整棵替换会把目标里"已经在该在"的文件一起扫进回收目录 —— 用户报的「application 里只剩 1111」）
 {
-	const s = await scenario('replace-entry');
+	const s = await scenario('merge-target');
 	await s.prepare();
 	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
 	fs.writeFileSync(path.join(s.a, '新文件夹/二.md'), '二号内容改过了，长度也不同');
 	const moved = await s.exportChanges();
-	check('replace+条目：包里带着改过的那个文件', moved.entryCount, 1);
-	// B 在目标位置已经有一份**内容与条目一致**的文件：计划阶段会跳过写入
-	fs.mkdirSync(path.join(s.b, '新文件夹'), { recursive: true });
+	check('目标里已有东西：包里带着改过的那个文件', moved.entryCount, 1);
+	// B 在目标位置已经有一份**内容与条目一致**的文件（上一份包搬过去的），外加一个自己的文件
+	fs.mkdirSync(path.join(s.b, '新文件夹/子目录'), { recursive: true });
 	fs.writeFileSync(path.join(s.b, '新文件夹/二.md'), '二号内容改过了，长度也不同');
-	const applied = await applyBundle({
+	// 上一份包搬过去的那一份：连修改时间都一致（导出/应用会保留 mtime）—— 这条移动对 B 已经做完了
+	const movedSource = path.join(s.b, '旧文件夹/子目录/三.md');
+	const movedTarget = path.join(s.b, '新文件夹/子目录/三.md');
+	fs.copyFileSync(movedSource, movedTarget);
+	const movedStat = fs.statSync(movedSource);
+	fs.utimesSync(movedTarget, movedStat.atime, movedStat.mtime);
+	fs.writeFileSync(path.join(s.b, '新文件夹/B 自己的.md'), '这是 B 自己写的东西，点上没有它');
+	await applyBundle({
 		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
 	});
-	check('replace+条目：认出来一处替换', applied.plan.report.moveReplacements, 1);
-	check('replace+条目：目标里的条目被补写成包里那一版',
+	check('目标里已有东西：条目那一版没被源里那份旧的顶掉',
 		fs.readFileSync(path.join(s.b, '新文件夹/二.md'), 'utf8'), '二号内容改过了，长度也不同');
+	check('目标里已有同一份文件的：内容原样留着',
+		fs.readFileSync(path.join(s.b, '新文件夹/子目录/三.md'), 'utf8'), '三号内容');
+	checkTrue('源里其余文件搬进目标', fs.existsSync(path.join(s.b, '新文件夹/一.md')), '');
+	checkTrue('目标里"点上没有"的文件进回收目录（严格档）',
+		!fs.existsSync(path.join(s.b, '新文件夹/B 自己的.md')) && trashHas(s.b, '这是 B 自己写的东西，点上没有它'), '');
+	checkTrue('源目录搬空后不再留着', !fs.existsSync(path.join(s.b, '旧文件夹')), '');
 	const sa = await loadState(s.sta);
 	const sb = await loadState(s.stb);
-	check('replace+条目：应用完与包一致', compareStateId(sa.stateId, sb.stateId), 'match');
+	checkTrue('被删掉的文件不再留在状态记录里（假记录会让下一包算错落点）',
+		!Object.keys(sb.bundle?.files ?? {}).includes('新文件夹/B 自己的.md'),
+		JSON.stringify(Object.keys(sb.bundle?.files ?? {})));
+	check('目标里已有东西：应用完与包一致', compareStateId(sa.stateId, sb.stateId), 'match');
 }
 
 // 只拉（alignToPeer）：同一份移动包连应用两次，第二次必须是彻底的空操作
@@ -531,6 +557,102 @@ async function applyCatching(
 	const sa = await loadState(s.sta);
 	const sb = await loadState(s.stb);
 	check('只拉移动：两次应用后编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// ---------------------------------------------------------------- 手工改名之后再同步
+//
+// 用户报的现场：旧版本改名失败，他在磁盘上**手工**把文件夹改成了新名字
+// （implement → application、把 tasknote 挪进去、删掉旧文件夹），插件并不知道。
+// 下一份累积包照样带着「implement → application」这条移动：源没了、目标在 → 跳过。
+// 旧代码跳过时**没有把"送到的点"里的路径跟着换**，严格镜像于是把目标里那批文件
+// 当成"本地多出来的"全删了 —— 用户看到的就是「application 里只剩 1111」。
+{
+	const s = await scenario('manual-rename');
+	fs.writeFileSync(path.join(s.a, '根文件.md'), '根上的一个文件');
+	await s.prepare();
+	// A、B 都手工改名：旧文件夹 → 新文件夹，并把根上的文件挪进去
+	for (const vault of [s.a, s.b]) {
+		fs.renameSync(path.join(vault, '旧文件夹'), path.join(vault, '新文件夹'));
+		fs.renameSync(path.join(vault, '根文件.md'), path.join(vault, '新文件夹/根文件.md'));
+	}
+	fs.writeFileSync(path.join(s.a, '新文件夹/新写的.md'), 'A 后来写的新文件，长度不一样');
+	const changed = await s.exportChanges();
+	checkTrue('手工改名：包里带着目录移动',
+		(changed.header?.moves ?? []).some(item => item.kind === 'dir'), JSON.stringify(changed.header?.moves));
+
+	const applied = await applyBundle({
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: changed.file as string, strictness: 'mirror',
+	});
+	check('手工改名：目标里那批文件一个都不删', applied.result.deleted, 0);
+	checkTrue('手工改名：手工搬过去的文件都还在',
+		['一.md', '二.md', '子目录/三.md', '根文件.md'].every(name => fs.existsSync(path.join(s.b, '新文件夹', name))), '');
+	checkTrue('手工改名：A 新写的文件也落地', fs.existsSync(path.join(s.b, '新文件夹/新写的.md')), '');
+	checkTrue('手工改名：旧路径没被"恢复"回来', !fs.existsSync(path.join(s.b, '旧文件夹')), '');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('手工改名：应用完两边一致', compareStateId(sa.stateId, sb.stateId), 'match');
+	checkTrue('手工改名：状态记录也跟到新路径',
+		Object.keys(sb.bundle?.files ?? {}).every(file => !file.startsWith('旧文件夹/')),
+		JSON.stringify(Object.keys(sb.bundle?.files ?? {})));
+	// 记录里不能留下"磁盘上已经没了"的假路径：下一份包会拿它算"送到的点"，
+	// 假路径会让一份明明接得上的包被判成"接不上"。
+	const phantom = Object.keys(sb.bundle?.files ?? {})
+		.filter(file => !fs.existsSync(path.join(s.b, ...file.split('/'))));
+	checkTrue('手工改名：状态里没有假记录', phantom.length === 0, phantom.join('、'));
+}
+
+// 手工改名单个文件：同一类问题（源没了、目标在），以前会把这个文件当"多出来的"删掉
+{
+	const s = await scenario('manual-file-rename');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹/一.md'), path.join(s.a, '旧文件夹/一-改名.md'));
+	fs.renameSync(path.join(s.b, '旧文件夹/一.md'), path.join(s.b, '旧文件夹/一-改名.md'));
+	const moved = await s.exportChanges();
+	const applied = await applyBundle({
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
+	});
+	check('手工改名单个文件：不删那个文件', applied.result.deleted, 0);
+	check('手工改名单个文件：内容还在',
+		fs.readFileSync(path.join(s.b, '旧文件夹/一-改名.md'), 'utf8'), '一号内容');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('手工改名单个文件：应用完两边一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// ---------------------------------------------------------------- 改名执行失败
+//
+// 计划之后才把目标位置占住（模拟"rename 在 Windows 上失败"）：源还躺在旧路径上。
+// 状态里绝不能把旧路径的记录划掉 —— 划掉之后，下一份累积包会按"点上没有它"
+// 把还在磁盘上的文件挪进回收目录（用户报的「改名失败之后再同步，application 里只剩 1111」）。
+{
+	const s = await scenario('rename-fails');
+	await s.prepare();
+	// A 把整棵文件夹挪进一个新目录；包里的移动目标在 `收纳/旧文件夹`
+	fs.mkdirSync(path.join(s.a, '收纳'));
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '收纳/旧文件夹'));
+	const moved = await s.exportChanges();
+	const plan = await planBundleApply({
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
+	});
+	// 计划之后才占住目标路径（`收纳` 位置放一个同名文件）：rename 建不出目录，必然失败
+	const blocker = path.join(s.b, '收纳');
+	fs.writeFileSync(blocker, '挡住改名的文件');
+	const result = await executeBundlePlan(plan, {
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
+	});
+	checkTrue('改名失败：报出来', result.failed.length > 0, JSON.stringify(result.failed));
+	checkTrue('改名失败：源文件还在旧路径上', fs.existsSync(path.join(s.b, '旧文件夹/一.md')), '');
+	const sb = await loadState(s.stb);
+	checkTrue('改名失败：状态里还记着旧路径',
+		Object.keys(sb.bundle?.files ?? {}).includes('旧文件夹/一.md'), JSON.stringify(Object.keys(sb.bundle?.files ?? {})));
+
+	// 把挡路的东西挪走，再应用同一份包：整棵搬过去
+	fs.rmSync(blocker);
+	await applyBundle({ settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror' });
+	checkTrue('改名失败：再应用一次能落地', fs.existsSync(path.join(s.b, '收纳/旧文件夹/一.md')), '');
+	const sa = await loadState(s.sta);
+	const sb2 = await loadState(s.stb);
+	check('改名失败：修好之后两边一致', compareStateId(sa.stateId, sb2.stateId), 'match');
 }
 
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);

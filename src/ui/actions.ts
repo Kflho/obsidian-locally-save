@@ -85,6 +85,20 @@ export async function exportBundlesNow(
 	options: { quiet?: boolean; silent?: boolean; defaultWhenOff?: boolean } = {},
 ): Promise<ExportRunResult | null> {
 	if (!plugin.isActive()) return null;
+	/**
+	 * **「仅拉」在这个交汇点上再拦一道**（不是只靠调用方各自记得）：
+	 * 这个方向一个包都不写 —— 启动 / 定时 / 保存后 / 「立即同步」/ 回礼都不写，
+	 * 手动「导出同步包…」是用户的明确动作，走的是另一条路（`exportBundleAction`）。
+	 *
+	 * 为什么要拦在这里：以前只在 `main.tickExport` 与 `syncNow` 里判，任何新入口
+	 * （命令、别的面板按钮）忘了判就会在"只收不发"的机器上写出一份包，
+	 * 下一轮 git 同步顺手把它推上去 —— 用户报过"回退了某一份完整副本之后，
+	 * 只同步没想导出，包却被上传了"。
+	 */
+	if (isReceiveOnly(plugin.settings)) {
+		plugin.log.debug(`${label}：仅拉方向，不写包`);
+		return { text: '仅拉：不导出包', wrote: false, advice: null, noChanges: true, fullWritten: false };
+	}
 	if (plugin.bundleBusy) {
 		if (!options.silent) new Notice('上一次留包还没跑完');
 		return null;

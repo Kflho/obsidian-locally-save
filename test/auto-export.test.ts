@@ -162,6 +162,21 @@ check('完整包数量没变', bundleFiles('full').length, fullCountBefore);
 checkTrue('changes 里有包', bundleFiles('changes').length >= 1, JSON.stringify(bundleFiles('changes')));
 check('silent 模式不弹通知（总结由 syncNow 说）', noticeLog.length, 0);
 
+// 6. **仅拉**：这个交汇点上也不写任何包 —— 用户报过的现场是"回退到某一份完整副本之后，
+//    只点了一下同步（没想导出），包却被写出来、下一轮 git 同步顺手推了上去"。
+//    方向是硬边界：所有自动留包入口都过这里，别指望每个调用方自己记得判。
+plugin.settings.gitEnabled = true;
+plugin.settings.syncDirection = 'download';
+plugin.settings.autoExportFull = false;
+plugin.settings.autoExportChanges = true;
+fs.writeFileSync(path.join(VAULT, 'notes', 'a.md'), '仅拉方向不该把这个改动导出去');
+const changesBeforeReceiveOnly = bundleFiles('changes');
+noticeLog.length = 0;
+const blocked = await exportBundlesNow(plugin, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+check('仅拉：一个包都不写', bundleFiles('changes'), changesBeforeReceiveOnly);
+checkTrue('仅拉：结果如实说"不导出"',
+	blocked?.wrote === false && (blocked?.text ?? '').includes('仅拉'), JSON.stringify(blocked));
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);
