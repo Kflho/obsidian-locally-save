@@ -322,6 +322,217 @@ async function scenario(name: string): Promise<{
 	check('漏掉中间包（目录）：两边状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
 }
 
+// ---------------------------------------------------------------- 累积更新包里的移动：旧路径又被建了出来
+//
+// 用户稳定复现的现场：改名之后旧文件夹留了个空壳（Obsidian / 用户手建都可能），
+// 更新包同时带着「移动 旧→新」和 `emptyDirs: 旧`。第一次应用：搬过去、再把空壳建回来，
+// 两边都在（这正是包说的那一点）。第二次再应用同一份累积包时，旧版本只看"源在 + 目标在"
+// 就报「本地目标已经存在」，整包拒绝 —— 而且之后的每一份累积包都会带着这条移动，
+// 那台机器就永远卡住了。移动的幂等判据必须是**这个源还是不是我记录里的那一份**。
+function trashHas(vault: string, content: string): boolean {
+	const root = path.join(vault, '.trash', 'locally-save');
+	const walk = (dir: string): boolean => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return false;
+		}
+		for (const entry of entries) {
+			const full = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (walk(full)) return true;
+				continue;
+			}
+			try {
+				if (fs.readFileSync(full, 'utf8') === content) return true;
+			} catch {
+				// 二进制 / 读不出：不是我们要找的那一份
+			}
+		}
+		return false;
+	};
+	return walk(root);
+}
+
+async function applyCatching(
+	vaultRoot: string,
+	stateFile: string,
+	file: string,
+	options: { alignToPeer?: boolean } = {},
+): Promise<{ error: string; deleted: number; moves: number }> {
+	try {
+		const applied = await applyBundle({
+			settings, log, vaultRoot, stateFile, file, strictness: 'mirror',
+			...(options.alignToPeer ? { alignToPeer: true } : {}),
+		});
+		return { error: '', deleted: applied.result.deleted, moves: applied.result.moved };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error), deleted: 0, moves: 0 };
+	}
+}
+
+// 旧路径空壳：同一份包应用两次、之后每一份累积包都能接
+{
+	const s = await scenario('leftover-empty');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	fs.mkdirSync(path.join(s.a, '旧文件夹')); // 改名时留下的空壳（Obsidian 有可能这样）
+	const first = await s.exportChanges();
+	check('旧路径空壳：包里带着一条目录移动', first.header?.moves?.length, 1);
+	checkTrue('旧路径空壳：旧路径也在空文件夹清单里（包说"它得存在"）',
+		(first.header?.emptyDirs ?? []).includes('旧文件夹'), JSON.stringify(first.header?.emptyDirs));
+
+	const one = await applyCatching(s.b, s.stb, first.file as string);
+	check('旧路径空壳：第一次应用正常', one.error, '');
+	checkTrue('旧路径空壳：第一次应用后新路径有内容', fs.existsSync(path.join(s.b, '新文件夹/一.md')), '');
+	checkTrue('旧路径空壳：第一次应用后旧路径空壳也在（包就是这么说的）',
+		fs.existsSync(path.join(s.b, '旧文件夹')), '');
+
+	const again = await applyCatching(s.b, s.stb, first.file as string);
+	check('旧路径空壳：同一份包第二次应用不再报「目标已经存在」', again.error, '');
+	check('旧路径空壳：第二次应用一个文件都不动', again.deleted, 0);
+	check('旧路径空壳：第二次应用不重复做移动', again.moves, 0);
+	checkTrue('旧路径空壳：第二次应用后两边目录都在',
+		fs.existsSync(path.join(s.b, '新文件夹/一.md')) && fs.existsSync(path.join(s.b, '旧文件夹')), '');
+
+	// 再来一份累积包（这条移动仍会带着）—— 旧版本在这一步开始整包拒绝
+	fs.writeFileSync(path.join(s.a, '新文件夹/二.md'), '二号又改了一次，长度不同');
+	const second = await s.exportChanges();
+	const next = await applyCatching(s.b, s.stb, second.file as string);
+	check('旧路径空壳：下一份累积包也能应用', next.error, '');
+	check('旧路径空壳：下一份累积包落地了内容',
+		fs.readFileSync(path.join(s.b, '新文件夹/二.md'), 'utf8'), '二号又改了一次，长度不同');
+	checkTrue('旧路径空壳：空壳还在（包里仍记着它）', fs.existsSync(path.join(s.b, '旧文件夹')), '');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('旧路径空壳：两次应用后状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// 旧路径被重新建出来、里面还有新笔记：那是新内容，别拿它去覆盖目标
+{
+	const s = await scenario('leftover-content');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	const first = await s.exportChanges();
+	check('旧路径新内容：第一次应用', (await applyCatching(s.b, s.stb, first.file as string)).error, '');
+
+	fs.mkdirSync(path.join(s.a, '旧文件夹'), { recursive: true });
+	fs.writeFileSync(path.join(s.a, '旧文件夹/新笔记.md'), '这是改名之后在旧名字下写的新笔记，长度不一样');
+	const second = await s.exportChanges();
+	const applied = await applyCatching(s.b, s.stb, second.file as string);
+	check('旧路径新内容：第二次应用不报错', applied.error, '');
+	check('旧路径新内容：新笔记落到旧路径',
+		fs.readFileSync(path.join(s.b, '旧文件夹/新笔记.md'), 'utf8'), '这是改名之后在旧名字下写的新笔记，长度不一样');
+	checkTrue('旧路径新内容：新路径的内容没被新笔记顶掉', fs.existsSync(path.join(s.b, '新文件夹/一.md')), '');
+	const again = await applyCatching(s.b, s.stb, second.file as string);
+	check('旧路径新内容：再应用一次也不报错', again.error, '');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('旧路径新内容：状态编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// 文件移动：同一份包应用两次，旧路径后来又被建了一个同名文件
+{
+	const s = await scenario('file-leftover');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹/一.md'), path.join(s.a, '旧文件夹/一-改名.md'));
+	const moved = await s.exportChanges();
+	const first = await applyCatching(s.b, s.stb, moved.file as string);
+	check('文件移动：第一次应用正常', first.error, '');
+	fs.writeFileSync(path.join(s.b, '旧文件夹/一.md'), '改名之后又在旧名字下写了一篇新的，长度不同');
+	const again = await applyCatching(s.b, s.stb, moved.file as string);
+	check('文件移动：旧路径又被建出来也不报「目标已经存在」', again.error, '');
+	check('文件移动：目标那份没被动', fs.readFileSync(path.join(s.b, '旧文件夹/一-改名.md'), 'utf8'), '一号内容');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('文件移动：应用完两边状态一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// 真冲突（源还是我记录里的那一份、目标也占着）：合并档仍然拒绝，不硬搬
+{
+	const s = await scenario('conflict-target');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	const moved = await s.exportChanges();
+	fs.mkdirSync(path.join(s.b, '新文件夹'), { recursive: true });
+	fs.writeFileSync(path.join(s.b, '新文件夹/我自己的.md'), 'B 自己建的同名文件夹');
+	let message = '';
+	try {
+		await planBundleApply({ settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string });
+	} catch (error) {
+		message = error instanceof Error ? error.message : String(error);
+	}
+	checkTrue('真冲突：合并档拒绝并说清原因', message.includes('目标已经存在'), message || '（没有拒绝）');
+	checkTrue('真冲突：B 自己那份一个字节没动', fs.existsSync(path.join(s.b, '新文件夹/我自己的.md')), '');
+}
+
+// 严格档：目标已存在时以包为准 —— 目标那份先进回收目录，再整棵搬过去（这是"卡住的机器"的出路）
+{
+	const s = await scenario('replace-target');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	const moved = await s.exportChanges();
+	fs.mkdirSync(path.join(s.b, '新文件夹'), { recursive: true });
+	fs.writeFileSync(path.join(s.b, '新文件夹/一.md'), 'B 自己写的一号内容，长度不同');
+	const applied = await applyBundle({
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
+	});
+	check('严格档：认出来一处"目标已存在"的移动', applied.plan.report.moveReplacements, 1);
+	check('严格档：包里的内容占了新路径',
+		fs.readFileSync(path.join(s.b, '新文件夹/一.md'), 'utf8'), '一号内容');
+	checkTrue('严格档：B 自己那份进了回收目录', trashHas(s.b, 'B 自己写的一号内容，长度不同'), '回收目录里找不到');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('严格档：应用完与包一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// 严格档 replace + 目标里有个改过的条目：rename 会把目标换成源那一份，
+// 所以条目必须**补写一遍**（否则状态编号对不上 —— 真机恢复时最后差一个文件就是这个）
+{
+	const s = await scenario('replace-entry');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	fs.writeFileSync(path.join(s.a, '新文件夹/二.md'), '二号内容改过了，长度也不同');
+	const moved = await s.exportChanges();
+	check('replace+条目：包里带着改过的那个文件', moved.entryCount, 1);
+	// B 在目标位置已经有一份**内容与条目一致**的文件：计划阶段会跳过写入
+	fs.mkdirSync(path.join(s.b, '新文件夹'), { recursive: true });
+	fs.writeFileSync(path.join(s.b, '新文件夹/二.md'), '二号内容改过了，长度也不同');
+	const applied = await applyBundle({
+		settings, log, vaultRoot: s.b, stateFile: s.stb, file: moved.file as string, strictness: 'mirror',
+	});
+	check('replace+条目：认出来一处替换', applied.plan.report.moveReplacements, 1);
+	check('replace+条目：目标里的条目被补写成包里那一版',
+		fs.readFileSync(path.join(s.b, '新文件夹/二.md'), 'utf8'), '二号内容改过了，长度也不同');
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('replace+条目：应用完与包一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
+// 只拉（alignToPeer）：同一份移动包连应用两次，第二次必须是彻底的空操作
+// （旧版本会从基准完整副本把旧路径"恢复"回来、又删掉新路径的文件）
+{
+	const s = await scenario('align-twice');
+	await s.prepare();
+	fs.renameSync(path.join(s.a, '旧文件夹'), path.join(s.a, '新文件夹'));
+	const moved = await s.exportChanges();
+	const first = await applyCatching(s.b, s.stb, moved.file as string, { alignToPeer: true });
+	check('只拉移动：第一次应用正常', first.error, '');
+	const second = await applyCatching(s.b, s.stb, moved.file as string, { alignToPeer: true });
+	check('只拉移动：第二次应用一个文件都不动', second.deleted, 0);
+	check('只拉移动：第二次应用不重复做移动', second.moves, 0);
+	checkTrue('只拉移动：新路径四个文件都在',
+		fs.existsSync(path.join(s.b, '新文件夹/一.md'))
+		&& fs.existsSync(path.join(s.b, '新文件夹/二.md'))
+		&& fs.existsSync(path.join(s.b, '新文件夹/子目录/三.md')), '');
+	checkTrue('只拉移动：旧路径没被"恢复"回来', !fs.existsSync(path.join(s.b, '旧文件夹')), '');
+	check('只拉移动：没有任何东西被挪进回收目录', trashHas(s.b, '一号内容'), false);
+	const sa = await loadState(s.sta);
+	const sb = await loadState(s.stb);
+	check('只拉移动：两次应用后编号一致', compareStateId(sa.stateId, sb.stateId), 'match');
+}
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures) console.log(`\n❌ ${message}`);
 if (failures.length > 0) process.exitCode = 1;

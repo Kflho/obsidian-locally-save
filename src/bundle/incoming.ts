@@ -228,6 +228,7 @@ export async function handleIncoming(
 			if (plan.foldersToRemove.length > 0) parts.push(`删 ${plan.foldersToRemove.length} 个空文件夹`);
 			if (report.conflicts > 0) parts.push(`${report.conflicts} 处两边都改过`);
 			if (report.forcedOverwrites > 0) parts.push(`覆盖 ${report.forcedOverwrites} 处本地改动`);
+			if (report.moveReplacements > 0) parts.push(`${report.moveReplacements} 处移动的目标位置已经有东西`);
 			const why = parts.length > 0 ? parts.join('、') : '会动到本地已有的东西';
 			await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
 			return { kind: 'needs-review', file: name, why };

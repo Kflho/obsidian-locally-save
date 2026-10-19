@@ -674,6 +674,12 @@ export class ApplyBundleModal extends Modal {
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
 		if (report.moves > 0) add(`包里带了 ${report.moves} 处移动/改名`);
+		// 累积包里同一条移动会一直在：上次已经搬过、旧路径又被建出来时，目标那份要先进回收目录。
+		// **必须当面说** —— 这是"会动到本地已有的东西"里最容易被忽略的一种。
+		if (report.moveReplacements > 0) {
+			add(`其中 ${report.moveReplacements} 处移动的目标位置已经有东西：`
+				+ '动手时先把那份挪进回收目录的「冲突」，再把包里的那份搬过去');
+		}
 		// 文件夹也要说清楚：只报文件的话，用户永远不知道目录这边差多少
 		add(`文件夹：包里 ${report.bundleDirCount} 个 · 本地 ${report.localDirCount} 个`
 			+ ` · 两边都有 ${report.foldersInSync} 个`

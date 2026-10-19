@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { readBundleInfo, readBundleInfoSync, verifyBundle } from './format';
-import type { BundleEntry, BundleHeader, BundleInfo } from './format';
+import type { BundleEntry, BundleHeader, BundleInfo, BundleMove } from './format';
 import { baselineOfBundle, baselineOfFullBundle, compareBaseline, listingHashOfFiles } from './baseline';
 import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
@@ -285,6 +285,14 @@ export interface ApplyReport {
 	syncPercent: number;
 	/** 会认出来的移动（改名/挪目录） */
 	moves: number;
+	/**
+	 * 其中"目标位置已经有东西"的移动（严格档会先把那份挪进回收目录的「冲突」再搬）。
+	 *
+	 * 为什么会发生：更新包是**累积**的，同一条移动会一直带在包里；接收方上次已经搬过、
+	 * 后来旧路径又被重新建了出来（改名时旧文件夹留成空壳、用户手建、`emptyDirs` 补建都算）。
+	 * 这时"源在 + 目标在"不是冲突，而是**这条移动已经做过**——见 `moveSpecs` 那段。
+	 */
+	moveReplacements: number;
 	/** 这次要在仓库里补建几个文件夹（包里有的目录，本地还没有） */
 	foldersToCreate: number;
 	/** 这次要删掉几个本地空文件夹（包里没有它） */
@@ -317,8 +325,14 @@ export type ApplyAction =
 	| { kind: 'delete'; path: string }
 	/** 两边都改过：留两份，新的占原名 */
 	| { kind: 'conflict'; path: string; entry: BundleEntry; winner: 'local' | 'remote' }
-	/** 对方改名/挪了位置：本地跟着改名，不重传内容 */
-	| { kind: 'rename'; path: string; from: string; dir?: boolean }
+	/**
+	 * 对方改名/挪了位置：本地跟着改名，不重传内容。
+	 *
+	 * `replace` ＝ 目标位置已经有东西（多半是**同一份累积包里这条移动早就做过**、
+	 * 旧路径又被重新建了出来）。严格档下以包为准：先把目标那份挪进回收目录的「冲突」，
+	 * 再把源搬过去 —— 这是"目标已存在"唯一会被自动执行的那条路（见 `moveSpecs` 那段）。
+	 */
+	| { kind: 'rename'; path: string; from: string; dir?: boolean; replace?: boolean }
 	/**
 	 * 本机误改、但**这个包没点名**的路径：从起点那份完整副本读回原版。
 	 *
@@ -406,6 +420,7 @@ export function isDestructivePlan(plan: ApplyPlan): boolean {
 	return plan.actions.some(action => action.kind === 'delete' || action.kind === 'restore')
 		|| plan.foldersToRemove.length > 0
 		|| plan.report.conflicts > 0
+		|| plan.report.moveReplacements > 0
 		|| plan.report.forcedOverwrites > 0;
 }
 
@@ -663,10 +678,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
 	// （包说"我以为你原来是这样"，对一台新机器来说这就是它的基准）
-	// 对齐到对面时，目标是"我站的完整副本 ＋ 这个包"：底稿必须是**基准**，
-	// 不能是"我现在的样子"（后者会把本机误改当成目标的一部分，永远撤不掉）。
+	//
+	// **对齐到对面（只拉）也用这一份**，不能用"我站的那份完整副本"（`fullFiles`）：
+	// 更新包是累积的 —— 我可能已经应用过同一份基准上的上一份更新包，内容早就往前走了，
+	// 而 `fullFiles` 停在那份完整副本上。拿它当底，上几份包带来的东西（尤其是**移动过去的**
+	// 那些文件：包里只有一条 `move`，不带内容）会被当成"我这边多出来的"挪进回收目录，
+	// 下一次再报"跟对方还差一点"。`fullFiles` 只在"恢复本机误改"那一步当**原版参考**用。
 	const baseline: Record<string, FileRecord> = {
-		...((alignToPeer ? state.bundle?.fullFiles : state.bundle?.files) ?? {}),
+		...(state.bundle?.files ?? {}),
 	};
 	/**
 	 * 包**自己带的 base 优先**（它比本机那份记录更贴近事实）。
@@ -718,6 +737,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let historyMatches = 0;
 	let deletes = 0;
 	let moves = 0;
+	/** 目标位置已经有东西的移动：严格档先把它挪进回收目录的「冲突」再搬 */
+	let moveReplacements = 0;
 	/** 本地多出来、这次要删的（对方删过的，或镜像档下我独有的） */
 	let extraDeletes = 0;
 	/** 严格档下"本地多出来、要挪走"的文件数（见报告里的 `localExtras`） */
@@ -928,14 +949,16 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 */
 	const contentBefore: Record<string, FileRecord> = {
 		/**
-		 * **对齐到对方**时，底稿换成"我站的那份完整副本"（`anchor`）：
-		 * 目标状态 ＝ 基准 ＋ 包里的条目 − 点名删除，正好是对方那一点；
-		 * 本机改过的、多出来的文件都不在目标里 → 严格档会把它们挪进回收目录。
+		 * **一律用"我这边内容的样子"**（`state.bundle.files`），包括「对齐到对面」（只拉）：
+		 * 更新包是累积的，同一份基准上的上一份包带来的东西已经在我这份记录里；
+		 * 拿"我站的那份完整副本"顶替会把它整片当成"我这边改过的 / 多出来的" ——
+		 * 移动过去的文件尤其明显：包里只有一条 `move`、不带内容，记录一换就被删掉，
+		 * 下一轮再报"目标已经存在 / 跟对方还差一点"（真机复现过）。
 		 *
-		 * 平时（互相应用）仍然用"我这边内容的样子"：对方只握着改动的一半，
-		 * 我这一半必须接上，不能拿旧基准顶替（见下面那段注释）。
+		 * 只拉那台真正要额外做的是**恢复本机误改**（下面 `restore` 那一段）：
+		 * 目标点 ＝ 这份记录 ＋ 包里的条目 − 点名删除，对不上基准的部分从完整副本恢复。
 		 */
-		...((alignToPeer && anchor ? anchor : (state.bundle?.files ?? {}))),
+		...(state.bundle?.files ?? {}),
 	};
 	let pendingChanges = 0;
 	let pendingDeletes = 0;
@@ -1044,6 +1067,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 自动收包那条路会把它当成"要人看"，不会动手。
 	 */
 	const moveActions: ApplyAction[] = [];
+	/** 这一趟被 replace 的移动目标（那份旧的被挪进回收目录了）：它们底下的条目必须重写一遍 */
+	const replacedTargets: { path: string; dir: boolean }[] = [];
 	const caseOnly = (a: string, b: string): boolean => a !== b && a.toLowerCase() === b.toLowerCase();
 	const moveSpecs = header.moves ?? [];
 	/**
@@ -1073,6 +1098,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (move.from === move.to || move.to.startsWith(`${move.from}/`)) {
 			throw new Error(`包里的移动操作不合法：${move.from} → ${move.to}`);
 		}
+		/**
+		 * 磁盘上这份是不是包里那条移动记着的版本（导出端对文件移动会带 `size` / `mtime`）。
+		 * 用来区分"源还是要搬的那一份"与"旧路径后来又被建了一个新的"。
+		 */
+		const sameMoveRecord = (record: FileRecord, spec: BundleMove): boolean => spec.size !== undefined
+			&& record.size === spec.size
+			&& (spec.mtime === undefined || Math.abs(record.mtime - spec.mtime) <= TOLERANCE);
+
 		if (move.kind === 'file') {
 			const disk = plannedFiles.get(move.from);
 			const targetRecord = plannedFiles.get(move.to);
@@ -1104,21 +1137,53 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			 * 拿包自己带的 `size` / `mtime` 核对（导出端记的就是源该有的那一版）。
 			 */
 			const producedHere = !local.files.has(move.from) && movedTo.has(move.from);
-			if (base) {
-				if (!sameRecord(disk, base, TOLERANCE)) {
-					throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地这份源文件已经改过：先处理冲突，或让对方重发带内容的包`);
+			/** 磁盘上这份就是包里记着的那一版（文件移动带 `size` / `mtime`） */
+			const sameAsMove = sameMoveRecord(disk, move);
+			const caseRename = caseOnly(move.from, move.to);
+			const targetTaken = !caseRename && await pathExists(toAbs);
+			/**
+			 * **源不是我记录里的那一份**、也不像包记录的版本 → 这个路径是后来新建的
+			 * （累积包里同一条移动会一直带着，接收方早搬过、又在旧名字下写了新东西）。
+			 * - 目标已经在 → 这条移动早做完了：跳过（新内容是条目 / 完整包的事）；
+			 * - 目标也不在 → 搬不了：包里只有一条改名、没有内容，说不清该把谁搬过去。
+			 */
+			if (!base && !producedHere && !sameAsMove) {
+				if (targetTaken) {
+					// 只补目标那份的记录（源可能是条目带来的新内容，别从 deliveredFiles 里划掉）
+					if (targetRecord) deliveredFiles[move.to] = { size: targetRecord.size, mtime: targetRecord.mtime };
+					continue;
 				}
-			} else if (!producedHere) {
-				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地没有源文件：让对方重发一份带内容的包`);
+				throw new Error(
+					`包里要把 ${move.from} 改名成 ${move.to}，但本地这个路径不是包里记着的那一份`
+					+ '（后来新建过），目标也不在。更新包只带改名、不带内容：'
+					+ '先把本机恢复到基准（重新应用那份完整副本）再应用，或让对方发一份完整副本',
+				);
 			}
-			if (move.size !== undefined
-				&& (disk.size !== move.size || (move.mtime !== undefined && Math.abs(disk.mtime - move.mtime) > TOLERANCE))) {
+			if (base && !sameRecord(disk, base, TOLERANCE)) {
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地这份源文件已经改过：先处理冲突，或让对方重发带内容的包`);
+			}
+			if (move.size !== undefined && !sameAsMove) {
 				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地源文件与包记录的版本不一致`);
 			}
-			// 目标占了位置：磁盘上本来就有，或者是这一趟**别的**移动刚送到的（同一个目标两条移动）
-			if (!caseOnly(move.from, move.to)
-				&& (await pathExists(toAbs) || (movedTo.has(move.to) && !local.files.has(move.to)))) {
+			// 这一趟**别的**移动刚送到的目标（同一个目标两条移动）：包里自相矛盾，拒绝
+			if (movedTo.has(move.to) && !local.files.has(move.to)) {
 				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它挪走`);
+			}
+			/**
+			 * **源和目标同时在，不一定是冲突**：累积更新包里同一条移动会一直带着，
+			 * 接收方上一份包里已经搬过、旧路径后来又新建了（用户报的
+			 * 「改名之后又在旧名字下写了一篇新笔记」）。上面的"源不是记录里那一份"
+			 * 已经跳过了新建的源；走到这里说明源就是要搬的那一份，目标真占着 →
+			 * 严格档以包为准：把目标那份挪进回收目录的「冲突」再搬；合并档拒绝。
+			 */
+			let replace = false;
+			if (targetTaken) {
+				if (!strict) {
+					throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它挪走`);
+				}
+				replace = true;
+				moveReplacements++;
+				replacedTargets.push({ path: move.to, dir: false });
 			}
 			const record = deliveredFiles[move.from];
 			if (record) {
@@ -1128,7 +1193,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			plannedFiles.delete(move.from);
 			plannedFiles.set(move.to, { size: disk.size, mtime: disk.mtime });
 			movedTo.add(move.to);
-			moveActions.push({ kind: 'rename', path: move.to, from: move.from });
+			moveActions.push({
+				kind: 'rename',
+				path: move.to,
+				from: move.from,
+				...(replace ? { replace: true } : {}),
+			});
 			moves++;
 			continue;
 		}
@@ -1162,9 +1232,17 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (!sourceDir) {
 			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有这个文件夹：让对方重发一份带内容的包`);
 		}
-		if (!caseOnly(move.from, move.to) && targetDir) {
-			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它挪走`);
-		}
+		/** 我这边的内容记录里，这个源目录下原来有哪些文件 */
+		const recordedUnder = Object.keys(contentBefore).filter(file => file.startsWith(fromPrefix));
+		/**
+		 * 源里的文件**一条都不在我这边的记录里** → 这个源是后来新建的（新空文件夹 / 新笔记），
+		 * 不是这条移动要搬的那棵树。目标在就说明这条移动早做过了：跳过，别拿新内容去覆盖目标。
+		 * （源目录是空的也算"记录里没有这棵树"，但记录里还记着它原来的文件时不算 ——
+		 * 那说明源被删空了，搬不动，要走下面的报错。）
+		 */
+		const sourceIsRecreated = recordedUnder.length === 0
+			&& sourceUnder.every(file => contentBefore[file] === undefined);
+		if (targetDir && sourceIsRecreated) continue;
 		if (sourceUnder.length === 0) {
 			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有它下面的文件`);
 		}
@@ -1181,6 +1259,34 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				throw new Error(`包里的文件夹移动 ${move.from} → ${move.to} 做不了：${file} 在本地被改过或不见了`);
 			}
 		}
+		/**
+		 * 目标已经存在：累积包里这条移动早做过了，但旧路径还在（上次搬完又建出来的空壳 /
+		 * 上一次"只搬了一半"留下的现场）。严格档以包为准 —— 先核对"这条移动该有的东西都在"，
+		 * 再把目标挪进回收目录的「冲突」、整棵搬过去。合并档仍拒绝，让人自己看。
+		 */
+		let replaceDir = false;
+		if (targetDir && !caseOnly(move.from, move.to)) {
+			if (!strict) {
+				throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它挪走`);
+			}
+			const expected = new Set<string>(recordedUnder);
+			for (const file of Object.keys(state.bundle?.fullFiles ?? {})) {
+				if (file.startsWith(fromPrefix)) expected.add(file);
+			}
+			for (const file of expected) {
+				if (plannedFiles.has(file)) continue; // 源里还在 → 搬得过去
+				const toPath = toPrefix + file.slice(fromPrefix.length);
+				// 源里已经没了，但包里带了这一版的条目 → 搬完会被写回来，也算齐
+				if (entriesByPath.has(toPath)) continue;
+				throw new Error(
+					`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地源里缺了 ${file}`
+					+ '（目标里也没有这一版）：先把本机恢复到基准（重新应用那份完整副本），再应用这个包',
+				);
+			}
+			replaceDir = true;
+			moveReplacements++;
+			replacedTargets.push({ path: move.to, dir: true });
+		}
 		for (const file of sourceUnder) {
 			const toPath = toPrefix + file.slice(fromPrefix.length);
 			const disk = plannedFiles.get(file);
@@ -1195,8 +1301,55 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				deliveredFiles[toPath] = record;
 			}
 		}
-		moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true });
+		moveActions.push({
+			kind: 'rename',
+			path: move.to,
+			from: move.from,
+			dir: true,
+			...(replaceDir ? { replace: true } : {}),
+		});
 		moves++;
+	}
+	/**
+	 * **被 replace 掉的目标，底下的条目要重写一遍。**
+	 *
+	 * 计划阶段算条目的时候，目标还站在"上一趟搬过去的那一版"上，跟条目一比一样就跳过了写入；
+	 * 可 `replace` 的 rename 会把目标整份换成**源**那一份（源里可能是基准版本 / 旧版本）。
+	 * 不补写的话，应用完目标那里是旧内容 → 状态编号对不上（真机复现：恢复完最后差一个文件）。
+	 * 内容一样时多写一次也无害（这个操作本来就要求幂等）。
+	 */
+	if (replacedTargets.length > 0) {
+		/**
+		 * 先划掉"目标那份要删"的动作：它已经被 replace 整个挪进回收目录了。
+		 * 不划掉的话，rename 之后那些动作会**删到刚搬过来的文件**上
+		 * （真机复现：目标已存在 → 替换 → 新路径的文件被自己的删除动作删掉）。
+		 */
+		const underReplaced = (file: string): boolean => replacedTargets.some(item => item.dir
+			? file === item.path || file.startsWith(`${item.path}/`)
+			: file === item.path);
+		let removed = 0;
+		for (let index = actions.length - 1; index >= 0; index--) {
+			const action = actions[index]!;
+			if (action.kind !== 'delete' || !underReplaced(action.path)) continue;
+			// 包里**点名要删**的照删（它可能刚从源那边搬过来）；只划掉"本地多出来"的那一批
+			if (localDeleted.has(action.path)) continue;
+			actions.splice(index, 1);
+			removed++;
+		}
+		deletes -= removed;
+		localExtras -= removed;
+
+		const written = new Set(actions.filter(action => action.kind === 'write').map(action => action.path));
+		for (const entry of header.entries) {
+			const under = replacedTargets.some(item => item.dir
+				? entry.path === item.path || entry.path.startsWith(`${item.path}/`)
+				: entry.path === item.path);
+			if (!under || written.has(entry.path)) continue;
+			written.add(entry.path);
+			if (local.files.has(entry.path)) overwrites++;
+			else adds++;
+			actions.push({ kind: 'write', path: entry.path, entry });
+		}
 	}
 	actions.unshift(...moveActions);
 	const deliveredDirs = new Set<string>(header.emptyDirs ?? []);
@@ -1216,14 +1369,20 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const restoreActions: ApplyAction[] = [];
 	if (alignToPeer && anchor) {
 		const touched = new Set<string>([...entriesByPath.keys(), ...localDeleted]);
-		for (const move of header.moves ?? []) {
-			touched.add(move.from);
-			touched.add(move.to);
-		}
+		/**
+		 * **移动过的路径整棵子树都不恢复**：目录移动只点了一条 `move`，
+		 * 它底下的文件（`旧/一.md` 那些）不在 `touched` 里 —— 只按精确路径排除的话，
+		 * 已经搬到新位置的文件会被判成"本机误改"，从基准完整副本恢复回**旧路径**，
+		 * 新路径那份又被当成"本地多出来的"挪走。第二步（再来一份累积包）就会
+		 * 旧路径、新路径同时在 → 报"本地目标已经存在"（真机复现的 bug）。
+		 */
+		const underMove = (file: string): boolean => (header.moves ?? []).some(move =>
+			file === move.from || file === move.to
+			|| file.startsWith(`${move.from}/`) || file.startsWith(`${move.to}/`));
 		const candidates: { path: string; record: FileRecord }[] = [];
 		for (const [file, record] of Object.entries(anchor)) {
 			// 包点名的（条目 / 删除 / 移动）交给原来的动作；这里只管"谁都没提、本机却改了"的
-			if (touched.has(file)) continue;
+			if (touched.has(file) || underMove(file)) continue;
 			// 目标那一点上已经没有它（被删 / 被移走）→ 不是恢复的事
 			if (!deliveredFiles[file]) continue;
 			const here = local.files.get(file);
@@ -1361,6 +1520,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		pendingChanges: anchor ? pendingChanges : null,
 		pendingDeletes: anchor ? pendingDeletes : null,
 		moves,
+		moveReplacements,
 		// 本地还没有的目录都算"要补建"：有文件的那些会随文件写入顺带建出来，
 		// 空文件夹靠执行阶段显式建（`header.emptyDirs`）
 		foldersToCreate: [...bundleDirs].filter(dir => !local.dirs.has(dir)).length,
@@ -1652,6 +1812,21 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 				case 'rename': {
 					const from = toNative(options.vaultRoot, action.from);
 					await ensureDir(path.dirname(target));
+					/**
+					 * 目标位置已经有东西（严格档的"以包为准"）：先把它挪进回收目录的「冲突」，
+					 * 再把源搬过去。两份都在，捞得回来；不这么做，`rename` 在 Windows 上会
+					 * 直接失败（"目标已存在"），整包停在那儿、每轮重试都过不去。
+					 */
+					if (action.replace && await pathExists(target)) {
+						await moveToTrash(
+							target,
+							toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`),
+							action.path,
+							stamp,
+						);
+						result.conflicts++;
+						result.conflictCopies.push(`.trash/locally-save/${CONFLICT_TRASH_DIR}/${stamp}/${action.path}`);
+					}
 					if (action.dir) {
 						// 目录移动：整棵 rename。跨盘时不能退回 copyFile（那只能复制文件），明确报错
 						try {

@@ -297,6 +297,51 @@ async function main(): Promise<void> {
 	const after = await loadState(STATE_RECV2);
 	check('基准接回恢复包的起点（F0），不是继续站在 F1 上', after.bundle?.fullHash, f0.header?.baselineHash);
 
+	// ---------------------------------------------------------------- 6. 只拉：删掉的文件不能被"恢复"回来
+	// 旧版本的对齐底稿用的是"我站的那份完整副本"（`fullFiles`）：第二份累积包应用时，
+	// 那个已经被删掉的文件还在完整副本的清单里 → restore 会把它从基准包读回来（复活）。
+	// 底稿必须是"我这边内容的样子"（`state.bundle.files`），完整副本只当恢复误改的原版。
+	const SEND4 = path.join(ROOT, 'send4');
+	const RECV4 = path.join(ROOT, 'recv4');
+	const OUT4 = path.join(ROOT, 'bundles4');
+	const STATE_SEND4 = path.join(ROOT, 'state-send4.json');
+	const STATE_RECV4 = path.join(ROOT, 'state-recv4.json');
+	for (const dir of [SEND4, RECV4, OUT4]) fs.mkdirSync(dir, { recursive: true });
+	for (const dir of [SEND4, RECV4]) {
+		write(dir, 'n/a.md', 'F0-A');
+		write(dir, 'n/b.md', 'F0-B');
+	}
+	const base = await exportBundle({
+		settings: settings(), log, vaultRoot: SEND4, vaultName: '删除机器', stateFile: STATE_SEND4, mode: 'full', outDir: OUT4,
+	});
+	if (!base.file) throw new Error('删除场景的完整包没导出来');
+	await applyBundle({
+		settings: settings(), log, vaultRoot: RECV4, stateFile: STATE_RECV4, file: base.file,
+	});
+	fs.rmSync(path.join(SEND4, 'n/a.md'));
+	write(SEND4, 'n/b.md', 'F0-B 改长了一点');
+	const del1 = await exportBundle({
+		settings: settings(), log, vaultRoot: SEND4, vaultName: '删除机器', stateFile: STATE_SEND4, mode: 'changes', outDir: OUT4,
+	});
+	if (!del1.file) throw new Error('删除场景的第一份更新包没导出来');
+	const recvOptions = (file: string): ApplyOptions => ({
+		settings: settings(), log, vaultRoot: RECV4, stateFile: STATE_RECV4, file,
+		bundleDir: OUT4, strictness: 'mirror', alignToPeer: true,
+	});
+	await applyBundle(recvOptions(del1.file));
+	check('只拉删除：第一份包把 a 删掉了', read(RECV4, 'n/a.md'), null);
+	check('只拉删除：b 落到了新版本', read(RECV4, 'n/b.md'), 'F0-B 改长了一点');
+
+	// 长度要拉开：同长度 + 同一秒内会被 2 秒容差当成"没改过"（跟前面的用例同一个坑）
+	write(SEND4, 'n/b.md', 'F0-B 又长了一大截，这次一定比上一版长');
+	const del2 = await exportBundle({
+		settings: settings(), log, vaultRoot: SEND4, vaultName: '删除机器', stateFile: STATE_SEND4, mode: 'changes', outDir: OUT4,
+	});
+	if (!del2.file) throw new Error('删除场景的第二份更新包没导出来');
+	const second = await applyBundle(recvOptions(del2.file));
+	check('只拉删除：第二份包应用后 a 仍然不在', read(RECV4, 'n/a.md'), null);
+	check('只拉删除：应用完与对面一致', second.result.stateIdCompare, 'match');
+
 	console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 	for (const message of failures.slice(0, 10)) console.log(`\n❌ ${message}`);
 	if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);
