@@ -457,7 +457,7 @@ async function main(): Promise<void> {
 		const updV = await exportV('changes');
 		// 本机把要搬的那个源文件改过了 → 计划阶段会拒绝（"在本地被改过"）
 		write(RECV_V, '旧/一.md', 'B 自己改过的内容，长度不同');
-		const candidateV = (await pickIncoming(await listBundles(OUT_V), await loadState(STATE_RECV_V)))[0];
+		const candidateV = pickIncoming(await listBundles(OUT_V), await loadState(STATE_RECV_V))[0];
 		checkTrue('仅拉兜底：挑到了更新包', candidateV !== undefined, '没有候选包');
 		const outcomeV = await handleIncoming(applyV(updV.file as string), candidateV!, DOWNLOAD_POLICY);
 		check('仅拉兜底：应用成功（不是 failed）', outcomeV.kind, 'applied');
