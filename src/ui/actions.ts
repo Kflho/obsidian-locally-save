@@ -580,6 +580,8 @@ function applyOptionsFor(plugin: LocallySavePlugin, file: string): ApplyOptions 
 		file,
 		configDir: plugin.configDir(),
 		bundleDir: bundleBaseDir(plugin.settings),
+		// 「仅拉」没有要回传的那一半：报告里记 0，别挂一笔永远发不出去的欠账
+		receiveOnly: isReceiveOnly(plugin.settings),
 		// 自动收包也要有进度（不然大包应用时界面像卡住）
 		onProgress: (done, total, path) => plugin.reportProgress({ done, total, path, label: '应用中' }),
 	};
@@ -761,6 +763,8 @@ async function reportIncomingSweep(
 		const parts = [`写入 ${item.written}`];
 		if (item.deleted > 0) parts.push(`删除 ${item.deleted}`);
 		if (item.restored > 0) parts.push(`恢复误改 ${item.restored}`);
+		// 兜底走过一趟：本机被改乱时先回退到基准再应用，用户要知道仓库被整体对齐过
+		if (item.recovered) parts.push('（第一遍没对上 → 强制回退到基准再应用）');
 		const tail = item.stateIdCompare === 'match'
 			? ''
 			: item.pending > 0

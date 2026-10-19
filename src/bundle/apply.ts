@@ -150,6 +150,16 @@ export interface ApplyOptions {
 	 * 平时的应用**不要**开它 —— 默认语义是"我的内容 ＋ 对方的改动"，那才是互相应用。
 	 */
 	alignToPeer?: boolean;
+	/**
+	 * 这台机器是**「仅拉」**（只收不发）：本机没有"要回传的那一半"。
+	 *
+	 * 为什么不能只靠 `alignToPeer`：完整副本走的是完全镜像，那条路本来就**不**开 `alignToPeer`
+	 * （它用不到"从基准恢复误改"），可「仅拉」的方向对完整副本同样成立 ——
+	 * 报告里的 `pendingChanges` / `pendingDeletes` 要记 0，界面才不会说
+	 * "你这边还有 N 个改动没发出去"、`state.pendingReturn` 也不会挂一笔永远发不出去的账。
+	 * 应用前"把我这一半存成包"那一步同理（`shouldParkLocalChanges`）。
+	 */
+	receiveOnly?: boolean;
 	/** 本次临时覆盖"删不删多余文件"；只有 `normal` 那条路会用到 */
 	propagateDeletions?: boolean;
 	/**
@@ -441,6 +451,22 @@ export function isDestructivePlan(plan: ApplyPlan): boolean {
 		|| plan.report.forcedOverwrites > 0;
 }
 
+/**
+ * 这次应用之前要不要"先把本机改动存成包"（`parkLocalChangesFor`）。
+ *
+ * 三个条件缺一不可：
+ * - **严格档**：只有它会覆盖 / 挪走本机的东西，存一份才有意义；
+ * - **不是对齐到对面**：目标就是对方那一点，本机误改会从基准恢复（`restore`），
+ *   不是要回传的那一半；
+ * - **不是「仅拉」**：只收不发的机器一个包都不写。完整副本走完全镜像、`alignToPeer`
+ *   本来就是 false —— 光靠它拦不住，用户报的现场是"回退到第 112 代完整副本，
+ *   只同步了一下，却冒出一个包被 git 推了上去"。
+ */
+export function shouldParkLocalChanges(plan: ApplyPlan, receiveOnly: boolean): boolean {
+	const strict = plan.report.strictness === 'mirror' || plan.report.strictness === 'bundle-wins';
+	return strict && !plan.alignToPeer && !receiveOnly;
+}
+
 export interface ApplyResult {
 	written: number;
 	skipped: number;
@@ -468,6 +494,25 @@ export interface ApplyResult {
 	 * `unknown` ＝ 对方那个包没记编号（旧版本导的）。
 	 */
 	stateIdCompare: StateIdCompare;
+	/**
+	 * **这一趟"动手的路径"到底落成了没有**（`collectApplyProblems` 逐条核对）：
+	 * 写 / 改名 / 删 / 补建的空文件夹。`ok === false` 表示计划说会到位的没到位 ——
+	 * 调用方据此走 `recoverToBaselineAndApply`（强制回退到基准再应用一遍）。
+	 *
+	 * **本地多出来的文件不算问题**：那是"我这一半"，本来就该由下一次导出带回去。
+	 */
+	effects?: { ok: boolean; problems: string[] };
+	/**
+	 * **应用完对不上 → 强制回退到基准再应用**那一步的结论（没走这条兜底就是 undefined）。
+	 *
+	 * 用户要的兜底：有基准包 + 更新包，信息就是全的，"不管怎么样都能成功"。
+	 * `matched` 为 false 说明连兜底都没对上（那种情况要看 `problems` / `failed`）。
+	 */
+	recovered?: {
+		baselineFile: string;
+		baselineGeneration: number | null;
+		matched: boolean;
+	};
 }
 
 /** 本地这份是不是"对方发过的中间版本"（跳过了一两个包，手里停在这一版） */
@@ -1030,8 +1075,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	/**
 	 * 对齐到对面时**没有"我这一半"要回传**：本机跟目标不一样的改动，这一趟要么被包覆盖、
 	 * 要么从基准恢复（下面的 `restore`）—— 它们不是要发给对方的东西。
+	 *
+	 * **「仅拉」的完整副本也一样**（它走完全镜像，`alignToPeer` 是 false）：那个方向
+	 * 本来就不写包，报告里再写"你这边还有 N 个改动没发出去"只会让人以为漏发了，
+	 * `state.pendingReturn` 也会挂一笔永远发不出去的账（用户报的：回退某份完整副本之后
+	 * 只同步了一下，却冒出一个要上传的包）。
 	 */
-	if (alignToPeer) {
+	if (alignToPeer || options.receiveOnly === true) {
 		pendingChanges = 0;
 		pendingDeletes = 0;
 	}
@@ -1374,6 +1424,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				movedTo.add(toPath);
 			}
 			relocatePoint();
+			/**
+			 * **源里少了"点上该有的文件"就停下**：包里只有改名、没有内容，
+			 * 就这么整棵搬过去会少一个文件、编号永远对不上。
+			 * 调用方会拿这条错误去走**强制回退到基准再应用**（`recoverToBaselineAndApply`）——
+			 * 有基准完整副本就有内容，补得回来（用户要的"不管本机怎么改过都能成功"）。
+			 */
+			verifyRelocated();
 			moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true });
 			moves++;
 			continue;
@@ -2109,6 +2166,14 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	});
 	result.stateId = { ...stateIdInfo, at: Date.now() };
 	result.stateIdCompare = compareStateId(stateIdInfo, plan.info.header.stateId ?? null);
+	/**
+	 * **做完之后逐条核对**：计划里说"要到位"的东西真到位了吗？
+	 *
+	 * 只看这个计划**动手的路径**（写 / 改名 / 删 / 补建目录），不看"仓库里有没有别的文件" ——
+	 * 本机多出来的东西（"我这一半"）不是错误，它本来就该由下一次导出带回去。
+	 * 核不上就走强制回退那条兜底（`recoverToBaselineAndApply`），别停在"编号还差一点"上。
+	 */
+	result.effects = await collectApplyProblems(plan, inventory, options.vaultRoot);
 	state.stateId = result.stateId;
 
 	/**
@@ -2407,6 +2472,137 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 export async function applyBundle(options: ApplyOptions): Promise<{ plan: ApplyPlan; result: ApplyResult }> {
 	const plan = await planBundleApply(options);
 	return { plan, result: await executeBundlePlan(plan, options) };
+}
+
+/**
+ * **做完之后逐条核对：计划里说"要到位"的东西真到位了吗？**
+ *
+ * 只看这个计划**动手的路径**，不看"仓库里有没有别的文件" ——
+ * 本机多出来的（"我这一半"）不是错误，它本来就该由下一次导出带回去。
+ *
+ * 判据：
+ * - `write` / `restore` / `fill`：文件在，且大小 + 修改时间与包里那一版一致；
+ * - `rename`：目标在（文件看清单，目录看磁盘）；
+ * - `delete`：路径真的没了；
+ * - 包里记着的空文件夹：在；`foldersToRemove`：真删掉了。
+ *
+ * 为什么要这一步：应用是"先算后做"，做完之后没人核对过结果。某个 rename 在 Windows 上失败、
+ * 某个文件被占用写不进去、或者清单算错了，`failed` 未必都兜得住；
+ * 而"包送到的点"是可以逐条核对的 —— 核不上就走强制回退那条兜底。
+ */
+async function collectApplyProblems(
+	plan: ApplyPlan,
+	inventory: Inventory,
+	vaultRoot: string,
+): Promise<{ ok: boolean; problems: string[] }> {
+	const problems: string[] = [];
+	const LIMIT = 20;
+	const note = (text: string): void => {
+		if (problems.length < LIMIT) problems.push(text);
+	};
+	const abs = (rel: string): string => toNative(vaultRoot, rel);
+	for (const action of plan.actions) {
+		switch (action.kind) {
+			case 'write':
+			case 'restore': {
+				const record = inventory.files.get(action.path);
+				if (!record) {
+					note(`${action.path}：计划要写的文件不在`);
+					break;
+				}
+				if (record.size !== action.entry.size
+					|| Math.abs(record.mtime - action.entry.mtime) > TOLERANCE) {
+					note(`${action.path}：内容或修改时间与包里那一版不一致`);
+				}
+				break;
+			}
+			case 'rename': {
+				if (action.dir) {
+					if (!await dirExists(abs(action.path))) note(`${action.path}：文件夹没搬成`);
+					break;
+				}
+				if (!inventory.files.has(action.path)) note(`${action.path}：改名后的文件不在`);
+				break;
+			}
+			case 'delete': {
+				// 走磁盘问：清单里看不见被排除规则挡住的东西，删除动作却真的会碰它们
+				if (await pathExists(abs(action.path))) note(`${action.path}：要删的文件还在`);
+				break;
+			}
+			default:
+				break;
+		}
+	}
+	for (const dir of plan.info.header.emptyDirs ?? []) {
+		if (inventory.dirs.has(dir)) continue;
+		if (await dirExists(abs(dir))) continue;
+		note(`${dir}：包里记着的空文件夹不在`);
+	}
+	for (const dir of plan.foldersToRemove) {
+		if (await dirExists(abs(dir))) note(`${dir}：该删的空文件夹还在`);
+	}
+	return { ok: problems.length === 0, problems };
+}
+
+/**
+ * **兜底：强制回退到基准，再把这一份重新应用一遍。**
+ *
+ * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
+ * 所以不再逐条猜"本机这一处改动该怎么合"：
+ *
+ * 1. 找到**我站在的那一份完整副本**（`findBaselineBundle`：重算指纹，不认文件名）；
+ * 2. 把它按**完全镜像**应用一遍 —— 仓库回到那个基准点，本机多出来 / 改过的进回收目录；
+ * 3. 再把这份更新包重新算、重新应用 —— 起点严格相等，包送到的状态是确定的；
+ * 4. 结果里带上 `recovered`，界面据此说清"做了强制回退"。
+ *
+ * 基准包不在本机时 `findBaselineBundle` 会**报错并指路**（把它放回包目录 / 让对方发一份），
+ * 绝不悄悄换一份、也绝不硬合 —— 那两种都会落一个说不清的状态。
+ */
+export async function recoverToBaselineAndApply(options: ApplyOptions): Promise<{
+	plan: ApplyPlan;
+	result: ApplyResult;
+	baselineFile: string;
+	baselineGeneration: number | null;
+}> {
+	const state = await loadState(options.stateFile);
+	const baseline = findBaselineBundle(state, options, 1);
+	const fullOptions: ApplyOptions = {
+		...options,
+		file: baseline.file,
+		strictness: 'mirror',
+		alignToPeer: false,
+		receiveOnly: options.receiveOnly === true,
+	};
+	options.log.debug(`强制回退到基准「${path.basename(baseline.file)}」：先把它应用一遍`);
+	const fullPlan = await planBundleApply(fullOptions);
+	const fullResult = await executeBundlePlan(fullPlan, fullOptions);
+	if (fullResult.failed.length > 0) {
+		options.log.debug(
+			`强制回退：完整副本有 ${fullResult.failed.length} 个路径没落地（${fullResult.failed[0]?.path ?? ''}），`
+			+ '继续尝试应用更新包',
+		);
+	}
+
+	const plan = await planBundleApply(options);
+	const result = await executeBundlePlan(plan, options);
+	const matched = result.stateIdCompare === 'match'
+		&& result.failed.length === 0
+		&& (result.effects?.ok ?? true);
+	result.recovered = {
+		baselineFile: path.basename(baseline.file),
+		baselineGeneration: baseline.info.header.targetGeneration,
+		matched,
+	};
+	options.log.debug(
+		`强制回退应用完成：基准「${path.basename(baseline.file)}」，`
+		+ `${matched ? '已与包里那一点严格对齐' : '仍然没对上（看 failed / effects）'}`,
+	);
+	return {
+		plan,
+		result,
+		baselineFile: baseline.file,
+		baselineGeneration: baseline.info.header.targetGeneration,
+	};
 }
 
 /** 把包里某个文件的字节流式写进仓库（不把整个文件读进内存） */

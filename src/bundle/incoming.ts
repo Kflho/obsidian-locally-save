@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply } from './apply';
+import { executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply, recoverToBaselineAndApply } from './apply';
 import type { ApplyOptions, ApplyPlan } from './apply';
 import { baselineOfBundle } from './baseline';
 import { listBundles } from './manage';
@@ -129,6 +129,11 @@ export type IncomingOutcome =
 		restored: number;
 		stateIdCompare: string;
 		pending: number;
+		/**
+		 * 这一份是**强制回退到基准再应用**才落下的（第一遍没对上）。
+		 * 「仅拉」的严格相等就是靠它兜底的，界面要如实说一句。
+		 */
+		recovered?: boolean;
 	}
 	/** 会动到本地已有的东西：没自动应用，等用户自己决定 */
 	| { kind: 'needs-review'; file: string; why: string }
@@ -193,7 +198,32 @@ export async function handleIncoming(
 		}
 
 		const applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
-		const plan = await planBundleApply(applyOptions);
+		/**
+		 * **「仅拉」的兜底**：本机被改乱、算不出计划时别直接记成失败 ——
+		 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准，再应用一遍就落。
+		 * 用户的原话："不管本机怎么改过，有基准包和对应更新包就一定能成功。"
+		 */
+		let plan: ApplyPlan;
+		try {
+			plan = await planBundleApply(applyOptions);
+		} catch (error) {
+			if (policy.force && candidate.bundle.header?.mode === 'changes') {
+				const again = await recoverToBaselineAndApply(applyOptions);
+				await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
+				return {
+					kind: 'applied',
+					file: name,
+					plan: again.plan,
+					written: again.result.written,
+					deleted: again.result.deleted,
+					restored: again.result.restored,
+					stateIdCompare: again.result.stateIdCompare,
+					pending: (again.plan.report.pendingChanges ?? 0) + (again.plan.report.pendingDeletes ?? 0),
+					recovered: true,
+				};
+			}
+			throw error;
+		}
 		const report = plan.report;
 
 		// 包里没有新东西（本地已经一致）：记一笔，不打扰。
@@ -234,7 +264,22 @@ export async function handleIncoming(
 			return { kind: 'needs-review', file: name, why };
 		}
 
-		const result = await executeBundlePlan(plan, applyOptions);
+		let result = await executeBundlePlan(plan, applyOptions);
+		/**
+		 * **「仅拉」做完了要核对**：这个方向的承诺是"跟对面严格相等"。
+		 * 有动作没落地、或者编号对不上（本机被改乱过）→ 强制回退到基准再应用一遍。
+		 * 这是"不管本机怎么改过都能成功"的最后一道闸（`recoverToBaselineAndApply`）。
+		 */
+		let recovered = false;
+		const broken = result.failed.length > 0
+			|| result.effects?.ok === false
+			|| (plan.alignToPeer === true && result.stateIdCompare !== 'match');
+		if (policy.force && broken && plan.info.header.mode === 'changes') {
+			const again = await recoverToBaselineAndApply(applyOptions);
+			plan = again.plan;
+			result = again.result;
+			recovered = true;
+		}
 		await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
 		return {
 			kind: 'applied',
@@ -244,7 +289,8 @@ export async function handleIncoming(
 			deleted: result.deleted,
 			restored: result.restored,
 			stateIdCompare: result.stateIdCompare,
-			pending: (report.pendingChanges ?? 0) + (report.pendingDeletes ?? 0),
+			pending: (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0),
+			...(recovered ? { recovered: true } : {}),
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -279,6 +325,8 @@ export interface IncomingSweep {
 		restored: number;
 		stateIdCompare: string;
 		pending: number;
+		/** 这一份是靠**强制回退到基准再应用**才落下的 */
+		recovered?: boolean;
 	}[];
 	/** 要人看的：会动本机东西 / 是完整副本 / 试了失败（理由照旧） */
 	review: { file: string; why: string; kind: 'needs-review' | 'failed'; full: boolean }[];
@@ -383,6 +431,7 @@ export async function sweepIncoming(
 				restored: outcome.restored,
 				stateIdCompare: outcome.stateIdCompare,
 				pending: outcome.pending,
+				...(outcome.recovered ? { recovered: true } : {}),
 			});
 			// 差量包会把基准推到它终点那份完整副本上；更新包不动基准（那就接着挑别的源头）
 			cursor = (await loadState(stateFile)).bundle?.fullHash ?? cursor;
@@ -432,6 +481,7 @@ export async function sweepIncoming(
 				restored: outcome.restored,
 				stateIdCompare: outcome.stateIdCompare,
 				pending: outcome.pending,
+				...(outcome.recovered ? { recovered: true } : {}),
 			});
 			continue;
 		}

@@ -28,6 +28,7 @@ const entryPoints = [
 	"test/git-flow.test.ts",
 	"test/generation.test.ts",
 	"test/moves.test.ts",
+	"test/alignment.test.ts",
 	"test/ssh.test.ts",
 ];
 const outdir = path.resolve("test/.build");

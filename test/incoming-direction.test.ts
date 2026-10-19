@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { App } from 'obsidian';
 import type { PluginManifest } from 'obsidian';
-import { applyBundle } from '../src/bundle/apply';
+import { applyBundle, planBundleApply, shouldParkLocalChanges } from '../src/bundle/apply';
 import type { ApplyOptions } from '../src/bundle/apply';
 import { exportBundle } from '../src/bundle/export';
 import { handleIncoming, pickIncoming, unappliedIncoming } from '../src/bundle/incoming';
@@ -366,6 +366,130 @@ async function main(): Promise<void> {
 		false,
 	);
 
+
+	// 11. **仅拉 + 完整副本**：不存"我这一半"、不挂欠账
+	//     用户报的现场：仅拉的机器回退到第 112 代完整副本，只同步了一下，
+	//     却冒出一个"应用前先把本机改动存成包"的包，并被 git 推了上去。
+	//     完整副本走完全镜像，`alignToPeer` 对它是 false —— 光靠那条判据拦不住。
+	const SEND_U = path.join(ROOT, 'send-u');
+	const RECV_U = path.join(ROOT, 'recv-u');
+	const OUT_U = path.join(ROOT, 'bundles-u');
+	const STATE_SEND_U = path.join(ROOT, 'state-send-u.json');
+	const STATE_RECV_U = path.join(ROOT, 'state-recv-u.json');
+	for (const dir of [SEND_U, RECV_U, OUT_U]) fs.mkdirSync(dir, { recursive: true });
+	for (const [rel, content] of [['n/keep.md', 'KEEP'], ['n/old.md', 'OLD']] as const) {
+		write(SEND_U, rel, content);
+		write(RECV_U, rel, content);
+	}
+	const exportU = (mode: 'full' | 'changes') => exportBundle({
+		settings: { ...DEFAULT_SETTINGS },
+		log,
+		vaultRoot: SEND_U,
+		vaultName: '对面U',
+		stateFile: STATE_SEND_U,
+		mode,
+		outDir: OUT_U,
+	});
+	const applyU = (file: string, receiveOnly: boolean): ApplyOptions => ({
+		settings: { ...DEFAULT_SETTINGS, gitEnabled: true, syncDirection: 'download' },
+		log,
+		vaultRoot: RECV_U,
+		stateFile: STATE_RECV_U,
+		file,
+		strictness: 'mirror',
+		...(receiveOnly ? { receiveOnly: true } : {}),
+	});
+	const seedU = await exportU('full');
+	await applyBundle(applyU(seedU.file as string, true));
+	// 本机多出一个文件（回退到老完整副本时，它会被镜像掉）
+	write(RECV_U, 'n/local-only.md', 'LOCAL ONLY');
+	fs.rmSync(at(SEND_U, 'n/old.md'));
+	write(SEND_U, 'n/keep.md', 'KEEP 改了，长一点');
+	const targetU = await exportU('full');
+
+	const planU = await planBundleApply(applyU(targetU.file as string, true));
+	check('仅拉·完整副本：报告里没有"要发出去的改动"', planU.report.pendingChanges, 0);
+	check('仅拉·完整副本：不存"我这一半"', shouldParkLocalChanges(planU, true), false);
+	check('双向·完整副本：照旧存"我这一半"', shouldParkLocalChanges(planU, false), true);
+
+	await applyBundle(applyU(targetU.file as string, true));
+	const stateU = await loadState(STATE_RECV_U);
+	check('仅拉·完整副本：应用完不挂"欠对方一笔回传"', stateU.pendingReturn ?? null, null);
+	check('仅拉·完整副本：本机独有的文件被镜像掉', exists(RECV_U, 'n/local-only.md'), false);
+	check('仅拉·完整副本：对面删掉的本地也没了', exists(RECV_U, 'n/old.md'), false);
+	check('仅拉·完整副本：对面的改动落地', read(RECV_U, 'n/keep.md'), 'KEEP 改了，长一点');
+	check('仅拉·完整副本：没有写出任何包（连 changes 目录都没建）',
+		fs.existsSync(path.join(OUT_U, 'changes')), false);
+
+	// 12. **「仅拉」的兜底**：本机把"要搬的源文件"改过 → 计划阶段拒绝 →
+	//     强制回退到基准再应用 → 最终与对面严格相等（本机那份改动进回收目录）。
+	//     这个方向的承诺是"只收不发、与对面相等"，所以兜底必须自动做，不弹窗问。
+	{
+		const SEND_V = path.join(ROOT, 'send-v');
+		const RECV_V = path.join(ROOT, 'recv-v');
+		const OUT_V = path.join(ROOT, 'bundles-v');
+		const STATE_SEND_V = path.join(ROOT, 'state-send-v.json');
+		const STATE_RECV_V = path.join(ROOT, 'state-recv-v.json');
+		for (const dir of [SEND_V, RECV_V, OUT_V]) fs.mkdirSync(dir, { recursive: true });
+		const exportV = (mode: 'full' | 'changes') => exportBundle({
+			settings: { ...DEFAULT_SETTINGS },
+			log,
+			vaultRoot: SEND_V,
+			vaultName: '对面V',
+			stateFile: STATE_SEND_V,
+			mode,
+			outDir: OUT_V,
+		});
+		const applyV = (file: string): ApplyOptions => ({
+			settings: { ...DEFAULT_SETTINGS },
+			log,
+			vaultRoot: RECV_V,
+			stateFile: STATE_RECV_V,
+			file,
+		});
+		for (const [rel, content] of [['旧/一.md', '一号内容'], ['旧/二.md', '二号内容更长一点']] as const) {
+			write(SEND_V, rel, content);
+			write(RECV_V, rel, content);
+		}
+		const baseV = await exportV('full');
+		await applyBundle(applyV(baseV.file as string));
+		fs.renameSync(at(SEND_V, '旧'), at(SEND_V, '新'));
+		const updV = await exportV('changes');
+		// 本机把要搬的那个源文件改过了 → 计划阶段会拒绝（"在本地被改过"）
+		write(RECV_V, '旧/一.md', 'B 自己改过的内容，长度不同');
+		const candidateV = (await pickIncoming(await listBundles(OUT_V), await loadState(STATE_RECV_V)))[0];
+		checkTrue('仅拉兜底：挑到了更新包', candidateV !== undefined, '没有候选包');
+		const outcomeV = await handleIncoming(applyV(updV.file as string), candidateV!, DOWNLOAD_POLICY);
+		check('仅拉兜底：应用成功（不是 failed）', outcomeV.kind, 'applied');
+		checkTrue('仅拉兜底：结果里记着"是强制回退才落下的"',
+			outcomeV.kind === 'applied' && outcomeV.recovered === true, JSON.stringify(outcomeV));
+		check('仅拉兜底：最终与对面严格相等', read(RECV_V, '新/一.md'), '一号内容');
+		check('仅拉兜底：旧路径没了', exists(RECV_V, '旧'), false);
+		const trashWalk = (dir: string): string[] => {
+			const out: string[] = [];
+			let entries: fs.Dirent[];
+			try {
+				entries = fs.readdirSync(dir, { withFileTypes: true });
+			} catch {
+				return out;
+			}
+			for (const entry of entries) {
+				const full = path.join(dir, entry.name);
+				if (entry.isDirectory()) out.push(...trashWalk(full));
+				else {
+					try {
+						out.push(fs.readFileSync(full, 'utf8'));
+					} catch {
+						// 二进制读不出：不关心
+					}
+				}
+			}
+			return out;
+		};
+		checkTrue('仅拉兜底：本机改过的那一份进了回收目录',
+			trashWalk(path.join(RECV_V, '.trash')).includes('B 自己改过的内容，长度不同'),
+			trashWalk(path.join(RECV_V, '.trash')).join(' / '));
+	}
 
 	console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 	for (const message of failures.slice(0, 10)) console.log('\n❌ ' + message);

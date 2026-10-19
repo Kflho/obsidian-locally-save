@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { executeBundlePlan, isDestructivePlan, planBundleApply } from '../bundle/apply';
+import { executeBundlePlan, isDestructivePlan, planBundleApply, recoverToBaselineAndApply, shouldParkLocalChanges } from '../bundle/apply';
 import type { ApplyOptions, ApplyPlan } from '../bundle/apply';
 import { describeStateId, describeExportRange, describeExportStart } from '../bundle/log';
 import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle/export';
@@ -628,12 +628,13 @@ export class ApplyBundleModal extends Modal {
 	/**
 	 * 应用这个包要的参数（只算 / 真应用两处共用，免得"报告按只拉算、执行按双向跑"）。
 	 *
-	 * **只拉不推**时多带两样：`alignToPeer`（目标是对方那一点）与 `bundleDir`
-	 * （恢复本机误改时要找到基准完整副本）。其余方向保持普通语义：本机改动是我这一半。
+	 * **只拉不推**时多带三样：`alignToPeer`（目标是对方那一点）、`bundleDir`
+	 * （恢复本机误改时要找到基准完整副本）、`receiveOnly`（本机没有要回传的那一半 ——
+	 * 完整副本走完全镜像，`alignToPeer` 对它不生效，得靠这个标记把 "欠账" 记成 0）。
+	 * 其余方向保持普通语义：本机改动是我这一半。
 	 */
 	private optionsFor(file: string): ApplyOptions {
-		const receiveOnly = this.plugin.settings.gitEnabled
-			&& this.plugin.settings.syncDirection === 'download';
+		const receiveOnly = this.receiveOnly();
 		return {
 			settings: this.plugin.settings,
 			log: this.plugin.log,
@@ -643,8 +644,13 @@ export class ApplyBundleModal extends Modal {
 			configDir: this.plugin.configDir(),
 			bundleDir: bundleBaseDir(this.plugin.settings),
 			strictness: 'mirror',
-			...(receiveOnly ? { alignToPeer: true } : {}),
+			...(receiveOnly ? { alignToPeer: true, receiveOnly: true } : {}),
 		};
+	}
+
+	/** 这台机器是不是「仅拉」（只收不发）：这个方向一个包都不写 */
+	private receiveOnly(): boolean {
+		return this.plugin.settings.gitEnabled && this.plugin.settings.syncDirection === 'download';
 	}
 
 	private async replan(): Promise<void> {
@@ -659,6 +665,45 @@ export class ApplyBundleModal extends Modal {
 		} catch (error) {
 			this.reportEl.empty();
 			this.reportEl.setText(`打不开这个包：${describe(error)}`);
+			/**
+			 * **兜底**：算不出计划（本机被改乱 / 移动的源缺了 / 目标被占…）时不要只剩一句报错。
+			 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准、再应用一遍一定能落
+			 * （`recoverToBaselineAndApply`）。基准包不在本机时它自己会报错并指路。
+			 */
+			this.applyButton?.setDisabled(true);
+			const button = this.reportEl.createEl('button', { text: '强制回退到基准包再应用' });
+			button.addEventListener('click', () => { void this.forceRecover(file); });
+		}
+	}
+
+	/**
+	 * 打不开 / 对不上时的兜底入口：强制回退到基准完整副本，再把这一份应用一遍。
+	 *
+	 * 这是用户拍板的路线："有基准包和对应更新包，信息就是全的，不管本机怎么改过都要能成功。"
+	 */
+	private async forceRecover(file: string): Promise<void> {
+		this.reportEl.empty();
+		this.reportEl.setText('正在强制回退到基准包，再把这一份应用一遍…');
+		this.plugin.reportProgress({ done: 0, total: 0, path: '', label: '应用中' });
+		try {
+			const again = await recoverToBaselineAndApply(this.optionsFor(file));
+			this.plugin.reportProgress(null);
+			await refreshStatusBar(this.plugin);
+			const matched = again.result.recovered?.matched === true;
+			new Notice(
+				`已强制回退到第 ${again.baselineGeneration ?? '?'} 代基准再应用 · `
+					+ `${matched ? '现在与包里那一点严格对齐' : '仍然没对上（看报告 / 日志）'}`
+					+ '（本机多出来 / 改过的都进了回收目录，能捞回来）',
+				matched ? 8000 : 9000,
+			);
+			this.close();
+			void this.reportToShelf();
+		} catch (error) {
+			this.plugin.reportProgress(null);
+			const message = error instanceof Error ? error.message : String(error);
+			this.reportEl.setText(`强制回退也没成功：${message}`);
+			new Notice(`强制回退失败：${message}`, 9000);
+			this.plugin.log.error('强制回退应用失败', error);
 		}
 	}
 
@@ -925,7 +970,7 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	private async runApply(): Promise<void> {
-		const plan = this.plan;
+		let plan = this.plan;
 		const file = this.current;
 		if (!plan || !file) return;
 		this.reportEl.setText('正在应用…');
@@ -936,24 +981,58 @@ export class ApplyBundleModal extends Modal {
 			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己站的完整副本"算的，
 			 * 完整副本那一趟会漏（见 `parkLocalChanges`）；真没什么可存时这一趟只是白扫一遍，
 			 * 会直接告诉我们"没有差别"（返回 null），不写空包。
-			 */
-			const strict = plan.report.strictness === 'mirror' || plan.report.strictness === 'bundle-wins';
-			let parked: string | null = null;
-			/**
+			 *
 			 * **只拉不推不存"我这一半"**：目标是跟对面严格相等，本机误改会被 `restore`
 			 * 从基准完整副本恢复进回收目录；再存一份回传包等于把误改当成要发出去的东西。
+			 * 完整副本也走这条路（`alignToPeer` 对它是 false），所以判据在 `shouldParkLocalChanges` 里
+			 * 一并带上方向 —— 用户报的现场：仅拉的机器回退到第 112 代完整副本，
+			 * 只同步了一下，却冒出一个包被 git 推了上去。
 			 */
-			if (strict && !plan.alignToPeer) {
+			const wantedPark = shouldParkLocalChanges(plan, this.receiveOnly());
+			let parked: string | null = null;
+			if (wantedPark) {
 				this.reportEl.setText('正在先存下你这边的东西…');
 				parked = await this.parkLocalChanges(plan);
 				this.reportEl.setText('正在应用…');
 			}
-			const result = await executeBundlePlan(plan, {
+			let result = await executeBundlePlan(plan, {
 				...this.optionsFor(file),
 				keepBackup: plan.options.keepBackup,
 				onProgress: (done, total, path) => this.plugin.reportProgress({ done, total, path, label: '应用中' }),
 			});
 			this.plugin.reportProgress(null);
+			/**
+			 * **兜底：应用完没对上，就强制回退到基准再应用一遍。**
+			 *
+			 * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
+			 * 所以不再把"编号还差一点"当成终态：
+			 * - 计划里说会到位的路径没到位（`effects`）/ 有动作失败 → 回退；
+			 * - 「仅拉」时严格相等是承诺，编号不一致 → 也回退。
+			 *
+			 * 回退 = 把我站的那份完整副本按完全镜像应用一遍，再把这份更新包重新应用 ——
+			 * 本机多出来 / 改过的进回收目录（`parked` 那一份里也有一整套）。
+			 * 基准完整副本不在本机时报错并指路，绝不悄悄换一份。
+			 */
+			let recoveryError: string | null = null;
+			let recovered = false;
+			const broken = result.failed.length > 0
+				|| result.effects?.ok === false
+				|| (plan.alignToPeer && result.stateIdCompare !== 'match');
+			if (broken && plan.info.header.mode === 'changes') {
+				this.reportEl.setText('对不上，正在强制回退到基准再应用…');
+				try {
+					const again = await recoverToBaselineAndApply({
+						...this.optionsFor(file),
+						keepBackup: plan.options.keepBackup,
+					});
+					plan = again.plan;
+					result = again.result;
+					recovered = true;
+				} catch (error) {
+					recoveryError = error instanceof Error ? error.message : String(error);
+					this.plugin.log.error('强制回退应用失败', error);
+				}
+			}
 			/**
 			 * 状态栏重新按"统一的那一套"算：git 推拉结果 + 每台电脑的内容状态。
 			 * 以前这里手写一句"同步包已应用（写入 N）"，把"对方：…"整段盖掉了 ——
@@ -961,7 +1040,12 @@ export class ApplyBundleModal extends Modal {
 			 */
 			await refreshStatusBar(this.plugin);
 
-			const parts = [`写入 ${result.written}`, `跳过 ${result.skipped}`];
+			const parts = recovered
+				? [`强制回退到第 ${result.recovered?.baselineGeneration ?? '?'} 代基准再应用`]
+				: [`写入 ${result.written}`, `跳过 ${result.skipped}`];
+			if (recovered) {
+				parts.push(result.recovered?.matched ? '现在与包里那一点严格对齐' : '回退后仍然没对上（看报告）');
+			}
 			if (result.conflicts > 0) parts.push(`冲突 ${result.conflicts}`);
 			if (result.deleted > 0) {
 				parts.push(`删除 ${result.deleted}`
@@ -1006,15 +1090,20 @@ export class ApplyBundleModal extends Modal {
 				}
 			}
 			const owed = (plan.report.pendingChanges ?? 0) + (plan.report.pendingDeletes ?? 0);
-			if (owed > 0 && !parked) parts.push(`你这边还有 ${owed} 个改动没发出去，下次导出更新包会带上`);
+			if (owed > 0 && !parked && !this.receiveOnly()) {
+				parts.push(`你这边还有 ${owed} 个改动没发出去，下次导出更新包会带上`);
+			}
 
 			// 我这一半的去处：存下来的那一份**起点就是这份包送到的状态**，
 			// 所以我自己应用它＝把东西加回来，发给对方（他站在同一个状态上）应用＝同理。
 			// 注意别说成"接在刚应用到的基准点上"：**应用更新包不动基准**（0.14 起只有完整包会动它）
 			if (parked) {
 				parts.push(`你这边的改动已存成 ${parked}（从这份包送到的状态算起；自己应用或发给对方都能把改动加回来）`);
-			} else if (strict) {
+			} else if (wantedPark) {
 				parts.push('你这边跟那份状态没有差别，没有另存包');
+			}
+			if (recoveryError !== null) {
+				parts.push(`⚠ 对不上，强制回退也没成功：${recoveryError}`);
 			}
 
 			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
@@ -1025,14 +1114,17 @@ export class ApplyBundleModal extends Modal {
 				&& result.restored === 0 && result.foldersCreated === 0 && result.foldersRemoved === 0;
 			const matched = result.stateIdCompare === 'match' || !plan.info.header.stateId;
 			// **没写任何东西 ≠ 两边一样**：可能正是"删不掉的文件夹 / 写不进去的文件"让编号对不上
-			if (didNothing && result.failed.length === 0 && matched && landedCleanly) {
+			if (didNothing && result.failed.length === 0 && matched && landedCleanly && recoveryError === null) {
 				new Notice('没有改动 · 本地已经是最新', 5000);
 			} else {
-				const same = result.stateIdCompare === 'match'
-					? '两边一致'
-					: (wantsBaseline && !landedCleanly ? '没落到基准（看报告）' : '编号还差一点');
-				new Notice(`已应用同步包 · ${same}`, 6000);
+				const same = recoveryError !== null
+					? '对不上，强制回退失败（看报告）'
+					: result.stateIdCompare === 'match'
+						? (recovered ? '两边一致（强制回退到基准后）' : '两边一致')
+						: (wantsBaseline && !landedCleanly ? '没落到基准（看报告）' : '编号还差一点');
+				new Notice(`已应用同步包 · ${same}`, recoveryError !== null ? 9000 : 6000);
 			}
+			if (parts.length > 0) this.plugin.log.debug(`应用报告：${parts.join(' · ')}`);
 			this.close();
 			/**
 			 * **应用完马上把新状态写回货架并推上去**（只拉那台尤其要紧）：
