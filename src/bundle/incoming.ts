@@ -295,7 +295,18 @@ export async function handleIncoming(
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		debugEvent('incoming.failed', { file: name, bundleId: candidate.bundleId }, error);
+		// 日志里带上包头部坐标：只有文件名时，事后对不上是哪一份基准/落点
+		const header = candidate.bundle.header;
+		debugEvent('incoming.failed', {
+			file: name,
+			bundleId: candidate.bundleId,
+			mode: header?.mode,
+			generated: header?.baseGeneration,
+			targetGeneration: header?.targetGeneration,
+			baselineHash: header?.baselineHash,
+			targetBaselineHash: header?.targetBaselineHash,
+			peerStateId: header?.stateId?.id,
+		}, error);
 		await rememberDecision(options.stateFile, candidate.bundleId, 'failed', name, message);
 		return { kind: 'failed', file: name, error: message };
 	}
