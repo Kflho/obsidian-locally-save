@@ -404,18 +404,23 @@ async function writePlannedBundles(
 	}
 
 	const { autoExportChanges, autoExportFull } = plugin.settings;
+	const hasBaseline = Boolean(state.bundle?.fullHash);
+	const configured = plannedExportModes({ changes: autoExportChanges, full: autoExportFull });
 	/**
 	 * 这一轮导哪几种：
 	 * - 两个自动留包开关开了哪个就按哪个（与老行为一致）；
-	 * - 两个都没开（「立即同步」那条路，`defaultWhenOff`）：有基准导更新包，没基准导完整包 ——
-	 *   "同步"不能因为用户没勾自动留包就什么都不发。
+	 * - **「立即同步」第一次没有基准**：不管自动开关开的是哪个，都先导完整副本 ——
+	 *   只开「留更新包」时更新包没有起点，算不出来；否则第一次点同步会什么都不发；
+	 * - 自动触发没有基准、只开了「留更新包」：照旧交给引擎说清"先导完整副本"，
+	 *   不硬写一份空更新包。
 	 */
-	const configured = plannedExportModes({ changes: autoExportChanges, full: autoExportFull });
-	const modes = configured.length > 0
-		? configured
-		: (options.defaultWhenOff === true
-			? (state.bundle?.fullHash ? ['changes' as const] : ['full' as const])
-			: []);
+	const modes = options.defaultWhenOff === true && !hasBaseline
+		? ['full' as const]
+		: configured.length > 0
+			? configured
+			: (options.defaultWhenOff === true
+				? (hasBaseline ? ['changes' as const] : ['full' as const])
+				: []);
 	if (modes.length === 0) {
 		return {
 			notes: ['「留更新包」与「留完整包」都没开，没有生成包'],

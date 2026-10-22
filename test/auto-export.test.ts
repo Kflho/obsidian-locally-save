@@ -177,6 +177,30 @@ check('仅拉：一个包都不写', bundleFiles('changes'), changesBeforeReceiv
 checkTrue('仅拉：结果如实说"不导出"',
 	blocked?.wrote === false && (blocked?.text ?? '').includes('仅拉'), JSON.stringify(blocked));
 
+// 7. 「立即同步」第一次没有基准：即使只开了「留更新包」，也应该自动导完整包
+//    （用户实际踩到：没有基准时点同步，只得到一句"先导完整副本"，只能手动导出）
+const ROOT2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lsave-first-sync-'));
+const VAULT2 = path.join(ROOT2, 'vault');
+const OUT2 = path.join(ROOT2, 'out');
+fs.mkdirSync(path.join(VAULT2, 'notes'), { recursive: true });
+fs.writeFileSync(path.join(VAULT2, 'notes', 'first.md'), 'FIRST');
+const fresh = createPlugin({ logLevel: 'silent', autoExportChanges: true, bundleDir: OUT2 });
+(fresh.app.vault.adapter as unknown as { basePath: string }).basePath = VAULT2;
+await fresh.onload();
+noticeLog.length = 0;
+const firstSync = await exportBundlesNow(fresh, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+checkTrue('无基准的立即同步导出了完整包', firstSync?.fullWritten === true, JSON.stringify(firstSync));
+const freshFull = (() => {
+	try {
+		return fs.readdirSync(path.join(OUT2, 'full')).filter(name => name.endsWith('.lsave')).length;
+	} catch {
+		return 0;
+	}
+})();
+check('无基准的立即同步确实落了完整包', freshFull, 1);
+const freshState = await loadState(fresh.stateFile());
+check('第一次同步后基准立起来了', freshState.bundle?.fullFiles !== null, true);
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);
