@@ -193,7 +193,8 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 	 * 拉到它的新状态就自动变成一致 / 不同步，不用人手点。
 	 */
 	const mine = state.stateId?.id ?? null;
-	const refreshDue = mine
+	// `autoSyncInterval = 0` 是用户明确关掉自动拉取 —— 回执刷新也不越过它
+	const refreshDue = plugin.settings.autoSyncInterval > 0 && mine
 		? needsPeerRefresh(
 			readPeers(shelf.dir, state.copyId),
 			mine,
