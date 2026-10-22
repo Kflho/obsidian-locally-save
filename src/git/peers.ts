@@ -184,6 +184,18 @@ function normalizePeer(raw: Partial<PeerState> | null): PeerState | null {
 			at: count(value.at),
 		};
 	};
+	const lastError = ((): PeerState['lastError'] | undefined => {
+		const value = (raw as { lastError?: unknown }).lastError;
+		if (!value || typeof value !== 'object') return undefined;
+		const item = value as Record<string, unknown>;
+		if (typeof item.message !== 'string' || item.message === '') return undefined;
+		return {
+			bundleId: typeof item.bundleId === 'string' ? item.bundleId : '',
+			...(typeof item.file === 'string' && item.file !== '' ? { file: item.file } : {}),
+			message: item.message.slice(0, 300),
+			at: typeof item.at === 'number' && Number.isFinite(item.at) ? item.at : 0,
+		};
+	})();
 	return {
 		format: PEER_FORMAT,
 		version: count(raw.version) || 1,
@@ -198,6 +210,7 @@ function normalizePeer(raw: Partial<PeerState> | null): PeerState | null {
 		lastExport: entry(raw.lastExport),
 		lastApply: entry(raw.lastApply),
 		pending: count(raw.pending),
+		...(lastError ? { lastError } : {}),
 		at: count(raw.at),
 	};
 }
@@ -292,6 +305,12 @@ export function describePeerDetail(
 	parts.push(`最后上报 ${peer.at > 0 ? hhmm(peer.at) : '没记时间'}`);
 	if (peer.lastExport) parts.push(`最后导出 ${peer.lastExport.file ?? shortId(peer.lastExport.bundleId)}`);
 	if (peer.lastApply) parts.push(`最后应用 ${peer.lastApply.file ?? shortId(peer.lastApply.bundleId)}`);
+	if (peer.lastError) {
+		const message = peer.lastError.message.length > 40
+			? `${peer.lastError.message.slice(0, 40)}…`
+			: peer.lastError.message;
+		parts.push(`它上次收包失败：${message}`);
+	}
 	if (peer.pending > 0) parts.push(`还有 ${peer.pending} 个改动没发出去`);
 	return parts.join(' · ');
 }
