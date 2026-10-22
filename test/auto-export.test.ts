@@ -227,6 +227,26 @@ const mtimeChanges = (() => {
 check('mtime-only 不写更新包', mtimeChanges, 0);
 checkTrue('mtime-only 结果如实说没写', mtimeSync?.wrote === false, JSON.stringify(mtimeSync));
 
+// 9. 空目录必须进包：完整包的 emptyDirs 要带 notes/empty-folder，状态里 dirs 也要有
+const ROOT4 = fs.mkdtempSync(path.join(os.tmpdir(), 'lsave-empty-dir-'));
+const VAULT4 = path.join(ROOT4, 'vault');
+const OUT4 = path.join(ROOT4, 'out');
+fs.mkdirSync(path.join(VAULT4, 'notes', 'empty-folder'), { recursive: true });
+fs.writeFileSync(path.join(VAULT4, 'notes', 'empty.md'), 'EMPTY DIR');
+const emptyPlugin = createPlugin({ logLevel: 'silent', autoExportChanges: true, bundleDir: OUT4 });
+(emptyPlugin.app.vault.adapter as unknown as { basePath: string }).basePath = VAULT4;
+await emptyPlugin.onload();
+const emptyExport = await exportBundlesNow(emptyPlugin, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+checkTrue('空目录前置：先导完整包', emptyExport?.fullWritten === true, JSON.stringify(emptyExport));
+const emptyFull = fs.readdirSync(path.join(OUT4, 'full')).filter(name => name.endsWith('.lsave'));
+check('空目录前置：完整包落盘', emptyFull.length, 1);
+const emptyHeader = (await readBundleInfo(path.join(OUT4, 'full', emptyFull[0] as string))).header;
+checkTrue('完整包 emptyDirs 带 notes/empty-folder',
+	(emptyHeader.emptyDirs ?? []).includes('notes/empty-folder'), JSON.stringify(emptyHeader.emptyDirs));
+const emptyState = await loadState(emptyPlugin.stateFile());
+checkTrue('状态 dirs 记了 notes/empty-folder',
+	(emptyState.bundle?.dirs ?? []).includes('notes/empty-folder'), JSON.stringify(emptyState.bundle?.dirs));
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);
