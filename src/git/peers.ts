@@ -46,6 +46,14 @@ export interface PeerState {
 	lastApply: { bundleId: string; file?: string; target: number; at: number } | null;
 	/** 它这边还有多少改动没发出去（`pendingReturn`） */
 	pending: number;
+	/**
+	 * **最近一次收包失败的原因**（0.15.9 起；没有就不写这个字段）。
+	 *
+	 * 为什么放进对表文件：收包失败只留在本机 `sync-state.json` / `debug.log`，
+	 * 对面想排查只能等这边的人手动发日志（283 就卡在这里）。peer 文件本来就跟着货架同步，
+	 * 顺手带上"哪个包、什么原因"，对面拉一次就能看到，不用再要日志。
+	 */
+	lastError?: { file?: string; bundleId: string; message: string; at: number };
 	/** 这份状态是什么时候写的 */
 	at: number;
 }
@@ -60,6 +68,8 @@ export function buildPeer(state: PluginState): PeerState {
 	const log = Array.isArray(state.bundleLog) ? state.bundleLog : [];
 	const lastExport = [...log].reverse().find(entry => entry.direction === 'export');
 	const lastApply = [...log].reverse().find(entry => entry.direction === 'apply');
+	const incoming = Array.isArray(state.incoming) ? state.incoming : [];
+	const lastFailure = [...incoming].reverse().find(item => item.note === 'failed');
 	return {
 		format: PEER_FORMAT,
 		version: PEER_VERSION,
@@ -88,6 +98,16 @@ export function buildPeer(state: PluginState): PeerState {
 			}
 			: null,
 		pending: (state.pendingReturn?.changes ?? 0) + (state.pendingReturn?.deletes ?? 0),
+		...(lastFailure
+			? {
+				lastError: {
+					bundleId: lastFailure.id,
+					...(lastFailure.file ? { file: lastFailure.file } : {}),
+					message: (lastFailure.error ?? '').slice(0, 300),
+					at: lastFailure.at,
+				},
+			}
+			: {}),
 		at: Date.now(),
 	};
 }
