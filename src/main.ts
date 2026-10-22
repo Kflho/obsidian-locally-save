@@ -85,6 +85,13 @@ export default class LocallySavePlugin extends Plugin {
 			enabled: () => this.settings.debugLog !== false,
 		});
 		setDebugSink((event, data, error) => { void this.debugLog.log(event, data, error); });
+		// 第一笔就落盘：用户看到「没有 debug.log」时，能立刻区分"插件没加载"和"没出过错"
+		void this.debugLog.log('plugin.loaded', {
+			version: this.manifest.version,
+			enabled: this.settings.enabled,
+			debugLog: this.settings.debugLog !== false,
+			configDir: this.app.vault.configDir,
+		});
 		this.registerDomEvent(window, 'error', (event) => {
 			void this.debugLog.log('window.error', {
 				message: event.message,
@@ -122,6 +129,7 @@ export default class LocallySavePlugin extends Plugin {
 		await this.restoreLastActivity();
 
 		registerCommands(this);
+		void this.debugLog.log('commands.registered', {});
 		// 把 .lsave 拖到窗口上就直接打开应用对话框（只拦 .lsave，别的拖放不受影响）
 		registerBundleDropTarget(this);
 		// 用 Obsidian 直接打开包：obsidian://locally-save?vault=…&bundle=…

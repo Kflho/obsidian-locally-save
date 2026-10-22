@@ -1,4 +1,5 @@
 import { Notice } from 'obsidian';
+import { debugEvent } from '../debugLog';
 import { exportBundle, exportRebaselineDiff, planBundleExport, plannedExportModes } from '../bundle/export';
 import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
 import { pickIncoming, sweepIncoming, unappliedIncoming } from '../bundle/incoming';
@@ -246,13 +247,24 @@ async function unappliedCount(plugin: LocallySavePlugin, base: string): Promise<
  * 最后**只弹一句**总结，细节在状态栏 / 日志里。
  */
 export async function syncNow(plugin: LocallySavePlugin, label = '立即同步'): Promise<void> {
-	if (!plugin.isActive()) return;
+	debugEvent('sync.start', { label });
+	if (!plugin.isActive()) {
+		debugEvent('sync.skip', { reason: 'inactive' });
+		return;
+	}
 	const base = bundleBaseDir(plugin.settings);
 	if (base === '') {
+		debugEvent('sync.skip', { reason: 'no-bundle-dir' });
 		new Notice(bundleDirHint(), 9000);
 		return;
 	}
 	if (syncing || plugin.bundleBusy || plugin.gitBusy) {
+		debugEvent('sync.skip', {
+			reason: 'busy',
+			syncing,
+			bundleBusy: plugin.bundleBusy,
+			gitBusy: plugin.gitBusy,
+		});
 		new Notice('上一次同步或留包还没跑完');
 		return;
 	}

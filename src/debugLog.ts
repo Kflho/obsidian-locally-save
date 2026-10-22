@@ -65,8 +65,10 @@ export class DebugLog {
 				text = '';
 			}
 			await this.options.writer.write(path, text + line);
-		} catch {
-			// 日志写不进去不能影响同步本身
+		} catch (error) {
+			// 日志写不进去不能影响同步本身；但也不能完全静默 ——
+			// 用户看不到 debug.log 时，控制台里至少要有一行为什么
+			console.error('[locally-save] debug.log 写入失败', error);
 		}
 	}
 }
