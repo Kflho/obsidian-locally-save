@@ -682,12 +682,20 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
  *
  * 取消也记一笔（`dismissed`）—— 用户刚做过选择，同一个包不再弹第二次；
  * 想反悔还能从「打开同步包并应用…」手动来。
+ *
+ * **窗口不在前台时不弹、直接 `defer`**（0.15.9）：REST / 后台节拍触发时没人能点确认框，
+ * 弹出来只会把一个 Promise 挂在那里 —— `syncNow` 的锁一直占着，后面的同步就"204 没反应"。
+ * 记 `needs-review`，用户回 Obsidian 手动同步时再问。
  */
 function confirmIncomingApply(
 	plugin: LocallySavePlugin,
 	candidate: IncomingCandidate,
 	plan: ApplyPlan,
-): Promise<boolean> {
+): Promise<boolean | 'defer'> {
+	if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+		debugEvent('incoming.confirm.deferred', { file: candidate.bundle.name });
+		return Promise.resolve('defer');
+	}
 	const counts = { write: 0, rename: 0, conflict: 0, delete: 0, restore: 0 };
 	for (const action of plan.actions) counts[action.kind] += 1;
 	const parts: string[] = [];
@@ -698,7 +706,7 @@ function confirmIncomingApply(
 	if (counts.conflict > 0) parts.push(`${counts.conflict} 处两边都改过`);
 	if (plan.foldersToRemove.length > 0) parts.push(`删 ${plan.foldersToRemove.length} 个空文件夹`);
 	const summary = parts.length > 0 ? parts.join('、') : '只有目录调整';
-	return new Promise<boolean>(resolve => {
+	return new Promise<boolean | 'defer'>(resolve => {
 		new ConfirmModal(plugin.app, {
 			title: '收到对方的更新包',
 			lines: [

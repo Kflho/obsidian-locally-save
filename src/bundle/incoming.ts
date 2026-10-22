@@ -185,8 +185,11 @@ export interface IncomingPolicy {
 	/**
 	 * 动手前问一句；返回 false ＝ 这次不应用（`kind: 'dismissed'`）。
 	 * 「双向」用它在界面弹确认窗 —— 注意这里是**异步**的，窗口开着时这一轮收包就停在这儿。
+	 *
+	 * 返回 `'defer'`：现在问不了（窗口不在前台 / 没有可交互的界面）—— 别挂起，
+	 * 记 `needs-review`，等用户手动同步时再问。REST / 后台节拍触发时就是这种情形。
 	 */
-	confirm?: (candidate: IncomingCandidate, plan: ApplyPlan) => Promise<boolean>;
+	confirm?: (candidate: IncomingCandidate, plan: ApplyPlan) => Promise<boolean | 'defer'>;
 }
 
 /**
@@ -266,7 +269,19 @@ export async function handleIncoming(
 		 */
 		let confirmed = false;
 		if (policy.confirm) {
-			if (!(await policy.confirm(candidate, plan))) {
+			const answer = await policy.confirm(candidate, plan);
+			if (answer === 'defer') {
+				// 窗口不在前台：确认框没人能点。**不能挂在这里**（syncNow 的锁会一直占着，
+				// 后面每次同步都只写一笔 sync.start 就没了，用户看到的就是"命令 204、没反应"）。
+				// 记成 needs-review：手动「立即同步」会再挑它、再问一次。
+				await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
+				return {
+					kind: 'needs-review',
+					file: name,
+					why: '窗口不在前台，没弹确认框；回到 Obsidian 再同步一次会再问',
+				};
+			}
+			if (!answer) {
 				await rememberDecision(options.stateFile, candidate.bundleId, 'dismissed', name);
 				return { kind: 'dismissed', file: name };
 			}
