@@ -672,11 +672,8 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 				apply: { strictness: 'mirror', alignToPeer: true },
 			};
 		}
-		// 免确认但**不镜像**：按 normal 合并，本机改动留着、对方的接上，不需要基准完整包。
-		// 给 REST / 无人值守用；真正会删 / 覆盖本地改动的计划仍然会被 `isDestructivePlan` 拦下。
-		if (plugin.settings.applyIncomingWithoutConfirm) {
-			return { apply: { strictness: 'normal' }, bypassConfirm: true };
-		}
+		// 免确认但**不镜像**的合并开关已经撤掉：它只是绕过确认框，和"先应用、再导出回传"
+		// 是同一件事，而且计划真要覆盖本地改动时仍会被 `isDestructivePlan` 拦下。
 		return { confirm: (candidate, plan) => confirmIncomingApply(plugin, candidate, plan) };
 	}
 	return {};
