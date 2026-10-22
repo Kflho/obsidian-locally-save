@@ -534,6 +534,24 @@ git 方向决定收到包怎么处理；没开 git 时由「自动应用收到�
 删掉 `sync-state.json` 等于“当作第一次”，不会动仓库里的文件，
 但下次导更新包会要求先立基准（导一份，或应用别人一份完整副本）。
 
+**同步失败看不出原因？**（0.15.9 起）
+插件目录里会有 `debug.log`（JSONL，一行一条，到 512KB 轮转成 `debug.log.1`）。
+平时只在出错/关键步骤才写，重点是这几条：
+
+- `plugin.loaded` / `commands.registered`：插件起来并注册完命令；
+- `command.run` / `command.error`：命令到底跑没跑、抛了什么；
+- `sync.start` / `sync.skip`：同步开始与早退原因（`inactive` / `no-bundle-dir` / `busy`，busy 带三个忙标记）；
+- `incoming.failed`：收包失败，带包头部坐标（基准 / 落点 / 状态编号）和 stack；
+- `incoming.confirm.deferred`：窗口不在前台，确认框没弹（记 `needs-review`，手动同步会再问）；
+- `apply.restore-needed`：严格镜像要恢复本机改动但找不到基准完整副本，带涉及路径。
+
+收包失败的原因同时写进 `sync-state.json` 的 `incoming[].error`（截断 500 字）；
+跟别人对表时，最近一次失败也会写进货架 `.lsave-peers/<copyId>.json` 的 `lastError`，
+对面拉一次就能看到，不用手动发日志。
+
+日志写不出来时不会再静默：控制台里会有一行 `[locally-save] debug.log 写入失败`。
+设置里可以关掉「调试日志」（默认开）。
+
 ## 已知限制
 
 - 只支持桌面端：读写仓库之外的文件必须走文件系统；
