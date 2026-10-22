@@ -142,6 +142,13 @@ export interface PluginSettings {
 	 * 删除是唯一不可逆的动作，宁可留着。
 	 */
 	autoApplyIncoming: boolean;
+	/**
+	 * **双向时收到包也不弹确认**，直接按「仅拉」的镜像策略应用（显式 opt-in）。
+	 *
+	 * 给无人值守 / REST / MCP 用：否则 `both` 只会把确认窗留在那儿，命令返回了但状态不动。
+	 * 会覆盖 / 删除本地文件（进回收目录），所以默认关；开之前用户明确知道这是"不确认"。
+	 */
+	autoApplyIncomingBoth: boolean;
 	/** 留包时导一个更新包（只装自上一个基准点以来的新改动；几乎不额外花时间） */
 	autoExportChanges: boolean;
 	/** 留包时导一份完整包（每次都重写整个仓库，慢，默认关） */
@@ -223,6 +230,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	dropBundleToApply: true,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoApplyIncoming: false,
+	// 双向也不确认 = 无人值守；默认关，开了就是明确选择"不弹窗直接应用"
+	autoApplyIncomingBoth: false,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
@@ -364,6 +373,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 		bundleVerify: coerceBoolean(raw.bundleVerify, DEFAULT_SETTINGS.bundleVerify),
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
 		autoApplyIncoming: coerceBoolean(raw.autoApplyIncoming, DEFAULT_SETTINGS.autoApplyIncoming),
+		autoApplyIncomingBoth: coerceBoolean(raw.autoApplyIncomingBoth, DEFAULT_SETTINGS.autoApplyIncomingBoth),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 		changesFromState: coerceAnchorFingerprint(raw.changesFromState),

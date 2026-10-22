@@ -82,6 +82,13 @@ export const ADVANCED_SECTION: FieldSection = {
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncoming),
 				},
 				{
+					key: 'autoApplyIncomingBoth',
+					name: '双向时收到包直接应用（不确认）',
+					desc: '开了 git 且方向为双向时，收到包不再弹确认，按「仅拉」的镜像策略应用；会覆盖/删除本地文件（进回收目录）。给无人值守 / REST / MCP 用，默认关。',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncomingBoth),
+				},
+				{
 					key: 'dropBundleToApply',
 					name: '拖入 .lsave 即打开应用对话框',
 					desc: '把 .lsave 拖到窗口上就打开应用对话框；拖图片和附件不受影响。',

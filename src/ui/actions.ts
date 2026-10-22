@@ -639,7 +639,8 @@ async function exportMergedState(plugin: LocallySavePlugin, base: string): Promi
  * **「方向」决定收包怎么做**（0.15 起；改之前先读 `bundle/incoming.ts` 的 `IncomingPolicy`）：
  * - `download`（仅拉）：完整副本也收，会删 / 覆盖的也照做 —— 目标是对面那一点
  *   （`mirror` ＋ `alignToPeer`），本机被覆盖 / 删掉的东西进回收目录；这台机器**不写包**；
- * - `both`（双向）：收到先弹一句确认（写清会写 / 删 / 覆盖几个），确认后才应用；
+ * - `both`（双向）：默认收到先弹一句确认（写清会写 / 删 / 覆盖几个），确认后才应用；
+ *   用户显式打开 `autoApplyIncomingBoth` 时跳过确认，直接按仅拉的镜像策略应用（无人值守）；
  *   应用完由下面那段"回礼"把本机改动导出回去；
  * - `upload`（仅推）：根本不该走到这里（只发不收，见下面的 `wantsIncoming`）。
  */
@@ -652,6 +653,13 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 		};
 	}
 	if (direction === 'both') {
+		if (plugin.settings.autoApplyIncomingBoth) {
+			return {
+				force: true,
+				allowFull: true,
+				apply: { strictness: 'mirror', alignToPeer: true },
+			};
+		}
 		return { confirm: (candidate, plan) => confirmIncomingApply(plugin, candidate, plan) };
 	}
 	return {};
@@ -701,7 +709,8 @@ function confirmIncomingApply(
  * `manual`：用户自己点的「立即同步」。与自动节拍的区别**只有两处**，都在安全边界之内：
  * - 上次停在 `needs-review` / `failed` 的包**重新挑出来**（用户明确要同步，就该再试一次）；
  * - "起点对不上、先搁着"的那句提示**再说一遍**（自动节拍只提示一次，免得刷屏）。
- * 应用的安全边界一个字没松：默认策略照样不碰会删东西的包；「双向」照样要确认。
+ * 应用的安全边界一个字没松：默认策略照样不碰会删东西的包；「双向」默认照样要确认
+ * （只有显式打开 `autoApplyIncomingBoth` 才跳过，那是给无人值守的明确选择）。
  *
  * 返回 true ＝ 这一拍动过东西（调用方据此跳过同拍的留包：刚应用完不该立刻回礼）。
  */

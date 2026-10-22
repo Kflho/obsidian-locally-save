@@ -141,6 +141,8 @@ check("默认设置未被测试污染", settings.bundleDir, DEFAULT_SETTINGS.bun
 check("settingsFrom(默认值) 原样返回", settingsFrom(DEFAULT_SETTINGS), DEFAULT_SETTINGS);
 check("settingsFrom(null) 得到默认值", settingsFrom(null), DEFAULT_SETTINGS);
 check("settingsFrom(缺字段) 补齐默认值", settingsFrom({ enabled: false }), { ...DEFAULT_SETTINGS, enabled: false });
+check("autoApplyIncomingBoth 默认关", settingsFrom({}).autoApplyIncomingBoth, false);
+check("autoApplyIncomingBoth 可显式打开", settingsFrom({ autoApplyIncomingBoth: true }).autoApplyIncomingBoth, true);
 check(
 	"settingsFrom(脏数据) 全部收敛",
 	settingsFrom({ enabled: 'yes', logLevel: 'xyz', syncAfterSaveDelay: 7, bundleDiscard: 'yes', ribbonIcon: null, showStatusBar: 'on' }),
