@@ -69,7 +69,9 @@ export function buildPeer(state: PluginState): PeerState {
 	const lastExport = [...log].reverse().find(entry => entry.direction === 'export');
 	const lastApply = [...log].reverse().find(entry => entry.direction === 'apply');
 	const incoming = Array.isArray(state.incoming) ? state.incoming : [];
-	const lastFailure = [...incoming].reverse().find(item => item.note === 'failed');
+	// 只认**最后一笔**：后来应用成功过，就不该再挂着旧的失败原因
+	const lastIncoming = incoming[incoming.length - 1];
+	const lastFailure = lastIncoming?.note === 'failed' ? lastIncoming : undefined;
 	return {
 		format: PEER_FORMAT,
 		version: PEER_VERSION,
