@@ -2399,7 +2399,14 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			fullGeneration: plan.info.header.targetGeneration,
 			// 令牌：站在哪一份完整包上，对方下一个包一比就知道
 			fullHash: landedHash,
-			fullFile: path.basename(options.file),
+			/**
+			 * 只有**真完整包**才能记成"我站的那份包文件"。
+			 * 差量包（`targetFullBundle`）的终点是一份完整副本，但手里这个文件是**更新包** ——
+			 * 记上它，后面恢复本机改动时会去找一个 mode=full 的文件、或把更新包名当基准报出去
+			 * （用户报的「得读基准完整副本「…-更新-…」」就是这么来的）。终点那份完整包
+			 * 在不在本机由 `findBaselineBundle` 按指纹扫，`fullFile` 记不清就留空。
+			 */
+			fullFile: isFull ? path.basename(options.file) : null,
 		}
 		: (adopt
 			? {

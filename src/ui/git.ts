@@ -8,7 +8,7 @@ import { listFullAnchorsSync } from '../bundle/anchor';
 import { exportBundle } from '../bundle/export';
 import { bundleTrashRoot, listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
-import { readPeers, writePeer, describePeerDetail } from '../git/peers';
+import { readPeers, writePeer, describePeerDetail, needsPeerRefresh } from '../git/peers';
 import { runGit } from '../git/run';
 import { isShelf, prepareShelf } from '../git/shelf';
 import type { ShelfOptions } from '../git/shelf';
@@ -186,7 +186,23 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 	 * 对面下一次拉取就能看到"我已经应用完了"。
 	 */
 	const peer = await writePeer(shelf.dir, state, plugin.vaultName());
-	if (!due && !pendingPush && !peer.written && !(await shelfIsDirty(shelf))) return false;
+	/**
+	 * **对面应用完但没产生新包时**，它只更新了 `.lsave-peers/<它的 copyId>.json`。
+	 * 这边如果干等 `autoSyncInterval`（默认 5 分钟），状态栏会一直写"对方：待上报"，
+	 * 用户只能自己再点一次同步。这里在"有 peer 报告比我旧"时每 30 秒主动拉一次，
+	 * 拉到它的新状态就自动变成一致 / 不同步，不用人手点。
+	 */
+	const mine = state.stateId?.id ?? null;
+	const refreshDue = mine
+		? needsPeerRefresh(
+			readPeers(shelf.dir, state.copyId),
+			mine,
+			state.stateId?.at ?? 0,
+			plugin.lastGitAt,
+			Date.now(),
+		)
+		: false;
+	if (!due && !pendingPush && !peer.written && !refreshDue && !(await shelfIsDirty(shelf))) return false;
 	return syncGitNow(plugin, { quiet: true });
 }
 

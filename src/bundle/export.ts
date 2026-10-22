@@ -1553,8 +1553,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			fullFiles: keepBase?.fullFiles ?? landedPoint,
 			fullGeneration: keepBase?.fullGeneration ?? targetGeneration,
 			fullHash: keepBase?.fullHash ?? freshBaseline,
-			// 界面上要能说清"我站在哪一份完整包上"
-			fullFile: keepBase?.fullFile ?? path.basename(file),
+			// 界面上要能说清"我站在哪一份完整包上"；更新包不是完整包，不能拿它顶名字
+			fullFile: mode === 'full' ? path.basename(file) : (keepBase?.fullFile ?? null),
 			history: mode === 'full' ? {} : nextHistory,
 			// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
 			dirs: [...inventory.dirs],

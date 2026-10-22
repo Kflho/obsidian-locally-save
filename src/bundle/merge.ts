@@ -385,12 +385,18 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 		reused = false;
 	}
 	/**
-	 * 本机正好站在**段末那一点**上时：那一份的"见证包"（原来那一环）马上要被挪走，
-	 * 界面上「← 本机现在的基准」那一行会找不到主人 —— 改指合并后的这一份。
-	 * 它落到的是同一点（`fullHash` 没变），只是换了个包名。
+	 * 本机正好站在**段末那一点**上时：只处理"原来记的包文件被这一趟挪走"的情况。
+	 *
+	 * 合并出来的是**更新包**（差量），不是完整包 —— 不能把 `fullFile` 改成它：
+	 * 后面"恢复本机改动"要按 `fullFile` 找 mode=full 的文件，记成更新包会报
+	 * 「得读基准完整副本「…-更新-…」」。真正的完整包文件没被合并挪走，就保持原样；
+	 * 只有原记录指向这趟要挪走的更新包（旧版本留下的错误记录）时才清空。
 	 */
 	if (state.bundle && plan.targetHash && state.bundle.fullHash === plan.targetHash) {
-		state.bundle.fullFile = path.basename(file);
+		const trashed = new Set(plan.links);
+		if (state.bundle.fullFile && trashed.has(state.bundle.fullFile)) {
+			state.bundle.fullFile = null;
+		}
 	}
 	await saveState(options.stateFile, state);
 

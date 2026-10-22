@@ -242,6 +242,32 @@ export function peerMatch(
 	return 'different';
 }
 
+/** peer 报告比自己旧时，主动拉取的最小间隔（用户不用再点一次同步） */
+export const PEER_REFRESH_MS = 30_000;
+
+/**
+ * 要不要主动拉一次 peer 报告。
+ *
+ * 触发："**待上报**"或"**不同步**"都拉一次 —— 对面应用完只改了
+ * `.lsave-peers/<它的 copyId>.json`（没有产生新包），不主动拉就永远停在旧状态，
+ * 用户只能再点一次同步。拉下来可能拿到它的新状态（一致），也可能确认内容真不同；
+ * `unknown`（对方还没算过状态）不在这里反复联网。
+ */
+export function needsPeerRefresh(
+	peers: PeerState[],
+	myStateId: string | null,
+	myUpdatedAt = 0,
+	lastSyncAt = 0,
+	now = Date.now(),
+	interval = PEER_REFRESH_MS,
+): boolean {
+	if (!myStateId || now - lastSyncAt < interval) return false;
+	return peers.some(peer => {
+		const match = peerMatch(peer, myStateId, myUpdatedAt);
+		return match === 'stale' || match === 'different';
+	});
+}
+
 /**
  * 状态栏那一小截。
  *
