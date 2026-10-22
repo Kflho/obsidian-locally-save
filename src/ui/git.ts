@@ -4,6 +4,7 @@ import { Notice } from 'obsidian';
 import { isApplying, executeBundlePlan, planBundleApply } from '../bundle/apply';
 import type { ApplyOptions } from '../bundle/apply';
 import { baselineOfBundle } from '../bundle/baseline';
+import { listFullAnchorsSync } from '../bundle/anchor';
 import { exportBundle } from '../bundle/export';
 import { bundleTrashRoot, listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
@@ -187,6 +188,46 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 	const peer = await writePeer(shelf.dir, state, plugin.vaultName());
 	if (!due && !pendingPush && !peer.written && !(await shelfIsDirty(shelf))) return false;
 	return syncGitNow(plugin, { quiet: true });
+}
+
+/**
+ * **对方站在别的基准上时，导出前提醒一句**（0.15.9）。
+ *
+ * 导出默认从"我站的那份完整副本"算起；对方若还站在更老（或另一份）完整副本上，
+ * 这份包它接不上。这里直接说清"从哪一份开始它才接得上"、以及本机有没有那份副本。
+ *
+ * 只读 peer 文件；包目录没填 / 状态读不出 / peers 读不出都返回 null ——
+ * 提示是加分项，不能反过来把导出拦住。
+ */
+export function peerBaselineHint(plugin: LocallySavePlugin): string | null {
+	const base = bundleBaseDir(plugin.settings);
+	if (base === '') return null;
+	let state: PluginState;
+	try {
+		state = loadStateSync(plugin.stateFile());
+	} catch {
+		return null;
+	}
+	const mine = state.bundle?.fullHash ?? null;
+	if (!mine) return null;
+	let peers;
+	try {
+		peers = readPeers(base, state.copyId);
+	} catch {
+		return null;
+	}
+	const others = peers.filter(peer => peer.baselineHash !== null && peer.baselineHash !== mine);
+	if (others.length === 0) return null;
+	const anchors = listFullAnchorsSync(base, state.lineage);
+	const lines = others.map(peer => {
+		const who = peer.host || peer.copyId.slice(0, 8);
+		const short = (peer.baselineHash ?? '').slice(0, 8);
+		if (anchors.some(anchor => anchor.hash === peer.baselineHash)) {
+			return `${who} 站在基准 ${short}：导出前把「更新包：从哪个状态开始」选成它，对方才接得上`;
+		}
+		return `${who} 站在基准 ${short}，本机没有它的完整副本：让它发一份完整副本过来，或把本机这份基准发给它`;
+	});
+	return lines.join('；');
 }
 
 /**

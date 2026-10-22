@@ -25,7 +25,7 @@ import { ApplyBundleModal, ExportBundleModal } from './bundle-modal';
 import { ExportPreviewModal } from './export-preview-modal';
 import { BundleManagerModal } from './manage-modal';
 import { BundleLogModal } from './log-modal';
-import { syncGitNow } from './git';
+import { syncGitNow, peerBaselineHint } from './git';
 import { peerStatusText, refreshStatusBar } from './status';
 import { ConfirmModal } from './confirm-modal';
 
@@ -893,7 +893,7 @@ export async function previewBundleExport(plugin: LocallySavePlugin): Promise<vo
 		for (const mode of modes) {
 			previews.push(await planBundleExport(exportOptions(plugin, base, mode, inventory)));
 		}
-		new ExportPreviewModal(plugin.app, plugin, previews, () => { void exportBundlesNow(plugin); }).open();
+		new ExportPreviewModal(plugin.app, plugin, previews, () => { void exportBundlesNow(plugin); }, peerBaselineHint(plugin)).open();
 	} catch (error) {
 		new Notice(`预览失败：${describe(error)}`, 9000);
 		plugin.log.error('预览失败', error);

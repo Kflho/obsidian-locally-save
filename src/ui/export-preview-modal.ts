@@ -19,11 +19,19 @@ const MAX_ROWS = 200;
 export class ExportPreviewModal extends Modal {
 	private previews: BundleExportPreview[];
 	private onConfirm: () => void;
+	private hint: string | null;
 
-	constructor(app: App, _plugin: LocallySavePlugin, previews: BundleExportPreview[], onConfirm: () => void) {
+	constructor(
+		app: App,
+		_plugin: LocallySavePlugin,
+		previews: BundleExportPreview[],
+		onConfirm: () => void,
+		hint: string | null = null,
+	) {
 		super(app);
 		this.previews = previews;
 		this.onConfirm = onConfirm;
+		this.hint = hint;
 	}
 
 	onOpen(): void {
@@ -35,6 +43,10 @@ export class ExportPreviewModal extends Modal {
 			text: '只预览，不会写入。下面是按当前设置导出时会装进包里的内容。',
 			cls: 'locally-save-hint',
 		});
+		// 对方站在别的基准上：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
+		if (this.hint) {
+			contentEl.createEl('p', { text: this.hint, cls: 'locally-save-warn' });
+		}
 
 		for (const preview of this.previews) {
 			contentEl.createEl('h3', { text: preview.mode === 'full' ? '完整副本' : '更新包' });
