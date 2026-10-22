@@ -89,6 +89,13 @@ export const ADVANCED_SECTION: FieldSection = {
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncomingBoth),
 				},
 				{
+					key: 'applyIncomingWithoutConfirm',
+					name: '双向时收到包免确认（合并，不镜像）',
+					desc: '不弹确认，按合并应用：本机改动留着、对方的改动接上，不需要基准完整副本。给 REST / 无人值守用，默认关。',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.applyIncomingWithoutConfirm),
+				},
+				{
 					key: 'dropBundleToApply',
 					name: '拖入 .lsave 即打开应用对话框',
 					desc: '把 .lsave 拖到窗口上就打开应用对话框；拖图片和附件不受影响。',

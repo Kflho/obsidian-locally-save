@@ -151,6 +151,18 @@ export interface PluginSettings {
 	 * 会覆盖 / 删除本地文件（进回收目录），所以默认关；开之前用户明确知道这是"不确认"。
 	 */
 	autoApplyIncomingBoth: boolean;
+	/**
+	 * **双向收包免确认，但走 normal（合并）**（显式 opt-in，默认关）。
+	 *
+	 * 为什么还要一条：`autoApplyIncomingBoth` 用的是「仅拉」的镜像策略 —— 严格相等，
+	 * 本机改动要恢复成基准那一版，于是**必须有基准完整副本**；有的机器没有它
+	 * （`fullFile: null` + `full/` 里只有更老的完整包），mirror 就走不通。
+	 *
+	 * 这条不弹确认、不走镜像：按 normal 合并（本机改动留着、对方改动接上），
+	 * 不需要任何完整包。给 REST / MCP / 无人值守用；会写文件，所以默认关。
+	 * 真要删/覆盖本地东西的包仍然会被拦下记 `needs-review`（那层安全边界没松）。
+	 */
+	applyIncomingWithoutConfirm: boolean;
 	/** 留包时导一个更新包（只装自上一个基准点以来的新改动；几乎不额外花时间） */
 	autoExportChanges: boolean;
 	/** 留包时导一份完整包（每次都重写整个仓库，慢，默认关） */
@@ -235,6 +247,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	autoApplyIncoming: false,
 	// 双向也不确认 = 无人值守；默认关，开了就是明确选择"不弹窗直接应用"
 	autoApplyIncomingBoth: false,
+	// 双向免确认但走 normal 合并；同样要用户明确打开
+	applyIncomingWithoutConfirm: false,
 	// 会往磁盘写文件的事，默认都得用户自己点头
 	autoExportChanges: false,
 	autoExportFull: false,
@@ -378,6 +392,10 @@ export function settingsFrom(data: unknown): PluginSettings {
 		dropBundleToApply: coerceBoolean(raw.dropBundleToApply, DEFAULT_SETTINGS.dropBundleToApply),
 		autoApplyIncoming: coerceBoolean(raw.autoApplyIncoming, DEFAULT_SETTINGS.autoApplyIncoming),
 		autoApplyIncomingBoth: coerceBoolean(raw.autoApplyIncomingBoth, DEFAULT_SETTINGS.autoApplyIncomingBoth),
+		applyIncomingWithoutConfirm: coerceBoolean(
+			raw.applyIncomingWithoutConfirm,
+			DEFAULT_SETTINGS.applyIncomingWithoutConfirm,
+		),
 		autoExportChanges: coerceBoolean(raw.autoExportChanges, DEFAULT_SETTINGS.autoExportChanges),
 		autoExportFull: coerceBoolean(raw.autoExportFull, DEFAULT_SETTINGS.autoExportFull),
 		changesFromState: coerceAnchorFingerprint(raw.changesFromState),

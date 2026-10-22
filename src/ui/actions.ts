@@ -672,6 +672,11 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 				apply: { strictness: 'mirror', alignToPeer: true },
 			};
 		}
+		// 免确认但**不镜像**：按 normal 合并，本机改动留着、对方的接上，不需要基准完整包。
+		// 给 REST / 无人值守用；真正会删 / 覆盖本地改动的计划仍然会被 `isDestructivePlan` 拦下。
+		if (plugin.settings.applyIncomingWithoutConfirm) {
+			return { apply: { strictness: 'normal' }, bypassConfirm: true };
+		}
 		return { confirm: (candidate, plan) => confirmIncomingApply(plugin, candidate, plan) };
 	}
 	return {};
@@ -707,6 +712,7 @@ function confirmIncomingApply(
 	debugEvent('incoming.confirm.open', {
 		visibilityState: doc?.visibilityState ?? null,
 		hidden: doc?.hidden ?? null,
+		hasFocus,
 	});
 	const counts = { write: 0, rename: 0, conflict: 0, delete: 0, restore: 0 };
 	for (const action of plan.actions) counts[action.kind] += 1;

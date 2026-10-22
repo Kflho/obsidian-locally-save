@@ -190,6 +190,14 @@ export interface IncomingPolicy {
 	 * 记 `needs-review`，等用户手动同步时再问。REST / 后台节拍触发时就是这种情形。
 	 */
 	confirm?: (candidate: IncomingCandidate, plan: ApplyPlan) => Promise<boolean | 'defer'>;
+	/**
+	 * **不问，直接按 normal 合并应用**（显式开关，见设置里的「双向时收到包免确认（合并，不镜像）」）。
+	 *
+	 * 和 `force` 的区别：`force` 是"按镜像做、会覆盖/删"，这条路是"合并"，
+	 * 不需要基准完整副本；会写文件，所以调用方必须先拿到用户的明确 opt-in。
+	 * 真要删 / 覆盖本地改动的计划**仍然拦**（`isDestructivePlan` 那层不松），记 `needs-review`。
+	 */
+	bypassConfirm?: boolean;
 }
 
 /**
@@ -268,6 +276,14 @@ export async function handleIncoming(
 		 * 两边就永远差着一代（用户报的"一台 108、一台 109，点同步都提示已经最新"）。
 		 */
 		let confirmed = false;
+		if (policy.bypassConfirm && !policy.force) {
+			// 用户明确开了「免确认（合并）」：记一笔再走合并，别让日志里看起来像"没人管"
+			debugEvent('incoming.confirm.bypassed', {
+				file: name,
+				actions: plan.actions.length,
+				strictness: plan.report.strictness,
+			});
+		}
 		if (policy.confirm) {
 			const answer = await policy.confirm(candidate, plan);
 			if (answer === 'defer') {
