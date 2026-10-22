@@ -1,0 +1,10 @@
+# 发布资产按 LF 构建：Windows 的 core.autocrlf=true 会把 checkout 变成 CRLF，
+# 导致同一 tag 在两台机器 build 出的 manifest/styles 字节不同。
+# 参考 https://git-scm.com/docs/gitattributes#_eol
+manifest.json text eol=lf
+styles.css text eol=lf
+versions.json text eol=lf
+package.json text eol=lf
+
+# 同步包是二进制，禁止任何行尾转换
+*.lsave binary
