@@ -11,6 +11,7 @@ import { SyncStatusBar } from './ui/progress';
 import { pickIcon } from './ui/ribbon';
 import { openPeerStatus, refreshStatusBar } from './ui/status';
 import { createLogger } from './utils/log';
+import { DebugLog, setDebugSink } from './debugLog';
 import { toNative } from './utils/paths';
 
 /** 自动留包的检查节拍：每 30 秒看一次"到点了吗" */
@@ -27,6 +28,8 @@ export default class LocallySavePlugin extends Plugin {
 	settings!: PluginSettings;
 	/** 跟着设置走的日志器（见 utils/log.ts） */
 	readonly log = createLogger(() => this.settings.logLevel);
+	/** 插件目录 debug.log：失败异常写这里，MCP / sync-state 都能读 */
+	debugLog!: DebugLog;
 	/** 状态栏那一格（进度与上次留包的结果） */
 	statusBar!: SyncStatusBar;
 
@@ -71,6 +74,27 @@ export default class LocallySavePlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+
+		this.debugLog = new DebugLog({
+			writer: {
+				exists: (path) => this.app.vault.adapter.exists(path),
+				read: (path) => this.app.vault.adapter.read(path),
+				write: (path, text) => this.app.vault.adapter.write(path, text),
+			},
+			path: `${this.app.vault.configDir}/plugins/${this.manifest.id}/debug.log`,
+			enabled: () => this.settings.debugLog !== false,
+		});
+		setDebugSink((event, data, error) => { void this.debugLog.log(event, data, error); });
+		this.registerDomEvent(window, 'error', (event) => {
+			void this.debugLog.log('window.error', {
+				message: event.message,
+				filename: event.filename,
+				lineno: event.lineno,
+			}, event.error);
+		});
+		this.registerDomEvent(window, 'unhandledrejection', (event) => {
+			void this.debugLog.log('unhandled.rejection', {}, event.reason);
+		});
 
 		this.statusBar = new SyncStatusBar(this.addStatusBarItem(), () => {
 			void openPeerStatus(this, () => { void syncGitNow(this, { manual: true }); });
@@ -126,6 +150,7 @@ export default class LocallySavePlugin extends Plugin {
 	}
 
 	onunload(): void {
+		setDebugSink(null);
 		this.log.debug('已卸载');
 	}
 

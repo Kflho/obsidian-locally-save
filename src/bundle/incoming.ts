@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply, recoverToBaselineAndApply } from './apply';
+import { debugEvent } from '../debugLog';
 import type { ApplyOptions, ApplyPlan } from './apply';
 import { baselineOfBundle } from './baseline';
 import { listBundles } from './manage';
@@ -294,7 +295,8 @@ export async function handleIncoming(
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		await rememberDecision(options.stateFile, candidate.bundleId, 'failed', name);
+		debugEvent('incoming.failed', { file: name, bundleId: candidate.bundleId }, error);
+		await rememberDecision(options.stateFile, candidate.bundleId, 'failed', name, message);
 		return { kind: 'failed', file: name, error: message };
 	}
 }
@@ -305,10 +307,17 @@ async function rememberDecision(
 	bundleId: string,
 	note: string,
 	file: string,
+	error?: string,
 ): Promise<void> {
 	try {
 		const state = await loadState(stateFile);
-		rememberIncoming(state, { id: bundleId, at: Date.now(), note, file });
+		rememberIncoming(state, {
+			id: bundleId,
+			at: Date.now(),
+			note,
+			file,
+			...(error ? { error: error.slice(0, 500) } : {}),
+		});
 		await saveState(stateFile, state);
 	} catch {
 		// 记不下只是"下次可能再提示一遍"，不该让已经成功的应用看起来失败

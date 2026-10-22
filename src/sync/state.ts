@@ -231,6 +231,8 @@ export interface IncomingRecord {
 	note: string;
 	/** 包文件名（界面上对得上号） */
 	file?: string;
+	/** 失败原因（failed 时写，截断 500 字） */
+	error?: string;
 }
 
 /** `state.incoming` 最多留几笔 */

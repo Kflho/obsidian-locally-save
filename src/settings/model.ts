@@ -107,6 +107,8 @@ export interface PluginSettings {
 	enabled: boolean;
 	/** 控制台输出级别 */
 	logLevel: LogLevel;
+	/** 把同步失败异常写进插件目录 debug.log（JSONL，512KB 轮转）；默认开，排查完可关 */
+	debugLog: boolean;
 
 	// ------------------------------------------------------------ 包的内容
 	/** 不进包的文件：一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
@@ -217,6 +219,7 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
 	enabled: true,
 	logLevel: 'error',
+	debugLog: true,
 
 	excludePatterns: DEFAULT_EXCLUDES,
 
@@ -358,6 +361,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 	return {
 		enabled: coerceBoolean(raw.enabled, DEFAULT_SETTINGS.enabled),
 		logLevel: coerceLogLevel(raw.logLevel),
+		debugLog: coerceBoolean(raw.debugLog, DEFAULT_SETTINGS.debugLog),
 
 		excludePatterns: coerceText(raw.excludePatterns, DEFAULT_SETTINGS.excludePatterns),
 

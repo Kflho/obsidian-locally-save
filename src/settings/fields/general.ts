@@ -33,6 +33,13 @@ export const GENERAL_SECTION: FieldSection = {
 					control: { type: 'dropdown', options: LOG_LEVEL_OPTIONS },
 					coerce: value => coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel),
 				},
+				{
+					key: 'debugLog',
+					name: '调试日志',
+					desc: '把同步失败的异常写进插件目录 debug.log；排查完可关。',
+					control: { type: 'toggle' },
+					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.debugLog),
+				},
 			],
 		},
 		{
