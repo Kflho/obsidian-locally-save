@@ -17,7 +17,6 @@ export default defineConfig(
 						'eslint.config.js',
 						'eslint.config.mts',
 						'manifest.json',
-						'test/*.mjs'
 					]
 				},
 				tsconfigRootDir: path.dirname(fileURLToPath(import.meta.url)),
@@ -27,8 +26,7 @@ export default defineConfig(
 	},
 	...obsidianmd.configs.recommended,
 	{
-		// 测试代码运行在 Node 环境，且需要用 console 输出测试结果
-		files: ['test/**/*.ts', 'test/**/*.mjs'],
+		// 濞村鐦禒锝囩垳鏉╂劘顢戦崷?Node 閻滎垰顣ㄩ敍灞肩瑬闂団偓鐟曚胶鏁?console 鏉堟挸鍤ù瀣槸缂佹挻鐏?		files: [],
 		languageOptions: {
 			globals: {
 				...globals.node,
@@ -36,27 +34,21 @@ export default defineConfig(
 		},
 		rules: {
 			'no-console': 'off',
-			// obsidianmd 0.4.2 起 no-console 改由这条规则代管（消息带 [no-console] 前缀）。
-			// 测试跑在 Node 里，本来就要用 console 输出结果，这里一并关掉。
-			'obsidianmd/rule-custom-message': 'off',
-			// 测试没有 popout 窗口，Node 下的全局对象就是 globalThis
+			// obsidianmd 0.4.2 鐠?no-console 閺€鍦暠鏉╂瑦娼憴鍕灟娴狅絿顓搁敍鍫熺Х閹垰鐢?[no-console] 閸撳秶绱戦敍澶堚偓?			// 濞村鐦捄鎴濇躬 Node 闁插矉绱濋張顒佹降鐏忚精顩﹂悽?console 鏉堟挸鍤紒鎾寸亯閿涘矁绻栭柌灞肩楠炶泛鍙ч幒澶堚偓?			'obsidianmd/rule-custom-message': 'off',
+			// 濞村鐦▽鈩冩箒 popout 缁愭褰涢敍瀛╫de 娑撳娈戦崗銊ョ湰鐎电钖勭亸杈ㄦЦ globalThis
 			'obsidianmd/no-global-this': 'off',
-			// 测试与构建脚本本来就跑在 Node 里（esbuild 打包测试、读文件、写临时目录），
-			// "移动端没有 Node API" 这条建议在这里不适用
-			'obsidianmd/no-nodejs-modules': 'off',
+			// 濞村鐦稉搴㈢€楦垮壖閺堫剚婀伴弶銉ユ皑鐠烘垵婀?Node 闁插矉绱檈sbuild 閹垫挸瀵樺ù瀣槸閵嗕浇顕伴弬鍥︽閵嗕礁鍟撴稉瀛樻閻╊喖缍嶉敍澶涚礉
+			// "缁夎濮╃粩顖涚梾閺?Node API" 鏉╂瑦娼楦款唴閸︺劏绻栭柌灞肩瑝闁倻鏁?			'obsidianmd/no-nodejs-modules': 'off',
 		},
 	},
 	{
-		// 本插件是**桌面端专属**（manifest 里 isDesktopOnly: true）：
-		// 同步目标是仓库之外的文件夹，vault API 出不了库，只能用 Node 的 fs。
-		// 所以"移动端没有 Node API"这条建议在这里是刻意的取舍，不是疏漏。
-		files: ['src/**/*.ts'],
+		// 閺堫剚褰冩禒鑸垫Ц**濡楀矂娼扮粩顖欑瑩鐏?*閿涘潰anifest 闁?isDesktopOnly: true閿涘绱?		// 閸氬本顒為惄顔界垼閺勵垯绮ㄦ惔鎾茬婢舵牜娈戦弬鍥︽婢剁櫢绱漹ault API 閸戣桨绗夋禍鍡楃氨閿涘苯褰ч懗鐣屾暏 Node 閻?fs閵?		// 閹碘偓娴?缁夎濮╃粩顖涚梾閺?Node API"鏉╂瑦娼楦款唴閸︺劏绻栭柌灞炬Ц閸掔粯鍓伴惃鍕絿閼稿稄绱濇稉宥嗘Ц閻ゅ繑绱￠妴?		files: ['src/**/*.ts'],
 		rules: {
 			'obsidianmd/no-nodejs-modules': 'off',
 		},
 	},
 	{
-		// 构建用的配置文件同理：它们只在 Node 下运行，不会进 main.js
+		// 閺嬪嫬缂撻悽銊ф畱闁板秶鐤嗛弬鍥︽閸氬瞼鎮婇敍姘暊娴狀剙褰ч崷?Node 娑撳绻嶇悰宀嬬礉娑撳秳绱版潻?main.js
 		files: ['eslint.config.mts', 'esbuild.config.mjs', 'deploy.mjs', 'version-bump.mjs'],
 		rules: {
 			'obsidianmd/no-nodejs-modules': 'off',
@@ -71,8 +63,6 @@ export default defineConfig(
 		"version-bump.mjs",
 		"versions.json",
 		"main.js",
-		"test/.build",
-		// 开发用的一次性工具脚本（不进 main.js，也没什么好守的规矩）
-		"tools/**",
+		// 瀵偓閸欐垹鏁ら惃鍕濞嗏剝鈧冧紣閸忕柉鍓奸張顒婄礄娑撳秷绻?main.js閿涘奔绡冨▽鈥茬矆娑斿牆銈界€瑰牏娈戠憴鍕叐閿?		"tools/**",
 	]),
 );
