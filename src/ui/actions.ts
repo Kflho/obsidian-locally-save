@@ -15,6 +15,7 @@ import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { scanTree } from '../sync/disk';
 import { loadState } from '../sync/state';
 import type { PluginState } from '../sync/state';
+import { computeStateId } from '../sync/state-id';
 import { anchorFingerprintOf } from '../settings/model';
 import type { PluginSettings, SyncDirection } from '../settings/model';
 import type { Inventory } from '../sync/types';
@@ -393,7 +394,7 @@ async function writePlannedBundles(
 	const inventory = await scanVault(plugin);
 	const state = await loadState(plugin.stateFile());
 	const generationFloor = options.generationFloor ?? 0;
-	if (!hasChanges(state, inventory)) {
+	if (!(await hasContentChanges(plugin, state, inventory))) {
 		return {
 			notes: ['自上次留包以来没有变化，没有生成包（要导完整副本，用「导出同步包…」）'],
 			advice: null,
@@ -494,9 +495,24 @@ async function scanVault(plugin: LocallySavePlugin): Promise<Inventory> {
 /**
  * 仓库自上次留包以来有变化吗（没有就不写任何包）。
  *
- * 判据与导出挑成员用的是同一条（大小 + 修改时间，2 秒容差），
- * 但**空文件夹也要算**：包里带着空文件夹的清单，漏了它对面永远缺那一个。
+ * **判据是内容状态编号，不是 mtime**：只 touch / 网盘重写会把大小和修改时间改掉，
+ * 内容一个字没变；拿 mtime 判会白写一份「更新包」，对面收到又提示确认，来回滚。
+ * 老状态文件没有 stateId 时才退回 mtime 判据。
  */
+async function hasContentChanges(plugin: LocallySavePlugin, state: PluginState, inventory: Inventory): Promise<boolean> {
+	if (state.stateId) {
+		const current = await computeStateId({
+			vaultRoot: plugin.vaultRoot(),
+			state,
+			files: inventory.files,
+			dirs: inventory.dirs,
+		});
+		return current.id !== state.stateId.id;
+	}
+	return hasChanges(state, inventory);
+}
+
+/** 老状态文件没有 stateId 时的兜底：大小 + mtime，2 秒容差；空文件夹也算 */
 function hasChanges(state: PluginState, inventory: Inventory): boolean {
 	const before = state.bundle?.files ?? {};
 	if (inventory.files.size !== Object.keys(before).length) return true;

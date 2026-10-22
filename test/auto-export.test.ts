@@ -201,6 +201,32 @@ check('无基准的立即同步确实落了完整包', freshFull, 1);
 const freshState = await loadState(fresh.stateFile());
 check('第一次同步后基准立起来了', freshState.bundle?.fullFiles !== null, true);
 
+// 8. mtime-only：内容 SHA256/大小没变，只 touch 了修改时间 → 一个包都不该写
+const ROOT3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lsave-mtime-only-'));
+const VAULT3 = path.join(ROOT3, 'vault');
+const OUT3 = path.join(ROOT3, 'out');
+fs.mkdirSync(path.join(VAULT3, 'notes'), { recursive: true });
+const mtimeNote = path.join(VAULT3, 'notes', 'mtime.md');
+fs.writeFileSync(mtimeNote, 'MTIME ONLY');
+const mtimePlugin = createPlugin({ logLevel: 'silent', autoExportChanges: true, bundleDir: OUT3 });
+(mtimePlugin.app.vault.adapter as unknown as { basePath: string }).basePath = VAULT3;
+await mtimePlugin.onload();
+const mtimeFirst = await exportBundlesNow(mtimePlugin, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+checkTrue('mtime-only 前置：先导完整包', mtimeFirst?.fullWritten === true, JSON.stringify(mtimeFirst));
+const future = new Date(Date.now() + 10_000);
+fs.utimesSync(mtimeNote, future, future);
+noticeLog.length = 0;
+const mtimeSync = await exportBundlesNow(mtimePlugin, '立即同步', { quiet: true, silent: true, defaultWhenOff: true });
+const mtimeChanges = (() => {
+	try {
+		return fs.readdirSync(path.join(OUT3, 'changes')).filter(name => name.endsWith('.lsave')).length;
+	} catch {
+		return 0;
+	}
+})();
+check('mtime-only 不写更新包', mtimeChanges, 0);
+checkTrue('mtime-only 结果如实说没写', mtimeSync?.wrote === false, JSON.stringify(mtimeSync));
+
 console.log(`\n共 ${checks} 次检查，失败 ${failures.length} 项`);
 for (const message of failures.slice(0, 10)) console.log("\n❌ " + message);
 if (failures.length > 10) console.log(`\n…… 其余 ${failures.length - 10} 项失败已省略`);
