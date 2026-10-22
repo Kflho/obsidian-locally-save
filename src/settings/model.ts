@@ -122,7 +122,7 @@ export interface PluginSettings {
 	// 两个开关都关着时，触发了也什么都不做（只记一条日志）—— 不弹错。
 	/** Obsidian 启动后自动留一次包 */
 	syncOnStartup: boolean;
-	/** 定时留包间隔（分钟），0 = 关 */
+	/** 定时同步间隔（分钟），0 = 关；同时驱动定时留包和 git 推拉（0.16 起合并为一个选项） */
 	autoSyncInterval: number;
 	/** 保存笔记后隔多久留一次包（秒）；**0 ＝ 不留** */
 	syncAfterSaveDelay: number;
@@ -193,8 +193,6 @@ export interface PluginSettings {
 	 * 那时管的是"本地副本"，现在管 git 货架 —— 语义还是"谁准"。
 	 */
 	syncDirection: SyncDirection;
-	/** 每隔多久 `git fetch` 一次（分钟，`0` ＝ 只手动）；推送不受它限制 */
-	gitPullMinutes: number;
 	/** git 程序路径；留空 ＝ 从 PATH 里找 */
 	gitPath: string;
 
@@ -239,7 +237,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	gitRemote: '',
 	gitBranch: 'main',
 	syncDirection: 'both',
-	gitPullMinutes: 5,
 	gitPath: '',
 
 	ribbonSyncIcon: true,
@@ -332,6 +329,23 @@ export function settingsFrom(data: unknown): PluginSettings {
 	const bundleDir = rawBundleDir.trim() === '' && legacyTarget !== ''
 		? toNative(legacyTarget, `${BUNDLE_ROOT_DIR}/${BUNDLE_SUBDIR}`)
 		: rawBundleDir;
+	/**
+	 * 迁移：0.16 起「定时留包」和「git 拉取间隔」合并成 `autoSyncInterval` 一个选项。
+	 * 老 `gitPullMinutes` 只在 `autoSyncInterval` 为 0（没设过 / 关着）时兜底，
+	 * 免得只开过 git 拉取的用户升级后不再自动同步。
+	 */
+	const legacyPullRaw = (raw as unknown as { gitPullMinutes?: unknown }).gitPullMinutes;
+	const legacyPullMinutes = coerceNumberChoice(
+		legacyPullRaw,
+		Object.keys(GIT_PULL_OPTIONS).map(Number),
+		0,
+	);
+	const configuredInterval = coerceNumberChoice(
+		raw.autoSyncInterval,
+		Object.keys(SYNC_INTERVAL_OPTIONS).map(Number),
+		DEFAULT_SETTINGS.autoSyncInterval,
+	);
+	const unifiedInterval = configuredInterval > 0 ? configuredInterval : legacyPullMinutes;
 	return {
 		enabled: coerceBoolean(raw.enabled, DEFAULT_SETTINGS.enabled),
 		logLevel: coerceLogLevel(raw.logLevel),
@@ -339,11 +353,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 		excludePatterns: coerceText(raw.excludePatterns, DEFAULT_SETTINGS.excludePatterns),
 
 		syncOnStartup: coerceBoolean(raw.syncOnStartup, DEFAULT_SETTINGS.syncOnStartup),
-		autoSyncInterval: coerceNumberChoice(
-			raw.autoSyncInterval,
-			Object.keys(SYNC_INTERVAL_OPTIONS).map(Number),
-			DEFAULT_SETTINGS.autoSyncInterval,
-		),
+		autoSyncInterval: unifiedInterval,
 		syncAfterSaveDelay: coerceNumberChoice(
 			saveDelay,
 			Object.keys(SAVE_DELAY_OPTIONS).map(Number),
@@ -369,11 +379,6 @@ export function settingsFrom(data: unknown): PluginSettings {
 		// 分支名留空没意义：落到 main（真正的合法性检查在引擎里，非法值会明确报错）
 		gitBranch: coerceText(raw.gitBranch, DEFAULT_SETTINGS.gitBranch).trim() || DEFAULT_SETTINGS.gitBranch,
 		syncDirection: coerceDirection(raw.syncDirection),
-		gitPullMinutes: coerceNumberChoice(
-			raw.gitPullMinutes,
-			Object.keys(GIT_PULL_OPTIONS).map(Number),
-			DEFAULT_SETTINGS.gitPullMinutes,
-		),
 		gitPath: coerceText(raw.gitPath, DEFAULT_SETTINGS.gitPath),
 
 		// ribbonIcon 是 0.1.0 里的旧名字（那时只有一个图标）：老 data.json 也认

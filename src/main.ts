@@ -44,7 +44,7 @@ export default class LocallySavePlugin extends Plugin {
 	 * 一拍之内不许同时开跑 —— 留包要扫仓库，正好扫到"应用到一半"的仓库就麻烦了。
 	 */
 	incomingBusy = false;
-	/** 上一次留包跑完的时间（定时留包靠它判断到没到点） */
+	/** 上一次定时同步（留包）跑完的时间（定时同步靠它判断到没到点） */
 	lastBundleAt = 0;
 	/**
 	 * 正在和 git 远程同步。
@@ -189,11 +189,11 @@ export default class LocallySavePlugin extends Plugin {
 
 	// ------------------------------------------------------------ 内部
 	/**
-	 * 自动留包 / 自动应用的节拍：每 30 秒看一次"到点了吗、有没有新包"。
+	 * 定时同步 / 自动应用的节拍：每 30 秒看一次"到点了吗、有没有新包"。
 	 *
 	 * 一拍里两件事，**先看别人发来的包**（它要写仓库），再决定要不要留包：
 	 * - 收包那条路由 `autoApplyIncoming` 管，只有"完全不会动到本地已有东西"的更新包才会自己应用；
-	 * - 留包那条路由两个「自动留包」开关管，都关着时什么都不做；
+	 * - 定时同步由 `autoSyncInterval` 管：到点先 git 推拉，再（如果开了自动留包）留包；
 	 * - 刚应用过东西的这一拍**不再留包**（那等于立刻生成回礼包，两边容易来回搬运）。
 	 */
 	private tick(): void {
@@ -222,7 +222,7 @@ export default class LocallySavePlugin extends Plugin {
 		this.tickExport();
 	}
 
-	/** 留包那一半：定时到点了、或者保存后静置够久了，就留一轮 */
+	/** 留包那一半：定时同步到点了、或者保存后静置够久了，就留一轮 */
 	private tickExport(): void {
 		// 「仅拉」＝只收不发：这个方向下一个包都不写（手动「导出同步包…」除外）
 		if (isReceiveOnly(this.settings)) return;
@@ -230,7 +230,7 @@ export default class LocallySavePlugin extends Plugin {
 
 		const minutes = this.settings.autoSyncInterval;
 		if (minutes > 0 && Date.now() - this.lastBundleAt >= minutes * 60_000) {
-			void exportBundlesNow(this, '定时留包', { quiet: true });
+			void exportBundlesNow(this, '定时同步', { quiet: true });
 			return;
 		}
 

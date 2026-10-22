@@ -1,6 +1,5 @@
 import {
 	DEFAULT_SETTINGS,
-	GIT_PULL_OPTIONS,
 	SIZE_WARN_OPTIONS,
 	coerceAnchorFingerprint,
 	coerceBoolean,
@@ -107,17 +106,6 @@ export const ADVANCED_SECTION: FieldSection = {
 					desc: '搬包用的分支。',
 					control: { type: 'text', placeholder: 'main' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.gitBranch).trim() || DEFAULT_SETTINGS.gitBranch,
-				},
-				{
-					key: 'gitPullMinutes',
-					name: '多久拉一次',
-					desc: '多久检查一次远程。本机留了新包时不等它，30 秒内推送。',
-					control: { type: 'dropdown', options: GIT_PULL_OPTIONS },
-					coerce: value => coerceNumberChoice(
-						value,
-						Object.keys(GIT_PULL_OPTIONS).map(Number),
-						DEFAULT_SETTINGS.gitPullMinutes,
-					),
 				},
 				{
 					key: 'gitPath',

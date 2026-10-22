@@ -160,7 +160,7 @@ export async function syncGitNow(
  * 自动那条路（每 30 秒的节拍调）。
  *
  * 什么时候真的干活：
- * - 到了拉取间隔（`gitPullMinutes`，0 ＝ 不自动拉）；
+ * - 到了统一同步间隔（`autoSyncInterval`，0 ＝ 不自动拉）；
  * - 或者货架里**有还没提交的包**（刚留过包 → 30 秒内推上去，不等拉取间隔）；
  * - 或者上一次没推上去（`state.git.ahead > 0`）。
  * 没接上（还不是 git 仓库）就安静地跳过 —— **不自动 init**。
@@ -174,8 +174,8 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 	if (!shelf) return false;
 	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) return false;
 
-	const due = plugin.settings.gitPullMinutes > 0
-		&& Date.now() - plugin.lastGitAt >= plugin.settings.gitPullMinutes * 60_000;
+	const due = plugin.settings.autoSyncInterval > 0
+		&& Date.now() - plugin.lastGitAt >= plugin.settings.autoSyncInterval * 60_000;
 	const state = await loadState(plugin.stateFile());
 	const last = state.git;
 	const pendingPush = (last?.ahead ?? 0) > 0;

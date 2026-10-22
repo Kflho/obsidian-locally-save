@@ -25,8 +25,8 @@ export const AUTO_SECTION: FieldSection = {
 				},
 				{
 					key: 'autoSyncInterval',
-					name: '定时留包',
-					desc: '每隔一段时间自动留一次；Obsidian 关闭后停止。',
+					name: '定时同步（留包 + git）',
+					desc: '每隔一段时间：留一次包（如果开了自动留包），并把货架和 git 远程推拉一遍；0 ＝ 只手动。',
 					control: { type: 'dropdown', options: SYNC_INTERVAL_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,

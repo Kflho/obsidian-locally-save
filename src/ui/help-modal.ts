@@ -196,8 +196,8 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '谁什么时候动手' });
 		const automation = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		automation.createEl('li', {
-			text: '自动留包：「自动留包」页选时机（启动后、定时、保存后）和类型（更新包、完整包）。'
-				+ '自上次留包以来没有变化时，一个包都不写。',
+			text: '自动留包：「自动留包」页选时机（启动后、定时同步、保存后）和类型（更新包、完整包）。'
+				+ '「定时同步」一个选项同时管留包和 git 推拉；自上次留包以来没有变化时，一个包都不写。',
 		});
 		automation.createEl('li', {
 			text: '收包：仅拉直接应用；双向先确认；仅推不收。'

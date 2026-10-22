@@ -163,8 +163,26 @@ check(
 );
 check(
 	"已经被删掉的设置项不会残留（读盘时直接丢掉）",
-	Object.keys(settingsFrom({ startupNotice: true, greeting: '你好', rememberFingerprints: false, pruneSupersededBundles: false })),
+	Object.keys(settingsFrom({ startupNotice: true, greeting: '你好', rememberFingerprints: false, pruneSupersededBundles: false, gitPullMinutes: 15 })),
 	Object.keys(DEFAULT_SETTINGS),
+);
+
+// 6b-2. 迁移：0.16 起「定时留包」和「git 拉取间隔」合并成 autoSyncInterval 一个选项。
+//      autoSyncInterval 优先；老 gitPullMinutes 只在它为 0（没设过 / 关着）时兜底。
+check(
+	'老配置：只有 gitPullMinutes → 定时同步沿用老的拉取间隔',
+	settingsFrom({ gitPullMinutes: 15 } as unknown as Partial<PluginSettings>).autoSyncInterval,
+	15,
+);
+check(
+	'两边都有 → autoSyncInterval 优先（一个选项说了算）',
+	settingsFrom({ autoSyncInterval: 5, gitPullMinutes: 15 } as unknown as Partial<PluginSettings>).autoSyncInterval,
+	5,
+);
+check(
+	'新装 / 什么都没设 → 定时同步默认关',
+	settingsFrom({}).autoSyncInterval,
+	0,
 );
 
 // 6c. 迁移：0.8.0 砍掉了「同步到本地副本」通道（targetDir / syncDirection 一起删了）。
