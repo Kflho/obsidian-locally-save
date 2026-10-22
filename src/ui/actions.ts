@@ -692,10 +692,22 @@ function confirmIncomingApply(
 	candidate: IncomingCandidate,
 	plan: ApplyPlan,
 ): Promise<boolean | 'defer'> {
-	if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-		debugEvent('incoming.confirm.deferred', { file: candidate.bundle.name });
+	// 用「窗口有没有焦点」判定，不用 `visibilityState`：实测（kahotat 机器）
+	// visibilityState 会一直是 hidden，窗口拉到前台也不变 —— 那样确认框永远弹不出来。
+	const doc = typeof document !== 'undefined' ? document : null;
+	const hasFocus = doc && typeof doc.hasFocus === 'function' ? doc.hasFocus() : true;
+	if (doc && !hasFocus) {
+		debugEvent('incoming.confirm.deferred', {
+			visibilityState: doc.visibilityState,
+			hidden: doc.hidden,
+			hasFocus,
+		});
 		return Promise.resolve('defer');
 	}
+	debugEvent('incoming.confirm.open', {
+		visibilityState: doc?.visibilityState ?? null,
+		hidden: doc?.hidden ?? null,
+	});
 	const counts = { write: 0, rename: 0, conflict: 0, delete: 0, restore: 0 };
 	for (const action of plan.actions) counts[action.kind] += 1;
 	const parts: string[] = [];

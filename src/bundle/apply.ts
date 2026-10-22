@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { debugEvent } from '../debugLog';
 import { readBundleInfo, readBundleInfoSync, verifyBundle } from './format';
 import type { BundleEntry, BundleHeader, BundleInfo, BundleMove } from './format';
 import { baselineOfBundle, baselineOfFullBundle, compareBaseline, listingHashOfFiles } from './baseline';
@@ -1592,7 +1593,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			candidates.push({ path: file, record });
 		}
 		if (candidates.length > 0) {
-			const source = findBaselineBundle(state, options, candidates.length);
+			const paths = candidates.map(item => item.path);
+			// 路径要进日志：只报"1 个改动"没人能自查是哪个文件
+			debugEvent('apply.restore-needed', { count: paths.length, paths: paths.slice(0, 10) });
+			const source = findBaselineBundle(state, options, candidates.length, paths);
 			const byPath = new Map(source.info.header.entries.map(entry => [entry.path, entry]));
 			for (const candidate of candidates) {
 				const entry = byPath.get(candidate.path);
@@ -1814,11 +1818,16 @@ function findBaselineBundle(
 	state: PluginState,
 	options: ApplyOptions,
 	needed: number,
+	paths: string[] = [],
 ): BaselineBundleSource {
 	const hash = state.bundle?.fullHash ?? null;
+	/** 报错里带上前几个路径：用户要能自己核对"到底哪个文件被判成本机改动" */
+	const where = paths.length === 0
+		? ''
+		: `（涉及：${paths.slice(0, 5).join('、')}${paths.length > 5 ? ` 等 ${paths.length} 个` : ''}）`;
 	if (!hash) {
 		throw new Error(
-			`本机有 ${needed} 个改动不在这份包里，但本机还没有完整副本，没法把它们恢复成“对面那一版”：`
+			`本机有 ${needed} 个改动不在这份包里${where}，但本机还没有完整副本，没法把它们恢复成“对面那一版”：`
 			+ '先应用一份完整副本当基准，再让对方按那份基准重导更新包',
 		);
 	}
@@ -1861,7 +1870,7 @@ function findBaselineBundle(
 	}
 
 	throw new Error(
-		`本机有 ${needed} 个改动不在这份包里；要按“仅拉＝跟对面严格相等”把它们恢复成基准那一版，`
+		`本机有 ${needed} 个改动不在这份包里${where}；要按“仅拉＝跟对面严格相等”把它们恢复成基准那一版，`
 		+ `得读基准完整副本「${wanted ?? hash}」的原版内容，但它不在包目录里。\n`
 		+ '下一步：把那份完整包放回同步包文件夹的 full/ 再应用；'
 		+ '或者让对方导一份新的完整副本过来（完整清单自带基准，谁都能应用）',
