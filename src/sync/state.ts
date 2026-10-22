@@ -233,6 +233,11 @@ export interface IncomingRecord {
 	file?: string;
 	/** 失败原因（failed 时写，截断 500 字） */
 	error?: string;
+	/**
+	 * 连续失败次数（0.15.9 起）：失败的包每 10 分钟自动重试一次，最多 3 次；
+	 * 到上限就停（确定性失败，再试只会刷屏）。手动「立即同步」不受这个限制。
+	 */
+	attempts?: number;
 }
 
 /** `state.incoming` 最多留几笔 */

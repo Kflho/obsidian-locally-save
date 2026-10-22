@@ -6,7 +6,23 @@ import { baselineOfBundle } from './baseline';
 import { listBundles } from './manage';
 import type { ManagedBundle } from './manage';
 import { loadState, rememberIncoming, saveState } from '../sync/state';
-import type { PluginState } from '../sync/state';
+import type { IncomingRecord, PluginState } from '../sync/state';
+
+/**
+ * 失败的包**自动重试几次**（用户拍板的"持续协同，没问题就别让人管"）。
+ *
+ * 为什么不只靠手动的「立即同步」：包失败往往是一时的（包还没拷完、对面正在重写、
+ * 完整副本临时不在），而记录成 `failed` 之后自动节拍就不再挑它 —— 用户不点，
+ * 两边就永远差一截，而且**没有第二个人知道为什么**（283 就是这么卡住的）。
+ *
+ * 边界（别改成无限重试）：
+ * - 最多 `MAX_FAILED_ATTEMPTS` 次，再多就是确定性失败，重试只会刷屏；
+ * - 两次之间至少隔 `RETRY_FAILED_AFTER_MS`，否则每 30 秒一次；
+ * - 手动「立即同步」不受次数限制（用户明确点了就该再试）；
+ * - `dismissed` / `applied` 永远不重挑。
+ */
+export const MAX_FAILED_ATTEMPTS = 3;
+export const RETRY_FAILED_AFTER_MS = 10 * 60 * 1000;
 
 /**
  * 「收到的包」—— **自动应用**那一步要用的挑选与判断。
@@ -68,8 +84,8 @@ export function pickIncoming(
 	options: PickIncomingOptions = {},
 ): IncomingCandidate[] {
 	// 同一个包可能被记过好几笔（先 needs-review、重试后 applied）：**以最后一笔为准**
-	const decided = new Map<string, string>();
-	for (const item of state.incoming ?? []) decided.set(item.id, item.note);
+	const decided = new Map<string, IncomingRecord>();
+	for (const item of state.incoming ?? []) decided.set(item.id, item);
 	const logged = new Set((state.bundleLog ?? []).map(entry => entry.bundleId));
 	const out: IncomingCandidate[] = [];
 	for (const bundle of bundles) {
@@ -77,10 +93,14 @@ export function pickIncoming(
 		if (!header) continue;
 		if (logged.has(header.bundleId)) continue;
 		if (header.source?.copyId === state.copyId) continue;
-		const note = decided.get(header.bundleId);
-		if (note !== undefined) {
-			const retry = options.retryBlocked === true && (note === 'needs-review' || note === 'failed');
-			if (!retry) continue;
+		const record = decided.get(header.bundleId);
+		if (record) {
+			const manual = options.retryBlocked === true
+				&& (record.note === 'needs-review' || record.note === 'failed');
+			const autoRetry = record.note === 'failed'
+				&& (record.attempts ?? 0) < MAX_FAILED_ATTEMPTS
+				&& Date.now() - record.at >= RETRY_FAILED_AFTER_MS;
+			if (!manual && !autoRetry) continue;
 		}
 		out.push({ bundle, bundleId: header.bundleId });
 	}
@@ -322,12 +342,16 @@ async function rememberDecision(
 ): Promise<void> {
 	try {
 		const state = await loadState(stateFile);
+		// 失败次数累加：自动重试的上限看它（成功/别的结论不再累加）
+		const previous = (state.incoming ?? []).filter(item => item.id === bundleId).pop();
+		const attempts = note === 'failed' ? (previous?.attempts ?? 0) + 1 : previous?.attempts;
 		rememberIncoming(state, {
 			id: bundleId,
 			at: Date.now(),
 			note,
 			file,
 			...(error ? { error: error.slice(0, 500) } : {}),
+			...(attempts ? { attempts } : {}),
 		});
 		await saveState(stateFile, state);
 	} catch {
