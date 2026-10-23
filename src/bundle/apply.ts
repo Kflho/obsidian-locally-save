@@ -8,8 +8,10 @@ import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
 import { DEFAULT_MTIME_TOLERANCE_MS, dirsContainingFiles, planSync, sameRecord } from '../sync/diff';
 import { CONFLICT_TRASH_DIR, dirExists, ensureDir, moveToTrash, pathExists, pickRemovableEmptyDirs, pruneEmptyDirs, removeEmptyDir, scanTree, statFile } from '../sync/disk';
+import { isExcluded } from '../sync/exclude';
+import { fingerprint } from '../sync/hash-cache';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
-import { loadState, raiseGeneration, saveState } from '../sync/state';
+import { loadState, raiseGeneration, saveState, HASH_KEEP } from '../sync/state';
 import type { PluginState, StateIdInfo, StateIdRecord } from '../sync/state';
 import { compareStateId, computeStateId } from '../sync/state-id';
 import type { StateIdCompare } from '../sync/state-id';
@@ -543,6 +545,24 @@ export interface ApplyResult {
 		baselineGeneration: number | null;
 		matched: boolean;
 	};
+	/**
+	 * **编号对不上时，差在哪**（只对"本来就该严格相等"的应用算：完整副本镜像）。
+	 *
+	 * 用户报过好几次"应用完提示编号还差一点"，而报告里只有一句结论 ——
+	 * 到底多出来什么、缺了什么，谁也看不出来（真机上排查全靠肉眼 diff 整个库）。
+	 * 这里把两边的清单直接摊开：多出来的路径、缺的路径、大小/内容不一样的路径，
+	 * 以及**其中有多少是被本机排除规则挡住的**（两台机器的 `excludePatterns` 不一致时，
+	 * 编号永远对不上，而计划一条失败都不会报）。
+	 */
+	stateIdGap?: {
+		files: { mine: number; theirs: number; extra: number; missing: number; changed: number };
+		dirs: { mine: number; theirs: number; extra: number; missing: number };
+		extraSample: string[];
+		missingSample: string[];
+		changedSample: string[];
+		/** 缺的那些里，有多少命中本机的排除规则（多半就是"两边排除规则不一样"） */
+		excludedMissing: number;
+	} | null;
 }
 
 /** 本地这份是不是"对方发过的中间版本"（跳过了一两个包，手里停在这一版） */
@@ -2529,6 +2549,13 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	result.stateId = { ...stateIdInfo, at: Date.now() };
 	result.stateIdCompare = compareStateId(stateIdInfo, plan.info.header.stateId ?? null);
 	/**
+	 * **差在哪**：编号对不上时，把"多出来 / 缺了 / 内容不一样"的路径摊开（只做完整副本）。
+	 * 「还差一点」这句话本身没法排查 —— 用户与对面 agent 都只能猜（这次就是）。
+	 */
+	result.stateIdGap = result.stateIdCompare === 'match'
+		? null
+		: await describeStateIdGap(options, plan, inventory, state);
+	/**
 	 * **做完之后逐条核对**：计划里说"要到位"的东西真到位了吗？
 	 *
 	 * 只看这个计划**动手的路径**（写 / 改名 / 删 / 补建目录），不看"仓库里有没有别的文件" ——
@@ -2867,7 +2894,80 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	return result;
 }
 
-/** 一步到位（命令与自动化用）；界面走 plan + execute 两步 */
+/**
+ * **编号对不上时，差在哪**（只做完整副本镜像：它本来就该"应用完 ＝ 包"）。
+ *
+ * 为什么要它：用户看到的那句"编号还差一点"根本没法排查 —— 多出来什么、缺了什么、
+ * 是不是被本机排除规则挡住了，全得靠肉眼 diff 整个库。这里按包的清单逐条对：
+ *
+ * - **多出来**：本机有、包里没有（镜像没删掉：被排除规则挡住 / 删失败 / 权限）；
+ * - **缺**：包里有、本机没有（写失败 / 被本机排除规则挡住 —— 后者两台机器的规则不一致时才出现，
+ *   这种编号**永远**对不上，而计划一条失败都不报）；
+ * - **内容不一样**：大小相同但内容指纹不同（写了一半 / 被别的程序改回去了）。
+ */
+async function describeStateIdGap(
+	options: ApplyOptions,
+	plan: ApplyPlan,
+	inventory: Inventory,
+	state: PluginState,
+): Promise<NonNullable<ApplyResult['stateIdGap']> | null> {
+	if (plan.info.header.mode !== 'full') return null;
+	const patterns = excludePatterns(options.settings.excludePatterns, options.configDir);
+	const expected = new Map<string, BundleEntry>();
+	for (const entry of plan.info.header.entries) expected.set(entry.path, entry);
+	const expectedDirs = dirsInBundle(plan.info.header);
+	const extra: string[] = [];
+	const missing: string[] = [];
+	const changed: string[] = [];
+	let excludedMissing = 0;
+	for (const [file, record] of inventory.files) {
+		const entry = expected.get(file);
+		if (!entry) {
+			extra.push(file);
+			continue;
+		}
+		if (record.size !== entry.size) {
+			changed.push(file);
+			continue;
+		}
+		const here = await fingerprint(options.vaultRoot, state, file, record, true);
+		if (here && entry.hash && here.slice(0, HASH_KEEP) !== entry.hash) changed.push(file);
+	}
+	for (const file of expected.keys()) {
+		if (inventory.files.has(file)) continue;
+		missing.push(file);
+		if (isExcluded(file, patterns)) excludedMissing++;
+	}
+	const extraDirs = [...inventory.dirs].filter(dir => !expectedDirs.has(dir)).sort();
+	const missingDirs = [...expectedDirs].filter(dir => !inventory.dirs.has(dir)).sort();
+	extra.sort();
+	missing.sort();
+	changed.sort();
+	const gap = {
+		files: {
+			mine: inventory.files.size,
+			theirs: expected.size,
+			extra: extra.length,
+			missing: missing.length,
+			changed: changed.length,
+		},
+		dirs: {
+			mine: inventory.dirs.size,
+			theirs: expectedDirs.size,
+			extra: extraDirs.length,
+			missing: missingDirs.length,
+		},
+		extraSample: extra.slice(0, 8),
+		missingSample: missing.slice(0, 8),
+		changedSample: changed.slice(0, 8),
+		excludedMissing,
+	};
+	options.log.debug(`编号对不上的明细：${JSON.stringify(gap)}`);
+	debugEvent('apply.state-id-gap', gap);
+	return gap;
+}
+
+
 export async function applyBundle(options: ApplyOptions): Promise<{ plan: ApplyPlan; result: ApplyResult }> {
 	const plan = await planBundleApply(options);
 	return { plan, result: await executeBundlePlan(plan, options) };

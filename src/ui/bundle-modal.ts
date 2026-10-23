@@ -1147,6 +1147,26 @@ export class ApplyBundleModal extends Modal {
 			const didNothing = result.written === 0 && result.deleted === 0 && result.moved === 0
 				&& result.restored === 0 && result.foldersCreated === 0 && result.foldersRemoved === 0;
 			const matched = result.stateIdCompare === 'match' || !plan.info.header.stateId;
+			/**
+			 * **"编号还差一点"要说清差在哪**：只说结论的话，用户与对面 agent 都只能猜
+			 * （0.16.1 之前就是这样，真机排查全靠肉眼 diff 整个库）。`stateIdGap` 是应用时
+			 * 按包的清单逐条对出来的：多出来 / 缺 / 内容不同，以及其中多少被本机排除规则挡住。
+			 */
+			const gapParts: string[] = [];
+			const gap = result.stateIdGap ?? null;
+			if (gap && !matched) {
+				if (gap.files.extra > 0) gapParts.push(`本机多 ${gap.files.extra} 个文件`);
+				if (gap.files.missing > 0) gapParts.push(`缺 ${gap.files.missing} 个文件`);
+				if (gap.files.changed > 0) gapParts.push(`${gap.files.changed} 个内容不同`);
+				if (gap.dirs.extra > 0) gapParts.push(`多 ${gap.dirs.extra} 个文件夹`);
+				if (gap.dirs.missing > 0) gapParts.push(`缺 ${gap.dirs.missing} 个文件夹`);
+				if (gap.excludedMissing > 0) {
+					gapParts.push(`其中 ${gap.excludedMissing} 个被本机排除规则挡住（两台机器的排除规则要一样）`);
+				}
+				const sample = [...gap.extraSample, ...gap.missingSample, ...gap.changedSample].slice(0, 3);
+				if (sample.length > 0) gapParts.push(`例：${sample.join('、')}`);
+				if (gapParts.length > 0) parts.push(`编号差在：${gapParts.join('；')}`);
+			}
 			// **没写任何东西 ≠ 两边一样**：可能正是"删不掉的文件夹 / 写不进去的文件"让编号对不上
 			if (didNothing && result.failed.length === 0 && matched && landedCleanly && recoveryError === null) {
 				new Notice('没有改动 · 本地已经是最新', 5000);
@@ -1155,7 +1175,9 @@ export class ApplyBundleModal extends Modal {
 					? '对不上，强制回退失败（看报告）'
 					: result.stateIdCompare === 'match'
 						? (recovered ? '两边一致（强制回退到基准后）' : '两边一致')
-						: (wantsBaseline && !landedCleanly ? '没落到基准（看报告）' : '编号还差一点');
+						: (wantsBaseline && !landedCleanly
+							? '没落到基准（看报告）'
+							: `编号还差一点${gapParts.length > 0 ? `（${gapParts.join('；')}）` : ''}`);
 				new Notice(`已应用同步包 · ${same}`, recoveryError !== null ? 9000 : 6000);
 			}
 			if (parts.length > 0) this.plugin.log.debug(`应用报告：${parts.join(' · ')}`);
