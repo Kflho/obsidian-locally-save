@@ -666,10 +666,24 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 	}
 	if (direction === 'both') {
 		if (plugin.settings.autoApplyIncomingBoth) {
+			/**
+			 * **无人值守的「双向」不再镜像**（0.16.12，用户报的"写完又被回退了"）。
+			 *
+			 * 旧口径是 `mirror + alignToPeer`：把仓库变成**对面那一刻**，我正在写的东西整片被覆盖
+			 * （覆盖的进回收目录，但人已经看着文件跳回旧版了），而且"我这一半"只能等下次回礼。
+			 * 现在的口径是**三方合并、冲突听本地的**：
+			 * - 我改过的文件：**保持不动**（local-wins）；
+			 * - 对方新增 / 修改、我没动的：合进来；
+			 * - 合并完状态编号必然与包不同 → 上层那条"回礼"会把合并后的我这一半导出回去，
+			 *   对面收下就也是这一份（两边收敛，谁都没被回退）。
+			 *
+			 * `normal` 仍然要求同一份基准（`checkAncestor`），接不上的包照旧等或拒，
+			 * 不会拿"合并不上"的包去覆盖仓库。
+			 */
 			return {
 				force: true,
 				allowFull: true,
-				apply: { strictness: 'mirror', alignToPeer: true },
+				apply: { strictness: 'normal', conflictStrategy: 'local-wins' },
 			};
 		}
 		// 免确认但**不镜像**的合并开关已经撤掉：它只是绕过确认框，和"先应用、再导出回传"
