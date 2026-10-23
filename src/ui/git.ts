@@ -261,13 +261,21 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 	if (base === '') return '还没填「同步包文件夹」。去「同步包」那一页填一个仓库之外的目录。';
 	const remote = plugin.settings.gitRemote.trim();
 	if (remote === '') return '还没填「远程地址」。填一个私有仓库的 HTTPS 或 SSH 地址。';
-	if (!fs.existsSync(path.join(base, '.git'))) {
-		return '还没接入。点下面「接入这个远程…」把同步包文件夹变成 git 仓库。';
+	const layout = detectGitLayoutSync(base);
+	if (!layout) {
+		return '还没接入。点下面「接入这个远程…」把同步包文件夹变成 git 仓库；'
+			+ '或者把它放进一个已有仓库的子目录（比如 kf-personal-data），插件会跟着那个仓库同步。';
 	}
-	const current = readOriginUrl(base);
-	if (current && current !== remote) {
+	const current = readOriginUrl(layout.repo);
+	if (!current) {
+		return layout.hosted
+			? `这个文件夹在仓库 ${layout.repo} 里，但那个仓库没有远程地址。先在仓库里配好 origin。`
+			: '还没接入。点下面「接入这个远程…」补上远程地址。';
+	}
+	if (current !== remote) {
 		return `git 远程是 ${redactRemote(current)}，和设置里的地址不同。先改回来，或重新接入。`;
 	}
+	const where = layout.hosted ? `${redactRemote(remote)}（子目录 ${layout.rel}）` : redactRemote(remote);
 
 	let state: PluginState | null = null;
 	try {
@@ -276,11 +284,11 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 		state = null;
 	}
 	const git = state?.git;
-	if (!git) return `已接上 ${redactRemote(remote)} · 还没同步过（点「现在同步一次」）`;
+	if (!git) return `已接上 ${where} · 还没同步过（点「现在同步一次」）`;
 	if (!git.ok) {
-		return `已接上 ${redactRemote(remote)} · 上次同步失败：${git.error ?? '看日志'}（点「测试连通性」查）`;
+		return `已接上 ${where} · 上次同步失败：${git.error ?? '看日志'}（点「测试连通性」查）`;
 	}
-	const bits = [`已接上 ${redactRemote(remote)}`, `${hhmm(git.at)} 推拉过`];
+	const bits = [`已接上 ${where}`, `${hhmm(git.at)} 推拉过`];
 	if (git.pulled > 0) bits.push(`收到 ${git.pulled} 个包`);
 	if (git.ahead > 0) bits.push(`${git.ahead} 个没推上去`);
 	if (git.behind > 0) bits.push(`落后 ${git.behind} 个提交`);
@@ -335,9 +343,13 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 
 	const top = await run(['rev-parse', '--show-toplevel'])
 		.catch(() => ({ code: -1, stdout: '', stderr: '', timedOut: false }));
-	lines.push(top.code === 0 && samePathText(top.stdout.trim(), base)
-		? '接入状态：已经是 git 仓库（「接入这个远程…」会补上远程与排除规则）'
-		: '接入状态：还没接入（点下面「接入这个远程…」）');
+	if (top.code === 0 && samePathText(top.stdout.trim(), base)) {
+		lines.push('接入状态：已经是 git 仓库（「接入这个远程…」会补上远程与排除规则）');
+	} else if (top.code === 0) {
+		lines.push(`接入状态：在仓库 ${top.stdout.trim()} 里的子目录（提交只涉及这一段，推的是那个仓库当前的分支）`);
+	} else {
+		lines.push('接入状态：还没接入（点「接入这个远程…」；也可以把它放进一个已有仓库的子目录）');
+	}
 
 	// 真正联网的一步：ls-remote 会走 SSH / 凭据，把"连不上 / 没权限"当场暴露出来
 	const ls = await run(['ls-remote', '--heads', remote, branch], 60_000)
@@ -358,13 +370,32 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 }
 
 /** 货架 `.git/config` 里 `origin` 的地址（读不到返回 null） */
-function readOriginUrl(base: string): string | null {
+function readOriginUrl(repo: string): string | null {
 	try {
-		const text = fs.readFileSync(path.join(base, '.git', 'config'), 'utf8');
+		const text = fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8');
 		const match = /\[remote "origin"\][^[]*?url\s*=\s*(.+)/.exec(text);
 		return match?.[1]?.trim() ?? null;
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * 同步读一眼这个文件夹在 git 里的身份（设置页是同步渲染的，等不了 `readShelfLayout`）。
+ *
+ * 往上找第一个带 `.git` 的目录：就是它 → 独立货架；在它上面 → 别人仓库的子目录。
+ */
+function detectGitLayoutSync(base: string): { repo: string; rel: string; hosted: boolean } | null {
+	const target = path.resolve(base);
+	let dir = target;
+	for (;;) {
+		if (fs.existsSync(path.join(dir, '.git'))) {
+			const rel = path.relative(dir, target).split(path.sep).join('/');
+			return { repo: dir, rel, hosted: rel !== '' };
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
 	}
 }
 
@@ -416,9 +447,11 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 
 	plugin.gitBusy = true;
 	let created = false;
+	let hosted = false;
 	try {
 		const prepared = await prepareShelf(shelf);
 		created = prepared.created;
+		hosted = prepared.hosted;
 		plugin.gitFailures = 0;
 		plugin.gitBackoffUntil = 0;
 	} catch (error) {
@@ -433,7 +466,14 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 	plugin.log.debug(created ? '同步包文件夹已初始化' : '同步包文件夹已经在用');
 	const synced = await syncGitNow(plugin, { manual: true });
 	if (synced) {
-		new Notice(created ? '已接入 git：之后留包会自动提交并推送' : '已经接入过，这一轮也同步完了', 8000);
+		new Notice(
+			created
+				? '已接入 git：之后留包会自动提交并推送'
+				: hosted
+					? '这个文件夹已经在仓库里：不新建仓库，跟着那个仓库当前的分支走（提交只涉及这一段）'
+					: '已经接入过，这一轮也同步完了',
+			8000,
+		);
 	}
 }
 

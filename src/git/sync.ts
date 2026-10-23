@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { gitFailure } from './run';
 import type { GitResult } from './run';
-import { gitRunner, isShelf, prepareShelf } from './shelf';
-import type { GitRunner, ShelfOptions } from './shelf';
+import { gitRunner, prepareShelf, readShelfLayout } from './shelf';
+import type { GitRunner, ShelfLayout, ShelfOptions } from './shelf';
 
 /**
  * 一次"和远程对一遍"：**提交本机的包 → 拉下别人的包 → 推上去**。
@@ -16,6 +16,13 @@ import type { GitRunner, ShelfOptions } from './shelf';
  *
  * 顺序不能换：**先提交再拉**。倒过来的话，本地刚写出来、还没提交的包会让 rebase 拒绝开工；
  * 而先提交的那一笔要是推送失败，下一次同步会原样再试（提交本身不联网，失败了也不丢东西）。
+ *
+ * 0.16 起货架可能是**别人仓库里的一个子目录**（比如 `kf-personal-data/locally-save`）。
+ * 那种形态下这个模块的纪律更紧（细节见 `shelf.ts`）：
+ * - 提交只认货架自己那一段（`git add -A -- .`，cwd 就在货架里），绝不整仓 `add -A`；
+ * - **绝不 rebase、绝不 abort** 外层仓库的合并 —— 那里可能有用户的提交和正在做的事；
+ *   对不齐就报错停下，让人来处理；
+ * - 推的是外层仓库当前的**整个分支**（git 只能推分支），这一点界面上会写明。
  */
 
 export interface GitSyncReport {
@@ -35,30 +42,42 @@ export interface GitSyncReport {
 	head: string | null;
 	/** 这一趟是不是刚建了货架（界面上要说一句"接上了"） */
 	createdShelf: boolean;
+	/** 货架是外层仓库的子目录（提交/推送只涉及货架那一段，但推的是整个分支） */
+	hosted: boolean;
 }
 
 /** 把货架和远程对一遍（幂等：没有变化时只花几条本地 git 命令） */
 export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	const prepared = await prepareShelf(options);
+	const layout = prepared.layout;
 	const dir = path.resolve(options.dir);
 	const git = gitRunner(options);
+	const hosted = layout.hosted;
+	const branch = hosted ? layout.branch : options.branch;
 
-	// 上一次卡在半路的 rebase / merge：先收拾掉，否则后面每条命令都会失败
-	await clearStuckState(dir, git);
+	if (hosted) {
+		// 外层仓库里有没做完的 rebase / merge：那是用户的活，插件不碰，也不在这上面动手
+		if (await hasStuckState(git, dir)) {
+			throw new Error('这个仓库里还有没做完的 rebase / merge：先把它收拾掉再同步（插件不会替你中止）。');
+		}
+	} else {
+		// 上一次卡在半路的 rebase / merge：先收拾掉，否则后面每条命令都会失败
+		await clearStuckState(dir, git);
+	}
 
 	// 提交本机新写的包（含"撤下"的删除）
 	options.onStage?.('检查本机的包…');
 	const before = await listBundlePaths(dir, options.trashDir);
 	options.onStage?.('提交本机的包…');
-	const committed = await commitPending(git);
+	const committed = hosted ? await commitScoped(git, layout) : await commitPending(git);
 
 	// 拉：远程还是空仓库是正常情况（第一次推之前就是）
 	options.onStage?.('连接远程…');
-	const fetched = await fetchRemote(git, options.branch);
+	const fetched = await fetchRemote(git, branch);
 	let remoteEmpty = false;
 	if (fetched.kind === 'fetched') {
 		options.onStage?.('合并远程的包…');
-		await mergeFetched(git);
+		await mergeFetched(git, hosted);
 	} else if (fetched.kind === 'empty') {
 		remoteEmpty = true;
 	} else {
@@ -69,12 +88,12 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	const after = await listBundlePaths(dir, options.trashDir);
 	const pulled = [...after].filter(item => !before.has(item)).sort();
 
-	let counts = await aheadBehind(git, options.branch);
+	let counts = await aheadBehind(git, branch);
 	let pushed = false;
 	if (counts.ahead > 0) {
 		options.onStage?.('推送远程…');
-		pushed = await pushWithRetry(options);
-		counts = await aheadBehind(git, options.branch);
+		pushed = await pushWithRetry(options, 1, hosted, branch);
+		counts = await aheadBehind(git, branch);
 	}
 
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
@@ -87,6 +106,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 		behind: counts.behind,
 		head: head.code === 0 ? head.stdout.trim() : null,
 		createdShelf: prepared.created,
+		hosted,
 	};
 }
 
@@ -96,19 +116,24 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
  * 为什么会撞：两边都在 30 秒的节拍上工作，A 推完 B 才推，B 的远程引用还是旧的 ——
  * 这是**正常情况**，不是错误。真正推不上去（认证 / 权限 / 网络）才会抛。
  */
-export async function pushWithRetry(options: ShelfOptions, retries = 1): Promise<boolean> {
+export async function pushWithRetry(
+	options: ShelfOptions,
+	retries = 1,
+	hosted = false,
+	branch = options.branch,
+): Promise<boolean> {
 	const git = gitRunner(options);
-	let push = await pushOnce(git, options.branch);
+	let push = await pushOnce(git, branch);
 	if (push.code === 0) return true;
 
 	for (let attempt = 0; attempt < retries; attempt++) {
-		const before = await remoteTip(git, options.branch);
-		const fetch = await git(['fetch', 'origin', options.branch], true);
+		const before = await remoteTip(git, branch);
+		const fetch = await git(['fetch', 'origin', branch], true);
 		if (fetch.code !== 0) break; // 连不上：重试没意义，把原始失败报出去
-		await mergeFetched(git);
-		const after = await remoteTip(git, options.branch);
+		await mergeFetched(git, hosted);
+		const after = await remoteTip(git, branch);
 		if (after === before) break; // 远程没往前走：再推也是一样的结果
-		push = await pushOnce(git, options.branch);
+		push = await pushOnce(git, branch);
 		if (push.code === 0) return true;
 	}
 	throw gitFailure('把包推到远程', push);
@@ -136,6 +161,38 @@ async function commitPending(git: GitRunner): Promise<{ commit: string; files: s
 	return { commit: head.stdout.trim(), files };
 }
 
+/**
+ * 子目录形态的提交：**只提交货架自己那一段**。
+ *
+ * cwd 就在货架里，所以 `-- .` 正好圈住它；`commit` 也带同一个 pathspec，
+ * 外层仓库里用户自己暂存的文件不会被顺手提交进去。
+ */
+async function commitScoped(
+	git: GitRunner,
+	layout: ShelfLayout,
+): Promise<{ commit: string; files: string[] } | null> {
+	const add = await git(['add', '-A', '--', '.']);
+	if (add.code !== 0) throw gitFailure('把包加进仓库', add);
+
+	const staged = await git(['diff', '--cached', '--quiet', '--', '.']);
+	if (staged.code === 0) return null;
+	if (staged.code !== 1) throw gitFailure('检查包的变化', staged);
+
+	const names = await git(['diff', '--cached', '--name-only', '-z', '--', '.']);
+	if (names.code !== 0) throw gitFailure('列出要提交的包', names);
+	const prefix = layout.rel === '' ? '' : `${layout.rel}/`;
+	const files = names.stdout
+		.split('\0')
+		.filter(item => item !== '')
+		.map(item => (prefix !== '' && item.startsWith(prefix) ? item.slice(prefix.length) : item));
+
+	const commit = await git(['commit', '-m', `同步包：${files.length} 个`, '--', '.']);
+	if (commit.code !== 0) throw gitFailure('提交包', commit);
+	const head = await git(['rev-parse', 'HEAD']);
+	if (head.code !== 0) throw gitFailure('读取本次提交', head);
+	return { commit: head.stdout.trim(), files };
+}
+
 type FetchOutcome =
 	| { kind: 'fetched' }
 	| { kind: 'empty' }
@@ -155,15 +212,15 @@ async function fetchRemote(git: GitRunner, branch: string): Promise<FetchOutcome
 /**
  * 把 `FETCH_HEAD` 落到本地。
  *
- * 三种情况，顺序是"最省事到最费事"：
- * 1. 能快进就快进（绝大多数时候）；
- * 2. 两边各自有提交 → **rebase**（线性、不留合并提交；没有共同祖先时也能直接接上，实测）；
- * 3. rebase 万一失败（真正的冲突，理论上不会）→ 退回 merge，再失败就如实报错并收拾干净。
+ * 独立货架：能快进就快进 → 不行就 rebase（线性、不留合并提交）→ 再不行 merge。
+ * **子目录形态只允许快进**：外层仓库是用户的仓库，rebase 会重写别人的提交，
+ * 合并还会在没有冲突时"自己合了" —— 对不齐就让用户来。
  */
-async function mergeFetched(git: GitRunner): Promise<void> {
+async function mergeFetched(git: GitRunner, hosted: boolean): Promise<void> {
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
 	if (head.code !== 0) {
-		// 本地还没有任何提交：直接把远程那笔落下来
+		// 本地还没有任何提交
+		if (hosted) throw new Error('这个仓库还没有任何提交：先在仓库里提交一次，再来同步');
 		const merge = await git(['merge', '--ff-only', 'FETCH_HEAD']);
 		if (merge.code === 0) return;
 		const reset = await git(['reset', '--hard', 'FETCH_HEAD']);
@@ -173,6 +230,13 @@ async function mergeFetched(git: GitRunner): Promise<void> {
 
 	const fastForward = await git(['merge', '--ff-only', 'FETCH_HEAD']);
 	if (fastForward.code === 0) return;
+
+	if (hosted) {
+		throw new Error(
+			'远程有新提交，但这个仓库本地也有没推的提交（不能快进）。'
+			+ '插件不会 rebase 或合并这个仓库：先把仓库对齐（推上去或拉下来），再回来同步。',
+		);
+	}
 
 	const rebase = await git(['rebase', 'FETCH_HEAD']);
 	if (rebase.code === 0) return;
@@ -196,6 +260,18 @@ async function clearStuckState(dir: string, git: GitRunner): Promise<void> {
 	if (fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))) {
 		await git(['merge', '--abort']);
 	}
+}
+
+/** 仓库里有没有没做完的 rebase / merge（**只看不动**：子目录形态下绝不替用户中止） */
+async function hasStuckState(git: GitRunner, shelfDir: string): Promise<boolean> {
+	const result = await git(['rev-parse', '--git-dir']);
+	if (result.code !== 0) return false;
+	const gitDir = path.resolve(shelfDir, result.stdout.trim());
+	return (
+		fs.existsSync(path.join(gitDir, 'rebase-merge'))
+		|| fs.existsSync(path.join(gitDir, 'rebase-apply'))
+		|| fs.existsSync(path.join(gitDir, 'MERGE_HEAD'))
+	);
 }
 
 /** 领先 / 落后几个提交（远程还没有这个分支时，领先 ＝ 本地提交数） */
@@ -229,7 +305,8 @@ function pushOnce(git: GitRunner, branch: string): Promise<GitResult> {
  *
  * 跳过 `.git`、回收站与符号链接 —— 它们都不该出现在账里。
  */
-async function listBundlePaths(dir: string, trashDir?: string | null): Promise<Set<string>> {	const skip = new Set<string>();
+async function listBundlePaths(dir: string, trashDir?: string | null): Promise<Set<string>> {
+	const skip = new Set<string>();
 	if (trashDir) {
 		const rel = path.relative(dir, path.resolve(trashDir));
 		if (rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)) {
@@ -265,11 +342,16 @@ async function listBundlePaths(dir: string, trashDir?: string | null): Promise<S
  * 货架里有没有"还没提交的东西"（只看本地，不联网）。
  *
  * 节拍靠它判断"要不要现在跑一次同步"：本机刚留了包 → 脏 → 下一个 30 秒就提交 + 推送。
- * 用 `status --porcelain`：被 `.git/info/exclude` 挡住的（完整包、回收站）不会让它变脏。
+ * 独立货架用整仓 `status`（被 `.git/info/exclude` 挡住的完整包、回收站不会让它变脏）；
+ * 子目录形态只看货架自己那一段 —— 外层仓库里用户改了别的文件，不该让插件一直"以为有活干"。
  */
 export async function shelfIsDirty(options: ShelfOptions): Promise<boolean> {
+	const dir = path.resolve(options.dir);
 	const git = gitRunner(options);
-	const status = await git(['status', '--porcelain']);
+	const layout = await readLayout(dir, options);
+	const status = layout?.hosted
+		? await git(['status', '--porcelain', '--', '.'])
+		: await git(['status', '--porcelain']);
 	return status.code === 0 && status.stdout.trim() !== '';
 }
 
@@ -283,13 +365,15 @@ export interface ShelfStatus {
 	dirty: boolean;
 	ahead: number;
 	behind: number;
+	/** 货架是外层仓库的子目录（界面上要说清"推的是整个分支"） */
+	hosted: boolean;
 }
 
 /** 读一眼货架现状（"检查环境"用；不会 fetch、不会 init） */
 export async function readShelfStatus(options: ShelfOptions): Promise<ShelfStatus> {
 	const dir = path.resolve(options.dir);
 	const git = gitRunner(options);
-	const repo = await isShelf(dir, { gitPath: options.gitPath, timeoutMs: options.timeoutMs });
+	const layout = await readLayout(dir, options);
 	const empty: ShelfStatus = {
 		isRepo: false,
 		head: null,
@@ -298,20 +382,33 @@ export async function readShelfStatus(options: ShelfOptions): Promise<ShelfStatu
 		dirty: false,
 		ahead: 0,
 		behind: 0,
+		hosted: false,
 	};
-	if (!repo) return empty;
+	if (!layout) return empty;
 
+	const branch = layout.hosted ? layout.branch : options.branch;
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
 	const remote = await git(['remote', 'get-url', 'origin']);
-	const status = await git(['status', '--porcelain']);
-	const counts = await aheadBehind(git, options.branch);
+	const status = layout.hosted
+		? await git(['status', '--porcelain', '--', '.'])
+		: await git(['status', '--porcelain']);
+	const counts = branch === '' ? { ahead: 0, behind: 0 } : await aheadBehind(git, branch);
 	return {
 		isRepo: true,
 		head: head.code === 0 ? head.stdout.trim() : null,
 		remote: remote.code === 0 ? remote.stdout.trim() : null,
-		branch: options.branch,
+		branch: branch === '' ? options.branch : branch,
 		dirty: status.code === 0 && status.stdout.trim() !== '',
 		ahead: counts.ahead,
 		behind: counts.behind,
+		hosted: layout.hosted,
 	};
+}
+
+/** `readShelfLayout` 的薄包装：这一层不关心它的失败（读不到就当没接上） */
+async function readLayout(
+	dir: string,
+	options: Pick<ShelfOptions, 'gitPath' | 'timeoutMs'>,
+): Promise<ShelfLayout | null> {
+	return readShelfLayout(dir, options);
 }
