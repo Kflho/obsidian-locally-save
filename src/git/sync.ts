@@ -88,7 +88,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	let remoteEmpty = false;
 	if (fetched.kind === 'fetched') {
 		options.onStage?.('合并远程的包…');
-		await mergeFetched(git, hosted);
+		await mergeFetched(git, layout);
 	} else if (fetched.kind === 'empty') {
 		remoteEmpty = true;
 	} else {
@@ -103,7 +103,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	let pushed = false;
 	if (counts.ahead > 0) {
 		options.onStage?.('推送远程…');
-		pushed = await pushWithRetry(options, 1, hosted, branch);
+		pushed = await pushWithRetry(options, 1, layout, branch);
 		counts = await aheadBehind(git, branch);
 	}
 
@@ -132,7 +132,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 export async function pushWithRetry(
 	options: ShelfOptions,
 	retries = 1,
-	hosted = false,
+	layout?: ShelfLayout | null,
 	branch = options.branch,
 ): Promise<boolean> {
 	const git = gitRunner(options);
@@ -143,7 +143,7 @@ export async function pushWithRetry(
 		const before = await remoteTip(git, branch);
 		const fetch = await git(['fetch', 'origin', branch], true);
 		if (fetch.code !== 0) break; // 连不上：重试没意义，把原始失败报出去
-		await mergeFetched(git, hosted);
+		await mergeFetched(git, layout ?? null);
 		const after = await remoteTip(git, branch);
 		if (after === before) break; // 远程没往前走：再推也是一样的结果
 		push = await pushOnce(git, branch);
@@ -252,33 +252,31 @@ async function assertOnlyShelfLocalChanges(
 	branch: string,
 ): Promise<void> {
 	const prefix = layout.rel === '' ? '' : `${layout.rel}/`;
+	/** 货架之外的路径（**`-z` 出路径**：带中文的包名默认会被 git 加引号转义，
+	 *  拿 `startsWith(prefix)` 直接比会把货架内的包误判成"货架之外" —— 用户就是这么撞上的） */
+	const outsideOf = (paths: string[]): string[] =>
+		paths.filter(item => item !== '' && (prefix === '' || !item.startsWith(prefix)));
 	const commits = await git(['rev-list', `origin/${branch}..HEAD`]);
 	if (commits.code === 0) {
 		const list = commits.stdout.split('\n').map(item => item.trim()).filter(item => item !== '');
 		for (const commit of list) {
-			const files = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', commit]);
-			const outside = files.stdout
-				.split('\n')
-				.map(item => item.trim())
-				.filter(item => item !== '')
-				.filter(item => prefix === '' || !item.startsWith(prefix));
+			const files = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', commit]);
+			const outside = outsideOf(files.stdout.split('\0'));
 			if (outside.length > 0) {
 				throw new Error(
 					`本地有 ${list.length} 笔提交没推到远程，而且改到了货架之外（${outside[0]}…）：`
-					+ '先在仓库里把它们处理掉，再来刷新（插件不会替你的仓库做 reset）',
+					+ '先在仓库里把它们处理掉，再来同步（插件不会替你的仓库做 reset）',
 				);
 			}
 		}
 	}
-	const status = await git(['status', '--porcelain', '-z']);
-	for (const raw of status.stdout.split('\0')) {
-		if (raw.length < 4) continue;
-		const file = raw.slice(3);
-		if (prefix !== '' && !file.startsWith(prefix)) {
-			throw new Error(
-				`仓库里还有货架之外的未提交改动（${file}）：先提交或 stash，再来刷新`,
-			);
-		}
+	// 未提交的改动：`git diff HEAD`（不带 `--`，整个仓库；`-z` 不给路径加引号）
+	const changed = await git(['diff', 'HEAD', '--name-only', '-z']);
+	const dirty = outsideOf(changed.stdout.split('\0'));
+	if (dirty.length > 0) {
+		throw new Error(
+			`仓库里还有货架之外的未提交改动（${dirty[0]}…）：先提交或 stash，再来同步`,
+		);
 	}
 }
 
@@ -355,10 +353,15 @@ async function fetchRemote(git: GitRunner, branch: string): Promise<FetchOutcome
  * 把 `FETCH_HEAD` 落到本地。
  *
  * 独立货架：能快进就快进 → 不行就 rebase（线性、不留合并提交）→ 再不行 merge。
- * **子目录形态只允许快进**：外层仓库是用户的仓库，rebase 会重写别人的提交，
- * 合并还会在没有冲突时"自己合了" —— 对不齐就让用户来。
+ *
+ * **子目录形态（0.16.6 起）**：快进不行时，先过一道闸 ——
+ * 本地没推的提交**全都在货架那一段**、而且货架之外没有未提交改动 → 做一次**限定范围的 rebase**；
+ * 撞上"两边改了同一个文件"或者动了货架之外的东西，一律**报错不动**（那是用户的仓库，
+ * 插件不替他 reset / 合并）。用户的原话："两边同时改，改完就推不过去，一直卡着" ——
+ * 货架上两边各写各的包、各写各的对表文件，本来就不该卡死。
  */
-async function mergeFetched(git: GitRunner, hosted: boolean): Promise<void> {
+async function mergeFetched(git: GitRunner, layout: ShelfLayout | null): Promise<void> {
+	const hosted = layout?.hosted === true;
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
 	if (head.code !== 0) {
 		// 本地还没有任何提交
@@ -373,11 +376,9 @@ async function mergeFetched(git: GitRunner, hosted: boolean): Promise<void> {
 	const fastForward = await git(['merge', '--ff-only', 'FETCH_HEAD']);
 	if (fastForward.code === 0) return;
 
-	if (hosted) {
-		throw new Error(
-			'远程有新提交，但这个仓库本地也有没推的提交（不能快进）。'
-			+ '插件不会 rebase 或合并这个仓库：先把仓库对齐（推上去或拉下来），再回来同步。',
-		);
+	if (hosted && layout) {
+		await alignHostedShelf(git, layout);
+		return;
 	}
 
 	const rebase = await git(['rebase', 'FETCH_HEAD']);
@@ -388,6 +389,24 @@ async function mergeFetched(git: GitRunner, hosted: boolean): Promise<void> {
 	if (merge.code === 0) return;
 	await git(['merge', '--abort']);
 	throw new Error(`两边的包合不到一起（文件夹没动）：${(merge.stderr || rebase.stderr).trim()}`);
+}
+
+/**
+ * 子目录货架的"限定范围对齐"：闸门过了才 rebase，否则把原因原样报出去。
+ *
+ * 闸门（`assertOnlyShelfLocalChanges`）：本地没推的提交**每一笔都只动货架那一段**，
+ * 货架之外没有未提交改动。少一条都说明外层仓库里有用户自己的活，插件不能替他重写历史。
+ */
+async function alignHostedShelf(git: GitRunner, layout: ShelfLayout): Promise<void> {
+	await assertOnlyShelfLocalChanges(git, layout, layout.branch);
+	const rebase = await git(['rebase', 'FETCH_HEAD']);
+	if (rebase.code === 0) return;
+	await git(['rebase', '--abort']);
+	throw new Error(
+		'远程有新提交，本地货架那一段也有没推的包，而且**同一批文件两边都动了**（rebase 冲突）。\n'
+		+ '插件不替你合并冲突：可以先用「刷新包（对齐远程）」丢掉本地货架那几笔提交再拉一遍，'
+		+ '或者手工在仓库里处理。',
+	);
 }
 
 /** 上一次留下的 rebase / merge 残局：先中止（插件从不做交互式合并，留着只会让每条命令都失败） */
