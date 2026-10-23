@@ -236,7 +236,10 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
 	}
 	const aheadResult = await git(['rev-list', '--count', `origin/${branch}..HEAD`]);
 	const dropped = aheadResult.code === 0 ? Number.parseInt(aheadResult.stdout.trim(), 10) || 0 : 0;
-	if (layout.hosted) await assertOnlyShelfLocalChanges(git, layout, branch);
+	if (layout.hosted) {
+		await assertCleanOutsideShelf(git, layout);
+		await assertOnlyShelfCommits(git, layout, branch);
+	}
 	stage(2, '把货架对齐到远程…');
 	const before = await listBundlePaths(dir, options.trashDir);
 	const reset = await git(['reset', '--hard', `origin/${branch}`]);
@@ -258,37 +261,54 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
  * 外层是用户的仓库（可能还有别的项目在里面），`reset --hard` 会把整棵工作树对齐远程 ——
  * 只要有一笔提交或一处改动落在货架之外，就不能替用户决定（报错，让他自己处理）。
  */
-async function assertOnlyShelfLocalChanges(
+/**
+ * 闸门之一：**货架之外不许有未提交的改动**（合并 / rebase 都要一棵能动的树）。
+ *
+ * 只看工作区与暂存区（`git diff HEAD`），**不看已提交的历史** —— 已提交的东西 rebase 会接着演，
+ * 冲突就 abort，用户不会丢活；把它也算成"越界"会让正常分叉永远同步不过去（0.16.8 改的）。
+ * `-z` 出原样路径：带中文的包名默认会被 git 加引号转义，拿 `startsWith` 比会误判（0.16.6 踩过）。
+ */
+async function assertCleanOutsideShelf(git: GitRunner, layout: ShelfLayout): Promise<void> {
+	const prefix = layout.rel === '' ? '' : `${layout.rel}/`;
+	const changed = await git(['diff', 'HEAD', '--name-only', '-z']);
+	const dirty = changed.stdout
+		.split('\0')
+		.filter(item => item !== '')
+		.filter(item => prefix === '' || !item.startsWith(prefix));
+	if (dirty.length > 0) {
+		throw new Error(
+			`仓库里还有货架之外的未提交改动（${dirty[0]}…）：先提交或 stash，再来同步`,
+		);
+	}
+}
+
+/**
+ * 闸门之二（**只有「刷新包」用**）：本地没推的提交**每一笔都只动货架那一段**。
+ *
+ * 刷新是 `reset --hard origin/<分支>`：它会**丢掉**那些提交，所以必须确认丢的都是货架上的包；
+ * 动过货架之外的一律拒绝（那些活不能替用户丢）。自动 rebase 不走这道闸 —— 它保留提交。
+ */
+async function assertOnlyShelfCommits(
 	git: GitRunner,
 	layout: ShelfLayout,
 	branch: string,
 ): Promise<void> {
 	const prefix = layout.rel === '' ? '' : `${layout.rel}/`;
-	/** 货架之外的路径（**`-z` 出路径**：带中文的包名默认会被 git 加引号转义，
-	 *  拿 `startsWith(prefix)` 直接比会把货架内的包误判成"货架之外" —— 用户就是这么撞上的） */
-	const outsideOf = (paths: string[]): string[] =>
-		paths.filter(item => item !== '' && (prefix === '' || !item.startsWith(prefix)));
 	const commits = await git(['rev-list', `origin/${branch}..HEAD`]);
-	if (commits.code === 0) {
-		const list = commits.stdout.split('\n').map(item => item.trim()).filter(item => item !== '');
-		for (const commit of list) {
-			const files = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', commit]);
-			const outside = outsideOf(files.stdout.split('\0'));
-			if (outside.length > 0) {
-				throw new Error(
-					`本地有 ${list.length} 笔提交没推到远程，而且改到了货架之外（${outside[0]}…）：`
-					+ '先在仓库里把它们处理掉，再来同步（插件不会替你的仓库做 reset）',
-				);
-			}
+	if (commits.code !== 0) return;
+	const list = commits.stdout.split('\n').map(item => item.trim()).filter(item => item !== '');
+	for (const commit of list) {
+		const files = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', '-z', commit]);
+		const outside = files.stdout
+			.split('\0')
+			.filter(item => item !== '')
+			.filter(item => prefix === '' || !item.startsWith(prefix));
+		if (outside.length > 0) {
+			throw new Error(
+				`本地有 ${list.length} 笔提交没推到远程，而且改到了货架之外（${outside[0]}…）：`
+				+ '先在仓库里把它们处理掉，再来刷新（插件不会替你的仓库做 reset）',
+			);
 		}
-	}
-	// 未提交的改动：`git diff HEAD`（不带 `--`，整个仓库；`-z` 不给路径加引号）
-	const changed = await git(['diff', 'HEAD', '--name-only', '-z']);
-	const dirty = outsideOf(changed.stdout.split('\0'));
-	if (dirty.length > 0) {
-		throw new Error(
-			`仓库里还有货架之外的未提交改动（${dirty[0]}…）：先提交或 stash，再来同步`,
-		);
 	}
 }
 
@@ -410,12 +430,16 @@ async function mergeFetched(git: GitRunner, layout: ShelfLayout | null): Promise
  * 货架之外没有未提交改动。少一条都说明外层仓库里有用户自己的活，插件不能替他重写历史。
  */
 async function alignHostedShelf(git: GitRunner, layout: ShelfLayout): Promise<void> {
-	await assertOnlyShelfLocalChanges(git, layout, layout.branch);
+	// 只要求"货架之外没有**未提交**的改动"：rebase 要一棵能动的树。
+	// **已提交**的改动（哪怕在货架之外）不拦 —— rebase 会把它们接着演下去，冲突就 abort，
+	// 用户的活不会丢。0.16.8 之前这条收得太窄，把"两台机器各改各的其它文件"也判成越界，
+	// 结果正常分叉永远同步不过去（对面报的就是这个）。
+	await assertCleanOutsideShelf(git, layout);
 	const rebase = await git(['rebase', 'FETCH_HEAD']);
 	if (rebase.code === 0) return;
 	await git(['rebase', '--abort']);
 	throw new Error(
-		'远程有新提交，本地货架那一段也有没推的包，而且**同一批文件两边都动了**（rebase 冲突）。\n'
+		'远程有新提交，本地也有没推的提交，而且**同一批文件两边都动了**（rebase 冲突）。\n'
 		+ '插件不替你合并冲突：可以先用「刷新包（对齐远程）」丢掉本地货架那几笔提交再拉一遍，'
 		+ '或者手工在仓库里处理。',
 	);
