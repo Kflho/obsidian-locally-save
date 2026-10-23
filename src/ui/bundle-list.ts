@@ -14,7 +14,7 @@ import type { ManagedBundle } from '../bundle/manage';
 import { baselineOfBundle } from '../bundle/baseline';
 import { describeLocalState } from '../bundle/log';
 import { dirExists } from '../sync/disk';
-import { loadState } from '../sync/state';
+import { loadState, loadStateSync } from '../sync/state';
 import type { PluginState } from '../sync/state';
 import { formatBytes, formatTime } from '../utils/format';
 import { markDestructive } from './modal-layout';
@@ -183,9 +183,16 @@ export class BundleListView {
 			return;
 		}
 
-		// 分组：同一类排一起，组内从新到老（规则在 bundle/manage.ts 的 groupBundles）
+		// 分组：先按来源（我导出的 / 收下来的），再按类型，组内从新到老
+		// （规则在 bundle/manage.ts 的 groupBundles；来源认包头部那个 `source.copyId`）
+		let mine: string | null = null;
+		try {
+			mine = loadStateSync(this.plugin.stateFile())?.copyId ?? null;
+		} catch {
+			mine = null;
+		}
 		let shown = 0;
-		for (const group of groupBundles(this.items)) {
+		for (const group of groupBundles(this.items, mine)) {
 			if (group.items.length === 0 || shown >= MAX_BUNDLES) continue;
 			this.listEl.createDiv({
 				text: `${group.title}（${group.items.length} 个）`,

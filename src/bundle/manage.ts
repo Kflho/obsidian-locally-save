@@ -146,21 +146,44 @@ export interface BundleGroup {
 }
 
 /**
- * 列表分组：**同一类排一起，组内从新到老**。
+ * 列表分组：**先分来源，再分类，组内从新到老**。
  *
- * 顺序：更新包 → 完整副本 → 类型未知。更新包放最前是因为它是天天要传的那一份
- * （完整副本平时只是还原点）；读不出头部的不跟正经包混在一起。
+ * 用户提的："包管理直接分栏区分自己产生的包和拉下来的包" —— 两类包长得很像
+ * （文件名里都有世代/状态编号），混在一起时很容易把对方发来的当成自己导的，
+ * 或者反过来。来源就看头部 `source.copyId`：跟本机一样＝我导出的，不一样＝收下来的。
  *
- * 组内自己再排一次时间（不依赖调用方传进来的顺序）：界面上"从新到老"是硬要求，
- * 不该因为上游换了排序就悄悄变样。
+ * 顺序：我导出的 → 收下来的 → 来源不明；每块里更新包在前（天天要传的那一份），
+ * 完整副本在后（平时只是还原点），读不出头部的不跟正经包混在一起。
+ *
+ * 不知道本机 copyId 时（状态文件还没建）退回"只按类型分"。
  */
-export function groupBundles(items: ManagedBundle[]): BundleGroup[] {
-	const pick = (mode: BundleMode | null) =>
-		items.filter(item => item.mode === mode).sort((a, b) => bundleTime(b) - bundleTime(a));
+export function groupBundles(items: ManagedBundle[], mine?: string | null): BundleGroup[] {
+	const sortTime = (list: ManagedBundle[]): ManagedBundle[] =>
+		list.slice().sort((a, b) => bundleTime(b) - bundleTime(a));
+	const pick = (list: ManagedBundle[], mode: BundleMode | null): ManagedBundle[] =>
+		sortTime(list.filter(item => item.mode === mode));
+	if (!mine) {
+		return [
+			{ title: '更新包', items: pick(items, 'changes') },
+			{ title: '完整副本', items: pick(items, 'full') },
+			{ title: '类型未知（读不出包信息）', items: pick(items, null) },
+		];
+	}
+	const mineItems = items.filter(item => item.header?.source?.copyId === mine);
+	const otherItems = items.filter(item => {
+		const copy = item.header?.source?.copyId;
+		return copy !== undefined && copy !== '' && copy !== mine;
+	});
+	const unknown = items.filter(item => {
+		const copy = item.header?.source?.copyId;
+		return item.mode === null || copy === undefined || copy === '';
+	});
 	return [
-		{ title: '更新包', items: pick('changes') },
-		{ title: '完整副本', items: pick('full') },
-		{ title: '类型未知（读不出包信息）', items: pick(null) },
+		{ title: '我导出的 · 更新包', items: pick(mineItems, 'changes') },
+		{ title: '我导出的 · 完整副本', items: pick(mineItems, 'full') },
+		{ title: '收下来的 · 更新包', items: pick(otherItems, 'changes') },
+		{ title: '收下来的 · 完整副本', items: pick(otherItems, 'full') },
+		{ title: '来源不明 / 读不出包信息', items: sortTime(unknown) },
 	];
 }
 
