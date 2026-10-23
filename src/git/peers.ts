@@ -54,6 +54,14 @@ export interface PeerState {
 	 * 顺手带上"哪个包、什么原因"，对面拉一次就能看到，不用再要日志。
 	 */
 	lastError?: { file?: string; bundleId: string; message: string; at: number };
+	/**
+	 * **内容与"它以为的那个状态"不一致**（＝ `state.applyDrift`）。
+	 *
+	 * 有这一项时，上面那个 `generation` / `stateId` 只是"记录里的号"，**内容并不等于那一代**
+	 * （典型：完整副本镜像有删不掉的目录）。不写出来的话，对面只能看到"它说自己在第 392 代"，
+	 * 于是按 392 去推理 —— 本次 112/392 的排查就是这么被带偏的。
+	 */
+	contentDrift?: { expected: string; actual: string; generation?: number | null; at: number };
 	/** 这份状态是什么时候写的 */
 	at: number;
 }
@@ -100,6 +108,7 @@ export function buildPeer(state: PluginState): PeerState {
 			}
 			: null,
 		pending: (state.pendingReturn?.changes ?? 0) + (state.pendingReturn?.deletes ?? 0),
+		...(state.applyDrift ? { contentDrift: state.applyDrift } : {}),
 		...(lastFailure
 			? {
 				lastError: {

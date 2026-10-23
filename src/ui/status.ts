@@ -71,6 +71,10 @@ export async function refreshStatusBar(plugin: LocallySavePlugin): Promise<void>
 		const mine = [
 			`我这台（${plugin.vaultName()}）：状态 ${state.stateId?.id ?? '还没算过'} · 第 ${state.generation} 代`,
 			`基准：第 ${state.bundle?.fullGeneration ?? '?'} 代 · ${state.bundle?.fullHash ?? '未记'}`,
+			...(state.applyDrift
+				? [`⚠ 内容与第 ${state.applyDrift.generation ?? '?'} 代（${state.applyDrift.expected}）不一致：`
+					+ `实际是 ${state.applyDrift.actual} —— 上一次镜像有路径没落成，看应用报告里的失败项`]
+				: []),
 			state.git
 				? `上次推拉：${state.git.ok ? '成功' : '失败'} ${hhmm(state.git.at)}`
 				: '还没和 git 远程同步过',

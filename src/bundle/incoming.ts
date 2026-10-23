@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply, recoverToBaselineAndApply } from './apply';
+import { baselineResetHint, executeBundlePlan, isDestructivePlan, landsOnTarget, planBundleApply, recoverToBaselineAndApply } from './apply';
 import { debugEvent } from '../debugLog';
 import type { ApplyOptions, ApplyPlan } from './apply';
 import { baselineOfBundle } from './baseline';
@@ -232,7 +232,15 @@ export async function handleIncoming(
 			plan = await planBundleApply(applyOptions);
 		} catch (error) {
 			if (policy.force && candidate.bundle.header?.mode === 'changes') {
-				const again = await recoverToBaselineAndApply(applyOptions);
+				/**
+				 * 先看"是不是包声明的起点就在本机"（0.16.1）：那种情况按**它**镜像对齐，
+				 * 而不是按"我记录里的基准"—— 现场是"我记的那份是老遗留，包里写的起点才是对的"。
+				 */
+				const hint = baselineResetHint(error);
+				const again = await recoverToBaselineAndApply({
+					...applyOptions,
+					...(hint ? { baselineOverride: { file: hint.file } } : {}),
+				});
 				await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
 				return {
 					kind: 'applied',

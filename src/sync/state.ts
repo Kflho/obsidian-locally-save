@@ -218,6 +218,25 @@ export interface PluginState {
 	 * 只留最近 `INCOMING_LIMIT` 笔，别把状态文件撑大。
 	 */
 	incoming: IncomingRecord[];
+	/**
+	 * **内容与"我以为的那个状态"不一致**（应用完核对出来的）。
+	 *
+	 * 什么时候记：完整副本镜像 / 严格镜像本该落到包那一版，结果有写失败的、有删不掉的目录
+	 * （`stateIdCompare !== 'match'`）。**不记的话对外只剩一句"我在第 N 代"** ——
+	 * 用户那台机器就报过"第 392 代"，而内容是第 112 代的，连对表文件都这么写，
+	 * 对面的人与 agent 全被带偏（本次 112/392 排查就是这么绕远的）。
+	 *
+	 * 下一次干净落地会自动清掉（`apply.ts` 里那句 `state.applyDrift = null`）。
+	 */
+	applyDrift: {
+		/** 包里报的那个状态编号（应该落到的点） */
+		expected: string;
+		/** 实际算出来的状态编号 */
+		actual: string;
+		/** 包的目标世代（界面文案里写"第 N 代"） */
+		generation?: number | null;
+		at: number;
+	} | null;
 	/** 最近一次 git 同步的结果（没启用 git 时是 null） */
 	git: GitSyncRecord | null;
 }
@@ -305,6 +324,7 @@ export function emptyState(): PluginState {
 		pendingReturn: null,
 		stateId: null,
 		incoming: [],
+		applyDrift: null,
 		git: null,
 	};
 }
@@ -369,6 +389,15 @@ function normalizeState(raw: Partial<PluginState> | null): PluginState {
 		stateId: normalizeStateId(raw.stateId),
 		// 老状态文件没有这一项（那个年代还没有自动应用）：空表 ＝ 从头开始记
 		incoming: Array.isArray(raw.incoming) ? raw.incoming : [],
+		// 老状态文件没有这一项（还没有"内容与那一代不一致"的记录）：没有就是 null
+		applyDrift: raw.applyDrift && typeof raw.applyDrift.expected === 'string' && typeof raw.applyDrift.actual === 'string'
+			? {
+				expected: raw.applyDrift.expected,
+				actual: raw.applyDrift.actual,
+				generation: typeof raw.applyDrift.generation === 'number' ? raw.applyDrift.generation : null,
+				at: typeof raw.applyDrift.at === 'number' ? raw.applyDrift.at : 0,
+			}
+			: null,
 		git: normalizeGit(raw.git),
 	};
 }

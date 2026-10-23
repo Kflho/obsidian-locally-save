@@ -126,6 +126,14 @@ export interface ApplyOptions {
 	 * 普通互相应用不会读它。
 	 */
 	bundleDir?: string;
+	/**
+	 * **按这个文件对齐**（镜像兜底那条路，1b）：`planBundleApply` 抛的 `baselineReset` 里给的就是它。
+	 *
+	 * 平时不传 —— 只用"我站的那一份完整副本"（`state.bundle.fullHash`）。
+	 * 传它是因为**包声明的起点**跟我记的基准不一样、而那份完整包就在本机：
+	 * 用户点了「按第 N 代镜像对齐」时把它带进来（见 `recoverToBaselineAndApply`）。
+	 */
+	baselineOverride?: { file: string };
 	/** 本次临时覆盖冲突裁决；只有合并那条路（`strictness: 'normal'`）会用到 */
 	conflictStrategy?: ConflictStrategy;
 	/**
@@ -339,8 +347,15 @@ export interface ApplyReport {
 
 /** 一条要落盘的动作（由比对结果翻译而来） */
 export type ApplyAction =
-	/** 用包里的内容写进这个路径（新增或覆盖）；backup ＝ 先把本地那份挪进回收目录 */
-	| { kind: 'write'; path: string; entry: BundleEntry; backup?: boolean }
+	/**
+	 * 用包里的内容写进这个路径（新增或覆盖）；backup ＝ 先把本地那份挪进回收目录。
+	 *
+	 * `sourceFile` / `sourceInfo` 不填 ＝ 内容取自**当前这份包**。
+	 * 只有「接上后续基准」（`baselineAnchor`）那条路会填：那时"对方那一点"＝
+	 * 包里声明的**起点完整副本** ＋ 这个包的条目，有些路径的内容只在完整包里
+	 * （我还停在更旧的一份上，缺的正是那一段）。
+	 */
+	| { kind: 'write'; path: string; entry: BundleEntry; backup?: boolean; sourceFile?: string; sourceInfo?: BundleInfo }
 	/** 删掉本地的这个文件（对方删了它，或强制一致时"包里没有它"） */
 	| { kind: 'delete'; path: string }
 	/** 两边都改过：留两份，新的占原名 */
@@ -413,7 +428,21 @@ export interface ApplyPlan {
 	 *   并且要用头部那个 `baselineHash` **验一遍**；验不过（旧包没带 base、有条目没写成）
 	 *   就是 `null`，宁可不动。
 	 */
-	adoptBaseline: { files: Record<string, FileRecord>; generation: number; hash: string } | null;
+	adoptBaseline: { files: Record<string, FileRecord>; generation: number; hash: string; file?: string | null } | null;
+	/**
+	 * **这一趟按包的起点对齐**（那个起点完整包不在我"记录的基准"上，但文件就在本机）。
+	 *
+	 * `null` ＝ 没走这条路。非空时：`contentBefore` 用的是这份祖先清单、`strictness` 是
+	 * `bundle-wins`（本机相对起点的那一半保留），应用完**基准接到它上面**（见 `adoptBaseline`）。
+	 * 界面据此说一句"按第 N 代对齐（保留本机改动）"，用户才知道刚才那一步动了什么。
+	 */
+	baselineAnchor: {
+		file: string;
+		hash: string;
+		generation: number | null;
+		/** 本机相对起点多出来 / 改过的路径（这一趟会保留它们） */
+		localChanges: string[];
+	} | null;
 	/**
 	 * 这一趟是不是「对齐到对面」（只拉不推的机器）：应用完**与对方严格相等** ——
 	 * 本机在包里没点名的文件上误改的，这次会从基准完整副本恢复，不是留着当"我这一半"。
@@ -527,7 +556,154 @@ function matchesHistory(local: FileRecord, entry: BundleEntry): boolean {
 type AncestorCheck =
 	/** 放行。`first` ＝ 本机第一份（还没有基准）／`full` ＝ 同一条血脉的新完整副本／`update` ＝ 接在同一份基准上的更新包 */
 	| { ok: true; kind: 'first' | 'full' | 'update'; viaLanding?: boolean }
-	| { ok: false; message: string };
+	/**
+	 * 拒绝。`missingBaseline` ＝ **这个包自己声明了起点**、而那份完整副本跟我记的基准不是同一份：
+	 * 调用方据此去包目录里找那一份（`resolveAnchor`），找得到就能"按包的起点对齐"。
+	 */
+	| { ok: false; message: string; missingBaseline?: string };
+
+/**
+ * **「接上后续基准」找到的那一份完整副本**（见 `resolveAnchor`）。
+ *
+ * 关键区别（用户那句话）：**"对方有什么包"和"我的基准是哪个"是两回事。**
+ * 包的起点（第 320 代）比我站的基准（第 112 代）**更靠后**时，它不是"接不上"——
+ * 只是我还差中间那一段，而那一段的内容**就在这份完整包里**。
+ */
+interface BaselineAnchor {
+	source: BaselineBundleSource;
+	/** 包声明起点（那份完整包）的清单 ＝ 包那一侧的"底" */
+	listing: Record<string, FileRecord>;
+	/**
+	 * **我上次记下的样子**（`state.bundle.fullFiles`）＝ 三方比对的共同祖先。
+	 *
+	 * 用它而不是用"包声明的起点"：我相对自己那份基准改了什么，只有这一份说得清。
+	 * 拿包的起点当祖先，会把"我还停在 112 的内容"整批算成"我改过它"。
+	 */
+	baseListing: Record<string, FileRecord>;
+	/** **包那一侧的整份内容**：起点清单打上条目、划掉点名删除（＝对方那一点的真实样子） */
+	remoteFiles: Record<string, FileRecord>;
+	remoteDirs: string[];
+	/** 本机相对我记的那份基准的改动（这一趟会保留） */
+	localChanges: string[];
+}
+
+/**
+ * **"按包的起点对齐"这条路走不通时**抛给界面的载荷（挂在 error 的 `baselineReset` 上）。
+ *
+ * 为什么要有它：`planBundleApply` 抛错时界面只能显示一句话。这里需要的不是"再说一遍错"，
+ * 而是**"那份包在本机，要不要按它对齐"** —— 界面据此出按钮，`recoverToBaselineAndApply`
+ * 拿着 `file` 就能落地。
+ */
+export interface BaselineResetHint {
+	/** 包声明的起点完整副本（本机上的绝对路径） */
+	file: string;
+	/** 它的基准指纹（＝包头部 `baselineHash`） */
+	hash: string;
+	/** 它是第几代（那份完整包自己的世代） */
+	generation: number | null;
+	/** 这次只能"镜像对齐"的原因（没有它就给不出按钮） */
+	reason: string;
+	/** 只能镜像（「仅拉」方向 / 本机记录里没有可比对的内容） */
+	mirrorOnly: boolean;
+}
+
+/** 从 `planBundleApply` 抛出的错误里取"可以按包的起点对齐"这条提示；没有就是 null */
+export function baselineResetHint(error: unknown): BaselineResetHint | null {
+	const hint = (error as { baselineReset?: BaselineResetHint } | null | undefined)?.baselineReset;
+	if (!hint || typeof hint.file !== 'string' || hint.file === '') return null;
+	return hint;
+}
+
+/** 完整包的清单 → 记录表（跟 `scanTree` 出来的形态一致，好逐条比） */
+function listingOfFullHeader(header: BundleHeader): Record<string, FileRecord> {
+	const files: Record<string, FileRecord> = {};
+	for (const entry of header.entries) files[entry.path] = { size: entry.size, mtime: entry.mtime };
+	return files;
+}
+
+/**
+ * **包的起点是本机** → 按它「接上后续基准」；否则给一条"只能镜像"的指路。
+ *
+ * 怎么判"接得上"：同一血脉里，包的起点（那份完整包的世代）**比我站的基准更靠后**。
+ * 这时正确做法不是拒收，也不是先镜像 500MB，而是**三方合并**：
+ *
+ * - 祖先 ＝ **我记的基准的清单**（`state.bundle.fullFiles`，我最清楚"我相对它改了什么"）；
+ * - 我这边 ＝ 当前扫描；
+ * - 对方 ＝ **那份完整包的整份内容** ＋ 包的条目 − 包里点名的删除。
+ *
+ * 于是"我还停在 112 的那些文件"会被对方那份 320 的内容补上，而"112 之后我自己改的"
+ * 会被保留 —— 既不需要先镜像一遍，也不会把本机改动扫进回收目录。
+ *
+ * 反过来（包的起点比我还早）不能这么合：那是"往回走"，会把已经存在的东西按旧版本盖回去。
+ * 那种情况和"记录里没有可比对的清单"一样，只能镜像兜底（`recoverToBaselineAndApply`
+ * ＋ `baselineOverride`），由界面出按钮、用户点。
+ */
+/** 「按包声明的起点对齐」的两种结论：能接上 / 只能镜像（后者带着"那份包在哪"） */
+type AnchorResolution =
+	| { anchor: BaselineAnchor }
+	| { hint: BaselineResetHint };
+
+function resolveAnchor(
+	options: ApplyOptions,
+	header: BundleHeader,
+	state: PluginState,
+	local: Inventory,
+	missing: string | undefined,
+): AnchorResolution | null {
+	if (!missing) return null;
+	const source = findFullBundleByHash(options, missing);
+	if (!source) return null;
+	const listing = listingOfFullHeader(source.info.header);
+	const baseListing = state.bundle?.fullFiles ?? null;
+	const mine = state.bundle?.fullGeneration ?? null;
+	const theirs = source.info.header.targetGeneration;
+
+	const canCatchUp = baseListing !== null
+		&& mine !== null
+		&& theirs !== null
+		&& theirs > mine
+		// 差量包是"完整包 → 完整包"的搬运体：它的终点就是一份完整副本，
+		// 站在更老的基准上时别拿它当中转（让对方直接发那份完整副本更直白）。
+		&& header.targetFullBundle !== true
+		// 同一条血脉才算"后续基准"：别的血脉的代数是它自己数的，拿它当"更靠后"没意义
+		&& header.lineage === state.lineage
+		&& options.alignToPeer !== true;
+	if (canCatchUp && baseListing !== null && mine !== null) {
+		/** 对方那一点的样子：起点清单 ＋ 包的条目 − 包里点名的删除 */
+		const remoteFiles: Record<string, FileRecord> = { ...listing };
+		for (const entry of header.entries) remoteFiles[entry.path] = { size: entry.size, mtime: entry.mtime };
+		for (const item of header.deleted) delete remoteFiles[item.path];
+		const remoteDirs = [...new Set([...dirsInBundle(source.info.header), ...dirsInBundle(header)])].sort();
+		const localChanges = [...local.files.keys()]
+			.filter(file => {
+				const at = baseListing[file];
+				const here = local.files.get(file);
+				return !at || !here || !sameRecord(here, at, TOLERANCE);
+			})
+			.sort();
+		return { anchor: { source, listing, baseListing, remoteFiles, remoteDirs, localChanges } };
+	}
+
+	/**
+	 * 接不上、只能镜像：把"那份包在哪、为什么"交回去 —— 调用方会把这份提示挂到
+	 * `checkAncestor` 原来那句拒收消息上（**消息不换**：那两句出路本来就说得很清楚），
+	 * 界面再据此多出一个「按第 N 代镜像对齐」的按钮。
+	 */
+	const reason = options.alignToPeer === true
+		? '「仅拉」要求应用完与对面严格相等，本机这一半不能留'
+		: baseListing === null || mine === null
+			? '本机记录里没有可比对的基准清单（老状态文件），说不清"我相对起点改了什么"'
+			: `包的起点是第 ${theirs ?? '?'} 代，并不比本机站的基准（第 ${mine} 代）靠后 —— 接上去等于往回走`;
+	return {
+		hint: {
+			file: source.file,
+			hash: missing,
+			generation: theirs,
+			reason,
+			mirrorOnly: true,
+		},
+	};
+}
 
 /**
  * **这个包跟本机有没有共同祖先** —— 没有就不让应用（见 `planBundleApply` 里那段）。
@@ -650,6 +826,8 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 				+ `「第 ${state.bundle?.fullGeneration ?? '?'} 代 · 基准 ${mine}」（那份完整副本得在对方的包目录里）；\n`
 				+ '② 或者让对方直接导一份完整副本发过来：完整清单自带基准，谁都能应用'
 				+ '（代价是它按镜像覆盖本机内容，本机独有的文件会进回收目录）。',
+			// 包自己声明了起点（真是一份完整副本）→ 调用方可以按它对齐（`resolveAnchor`）
+			...(header.baseFullBundle === true ? { missingBaseline: theirs } : {}),
 		};
 	}
 	return { ok: true, kind: 'update' };
@@ -665,6 +843,16 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		const ok = await verifyBundle(options.file, info);
 		if (!ok) throw new Error('同步包校验失败：文件可能在传输中损坏了，请重新拷一份再试');
 	}
+
+	/**
+	 * **先扫一遍库**（挪到基准检查前面）：下面「按包的起点对齐」那一步要拿本机清单
+	 * 跟**包声明的那份起点完整包**的清单逐条比 —— 得先有 `local` 才能判"本机在不在那条线上"。
+	 * 一次扫描，后面三方比对、镜像都复用它，没有多花时间。
+	 */
+	const local = await scanTree(options.vaultRoot, {
+		exclude: excludePatterns(settings.excludePatterns, options.configDir),
+		skipTopLevelDirs: [VAULT_TRASH_DIR],
+	});
 
 	const requested = options.strictness ?? 'normal';
 	/**
@@ -693,27 +881,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 一次清空仓库"。**那条理由不成立了**：更新包的起点必须与本机站的**那一份完整副本完全相等**
 	 * （`checkAncestor` 拦在前面），所以"包送到的状态"是确定的 ——
 	 * ＝ 我站的那一份完整副本 ＋ 包里点名的条目 − 包里点名的删除。镜像它就是"变成那份状态"，不会清空。
+	 *
+	 * **「按包的起点对齐」（`anchor`）那一趟改用 `bundle-wins`**（见下面 `resolveAnchor`）：
+	 * 那一刻本机内容不等于包送到的状态（还差"我这一半"），镜像会把它全扫进回收目录；
+	 * `bundle-wins` 的语义正是"条目一律用包里的、点名的照删、包里没提的一个不动"。
 	 */
-	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : requested;
-	/** 严格档：应用完**仓库 == 包送到的状态**（完整副本自带完整清单；更新包按起点清单补全） */
-	const strict = strictness === 'mirror' || strictness === 'bundle-wins';
-	/**
-	 * **对齐到对面**（只拉不推）：目标是"对方那一点"，不是"我的内容 ＋ 对方的改动"。
-	 * 只跟严格档一起用 —— 合并档没有"严格相等"这回事，也就无从恢复。
-	 */
-	const alignToPeer = options.alignToPeer === true && !mirrorFull && strictness === 'mirror';
-	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
-	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
-	// 合并那条路（`normal`）只剩自动收包与接链在用（界面上一律走严格档）：
-	// "两边都改了怎么办"那个设置项已经删了 —— 这里的默认值就是它的历史默认值。
-	const conflictStrategy: ConflictStrategy = strictness === 'normal'
-		? (options.conflictStrategy ?? 'keep-both')
-		: 'remote-wins';
-	// 删除传播与备份只在"合并"那条路上听调用方/设置；严格档必然传播、必然先备份
-	const propagateDeletions = strictness === 'normal' ? (options.propagateDeletions ?? true) : true;
-	// **应用必然先备份**：严格档会覆盖/挪走本地东西，强制档更可能一次删很多 ——
-	// "关掉回收目录 + 严格档" = 不可恢复的批量删除，这个组合不给走
-	const keepBackup = strictness !== 'normal' || (options.keepBackup ?? true);
 
 	const state = await loadState(options.stateFile);
 	const sameLineage = header.lineage === state.lineage;
@@ -731,13 +903,62 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 *   基准不是同一份的话，本机一大批文件会被当成"对方删过"删掉。拒绝，并说清下一步。
 	 */
 	const ancestor = checkAncestor(state, header);
-	if (!ancestor.ok) throw new Error(ancestor.message);
+	/**
+	 * **包里声明的起点 ≠ 我记的基准时：那份完整包就在本机，就按它对齐**（1a）。
+	 *
+	 * 用户拍板的那次现场：对面记的基准是第 112 代（老遗留），包的头部写着第 320 代，
+	 * 而第 320 代的完整包就躺在它的 `full/` 里 —— 信息是全的，只是插件没去用它，
+	 * 只丢一句"接不上，不合并"，逼人手工镜像一遍 500MB 再把本机改动扫进回收目录。
+	 *
+	 * 判定与硬闸都在 `resolveAnchor` 里：找不到那份包 / 本机其实不在那条线上，
+	 * 它返回 `null`（走原来的拒收）或者抛一个带 `baselineReset` 载荷的错误（只给镜像兜底）。
+	 */
+	const resolution = ancestor.ok ? null : resolveAnchor(options, header, state, local, ancestor.missingBaseline);
+	const anchor = resolution && 'anchor' in resolution ? resolution.anchor : null;
+	if (!ancestor.ok && anchor === null) {
+		/**
+		 * 拒收。消息就是 `checkAncestor` 原来那句（两条出路写得很清楚），
+		 * 额外把"起点那份完整包就在本机"的提示挂上（`baselineReset`），界面据此多一个按钮。
+		 */
+		const error = new Error(ancestor.message);
+		if (resolution && 'hint' in resolution) {
+			(error as { baselineReset?: BaselineResetHint }).baselineReset = resolution.hint;
+		}
+		throw error;
+	}
+
+	/**
+	 * **这次用哪一档**：
+	 * - 完整副本：一律镜像（0.10 的硬规矩）；
+	 * - **接上后续基准**（`anchor`）：走 `normal` 三方合并（祖先 ＝ 我记的基准、
+	 *   对方 ＝ 那份完整包的整份内容 ＋ 包的条目），本机相对祖先的改动**保留**；
+	 *   冲突一律听包的（`remote-wins`），本地那一份进回收目录；
+	 * - 其余照调用方要的。
+	 */
+	const strictness: ApplyStrictness = mirrorFull ? 'mirror' : (anchor ? 'normal' : requested);
+	/** 严格档：应用完**仓库 == 包送到的状态**（完整副本自带完整清单；更新包按起点清单补全） */
+	const strict = strictness === 'mirror' || strictness === 'bundle-wins';
+	/**
+	 * **对齐到对面**（只拉不推）：目标是"对方那一点"，不是"我的内容 ＋ 对方的改动"。
+	 * 只跟严格档一起用 —— 合并档没有"严格相等"这回事，也就无从恢复。
+	 * 接上后续基准那条路是"保留我这一半"，与它矛盾：`resolveAnchor` 撞上 `alignToPeer`
+	 * 直接给镜像兜底的提示，走不到这里。
+	 */
+	const alignToPeer = options.alignToPeer === true && !mirrorFull && strictness === 'mirror';
+	// 以包为准：分歧一律听包的 —— 直接交给比对引擎的冲突策略，
+	// 它同时覆盖了"两边都改"「本地改了对方删了」这些分支
+	// 合并那条路（`normal`）只剩自动收包与接链在用（界面上一律走严格档）：
+	// "两边都改了怎么办"那个设置项已经删了 —— 这里的默认值就是它的历史默认值。
+	const conflictStrategy: ConflictStrategy = strictness === 'normal'
+		? (anchor ? 'remote-wins' : (options.conflictStrategy ?? 'keep-both'))
+		: 'remote-wins';
+	// 删除传播与备份只在"合并"那条路上听调用方/设置；严格档必然传播、必然先备份
+	const propagateDeletions = strictness === 'normal' ? (anchor ? true : (options.propagateDeletions ?? true)) : true;
+	// **应用必然先备份**：严格档会覆盖/挪走本地东西，强制档更可能一次删很多 ——
+	// "关掉回收目录 + 严格档" = 不可恢复的批量删除，这个组合不给走
+	const keepBackup = strictness !== 'normal' || (options.keepBackup ?? true);
 
 	// ------------------------------------------------------------ 三方
-	const local = await scanTree(options.vaultRoot, {
-		exclude: excludePatterns(settings.excludePatterns, options.configDir),
-		skipTopLevelDirs: [VAULT_TRASH_DIR],
-	});
 
 	// 基准：我上次应用/导出之后的样子；缺的地方用包自己带的 base 补
 	// （包说"我以为你原来是这样"，对一台新机器来说这就是它的基准）
@@ -747,8 +968,18 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// 而 `fullFiles` 停在那份完整副本上。拿它当底，上几份包带来的东西（尤其是**移动过去的**
 	// 那些文件：包里只有一条 `move`，不带内容）会被当成"我这边多出来的"挪进回收目录，
 	// 下一次再报"跟对方还差一点"。`fullFiles` 只在"恢复本机误改"那一步当**原版参考**用。
+	/**
+	 * **这一趟的"我这边记录的样子"**：
+	 * - 平常 ＝ `state.bundle.files`（上次跟对方交换之后两边的样子）；
+	 * - **接上后续基准**时 ＝ `state.bundle.fullFiles`（＝我记的那份基准的清单）。
+	 *   三方比对的**共同祖先必须是它**：拿包的起点（更新的那份完整包）当祖先，
+	 *   会把"我还停在旧版本的内容"整批算成"我这边改过它"，合出来全是冲突。
+	 */
+	const trackedBefore: Record<string, FileRecord> = anchor
+		? anchor.baseListing
+		: { ...(state.bundle?.files ?? {}) };
 	const baseline: Record<string, FileRecord> = {
-		...(state.bundle?.files ?? {}),
+		...(trackedBefore),
 	};
 	/**
 	 * 包**自己带的 base 优先**（它比本机那份记录更贴近事实）。
@@ -765,16 +996,30 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (size === undefined || mtime === undefined) return;
 		baseline[path] = { size, mtime };
 	};
-	for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
-	for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
+	/**
+	 * **接上后续基准那条路不撒这个种**：包里的 `base` 取自它自己的起点（更新的那份完整包），
+	 * 而这一趟的祖先是**我记的那份更旧的基准** —— 撒进去等于把祖先改成了"对方那一点"。
+	 */
+	if (!anchor) {
+		for (const entry of header.entries) seed(entry.path, entry.baseSize, entry.baseMtime);
+		for (const item of header.deleted) seed(item.path, item.baseSize, item.baseMtime);
+	}
 
 	// "对方"＝包：完整包是完整清单；更新包只有它提到的那部分（这正是我们要的 ——
 	// 没提到的一律当作"与我无关"，绝不推断删除）
+	//
+	// **接上后续基准**时"对方"不是这个包，而是**那份完整包 ＋ 这个包**：
+	// 我还停在更旧的一份上，缺的正是完整包里那一段。
 	const entriesByPath = new Map(header.entries.map(entry => [entry.path, entry]));
-	const remote: Inventory = {
-		files: new Map(header.entries.map(entry => [entry.path, { size: entry.size, mtime: entry.mtime }])),
-		dirs: new Set(header.emptyDirs ?? []),
-	};
+	const remote: Inventory = anchor
+		? {
+			files: new Map(Object.entries(anchor.remoteFiles)),
+			dirs: new Set(anchor.remoteDirs),
+		}
+		: {
+			files: new Map(header.entries.map(entry => [entry.path, { size: entry.size, mtime: entry.mtime }])),
+			dirs: new Set(header.emptyDirs ?? []),
+		};
 
 	// 完整副本走上面那段镜像逻辑（不比对）；更新包按 `normal` / `listed-wins` 走三方比对 ——
 	// `listed-wins` 要的正是"哪些是包里点名的、哪些只是我独有的"
@@ -809,11 +1054,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	const localDeleted = new Set(header.deleted.map(item => item.path));
 
 	/**
-	 * **我站的那一份完整副本**（`state.bundle.fullFiles`）—— 只在两处当"原版参考"：
-	 * 只拉那台恢复本机误改（`restore`），以及移动自愈（记录被旧版本弄丢时认出"这还是起点的树"）。
+	 * **我站的那一份完整副本**（`state.bundle.fullFiles`）—— 只在三处当"原版参考"：
+	 * 只拉那台恢复本机误改（`restore`）、移动自愈（记录被旧版本弄丢时认出"这还是起点的树"），
+	 * 以及**接上后续基准**（`catchUp`）那条路的**三方比较祖先**（见 `resolveAnchor`）。
 	 * 别拿它当"我这边内容的样子"（见下面 `contentBefore`）。
 	 */
-	const anchor = state.bundle?.fullFiles ?? null;
+	const fullFilesBefore = state.bundle?.fullFiles ?? null;
 	/**
 	 * **我这边内容的样子**（`state.bundle.files`）＝ 上次跟对方交换之后两边的样子。
 	 *
@@ -835,8 +1081,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 *
 		 * 只拉那台真正要额外做的是**恢复本机误改**（下面 `restore` 那一段）：
 		 * 目标点 ＝ 这份记录 ＋ 包里的条目 − 点名删除，对不上基准的部分从完整副本恢复。
+		 *
+		 * **接上后续基准**时换成包的起点清单（`anchor.listing`）：这一趟的落点 ＝
+		 * 那份完整包 ＋ 包的条目，`nextFullFiles` 就得从它算起（`trackedBefore` 那份更旧，
+		 * 是三方比对的祖先，不是落点的底）。
 		 */
-		...(state.bundle?.files ?? {}),
+		...(anchor ? anchor.listing : trackedBefore),
 	};
 	/**
 	 * **这个包送到的那一点上该有哪些文件**（"落点"）。
@@ -931,15 +1181,35 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		// "本地多出来的"挪进回收目录（用户报的「application 里只剩 1111」，见下面那段）。
 	}
 
+	/**
+	 * **这一条动作的内容从哪儿读**。
+	 *
+	 * 平常只有当前这份包（`entriesByPath`）。「接上后续基准」那条路还多一个来源：
+	 * 包里声明的**起点完整副本** —— 我还停在更旧的一份上，缺的那一段内容只在它里面。
+	 * 顺序是"包优先"：同一个路径两边都有时，以这个包（更新的那一版）为准。
+	 */
+	const anchorEntries = anchor
+		? new Map(anchor.source.info.header.entries.map(entry => [entry.path, entry]))
+		: null;
+	const sourceOf = (path: string): { entry: BundleEntry; file: string; info: BundleInfo } | null => {
+		const own = entriesByPath.get(path);
+		if (own) return { entry: own, file: options.file, info };
+		const fromAnchor = anchorEntries?.get(path);
+		if (fromAnchor && anchor) return { entry: fromAnchor, file: anchor.source.file, info: anchor.source.info };
+		return null;
+	};
+
 	for (const action of planned.actions) {
-		const entry = entriesByPath.get(action.path);
+		const source = sourceOf(action.path);
+		/** 写这个路径时要带上的"内容在哪" */
+		const from = source ? { sourceFile: source.file, sourceInfo: source.info } : {};
 		switch (action.kind) {
 			case 'download': {
-				if (!entry) break;
+				if (!source) break;
 				const here = local.files.get(action.path);
 				if (!here) {
 					adds++;
-					actions.push({ kind: 'write', path: action.path, entry });
+					actions.push({ kind: 'write', path: action.path, entry: source.entry, ...from });
 					break;
 				}
 
@@ -953,9 +1223,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				actions.push({
 					kind: 'write',
 					path: action.path,
-					entry,
+					entry: source.entry,
+					...from,
 					// 完整副本镜像时，本地那份动过的要先挪进回收目录（默认档下走到这儿说明它没动过）
-					backup: mirrorFull && localChanged && keepBackup,
+					backup: (mirrorFull || localChanged) && keepBackup,
 				});
 				break;
 			}
@@ -967,7 +1238,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				//
 				// 所以：更新包只按它**点名**的删除清单（`header.deleted`）删；
 				// 只有完整包才是"完整清单"，那时"基准里有、包里没有"确实是对方删过它。
-				if (header.mode !== 'full' && !localDeleted.has(action.path)) break;
+				//
+				// **接上后续基准**是第三种情况：对方那一点 ＝ 起点完整包 ＋ 这个包，
+				// 那里没有它，就说明它是在"我站的旧基准 → 包声明的起点"之间被删掉的 ——
+				// 那一段内容本来就在这份包里，按它对齐就得跟着删（否则永远停在旧内容上）。
+				const deletable = header.mode === 'full'
+					|| localDeleted.has(action.path)
+					|| anchor !== null;
+				if (!deletable) break;
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
@@ -979,28 +1257,39 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				break;
 			}
 			case 'conflict': {
-				if (!entry) break;
+				if (!source) break;
 				const here = local.files.get(action.path);
 				// 细化：本地停在"我发过的中间版本"→ 不是本地改动，直接覆盖
-				if (here && matchesHistory(here, entry)) {
+				if (here && matchesHistory(here, source.entry)) {
 					historyMatches++;
 					overwrites++;
-					actions.push({ kind: 'write', path: action.path, entry });
+					actions.push({ kind: 'write', path: action.path, entry: source.entry, ...from });
 					break;
 				}
 				// 细化：包里没给基准，而本地这份比包还旧 → 那是旧副本，直接覆盖
-				const hasBase = entry.baseSize !== undefined;
+				const hasBase = source.entry.baseSize !== undefined;
 				if (here && !hasBase && here.mtime <= header.created + TOLERANCE) {
 					overwrites++;
-					actions.push({ kind: 'write', path: action.path, entry });
+					actions.push({ kind: 'write', path: action.path, entry: source.entry, ...from });
 					break;
 				}
-				// 真的两边都改过：留两份
+				// 真的两边都改过：留两份（接上后续基准那趟听包的：本地那份进回收目录）
+				if (anchor) {
+					overwrites++;
+					actions.push({
+						kind: 'write',
+						path: action.path,
+						entry: source.entry,
+						...from,
+						backup: keepBackup,
+					});
+					break;
+				}
 				conflicts++;
 				actions.push({
 					kind: 'conflict',
 					path: action.path,
-					entry,
+					entry: source.entry,
 					winner: action.winner ?? 'remote',
 				});
 				break;
@@ -1051,12 +1340,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 *
 	 * 前提是**本机有基准**：没有基准时这台机器导不出更新包，只提示一句（界面那边负责说）。
 	 */
-	if (anchor && header.mode === 'full') {
+	if (fullFilesBefore && header.mode === 'full') {
 		pendingChanges = local.files.size - synchronized;
 		for (const entry of header.entries) {
 			if (!local.files.has(entry.path)) pendingDeletes++;
 		}
-	} else if (anchor) {
+	} else if (fullFilesBefore) {
 		for (const [file, record] of local.files) {
 			// 跟"我上次交换完的样子"一模一样 → 不是我改的
 			const at = contentBefore[file];
@@ -1410,7 +1699,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			 * 记录里没有它，但**起点那份完整副本里有、内容还是那一版**：它仍然是这棵树的一部分
 			 * （旧版本改名失败时会把记录划掉）。这时整条移动不能拒 —— 拒了这台机器就永远卡住。
 			 */
-			if (anchor && anchor[file] && sameRecord(disk, anchor[file], TOLERANCE)) continue;
+			if (fullFilesBefore && fullFilesBefore[file] && sameRecord(disk, fullFilesBefore[file], TOLERANCE)) continue;
 			// 其余的是改名之后在旧名字下新建的内容：不跟着搬，交给删除收尾（严格档进回收目录）
 		}
 
@@ -1570,7 +1859,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * **明确报错**，不能假装恢复/悄悄删掉：删掉只会让目标里少一个文件，编号照样对不上。
 	 */
 	const restoreActions: ApplyAction[] = [];
-	if (alignToPeer && anchor) {
+	if (alignToPeer && fullFilesBefore) {
 		const touched = new Set<string>([...entriesByPath.keys(), ...localDeleted]);
 		/**
 		 * **移动过的路径整棵子树都不恢复**：目录移动只点了一条 `move`，
@@ -1583,7 +1872,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			file === move.from || file === move.to
 			|| file.startsWith(`${move.from}/`) || file.startsWith(`${move.to}/`));
 		const candidates: { path: string; record: FileRecord }[] = [];
-		for (const [file, record] of Object.entries(anchor)) {
+		for (const [file, record] of Object.entries(fullFilesBefore)) {
 			// 包点名的（条目 / 删除 / 移动）交给原来的动作；这里只管"谁都没提、本机却改了"的
 			if (touched.has(file) || underMove(file)) continue;
 			// 目标那一点上已经没有它（被删 / 被移走）→ 不是恢复的事
@@ -1626,14 +1915,26 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 */
 	const declaredStart = header.mode === 'changes' ? baselineOfBundle(header) : null;
 	const myFullHash = state.bundle?.fullHash ?? null;
-	const adoptBaseline = declaredStart !== null
-		&& header.targetFullBundle !== true
-		&& header.baseFullBundle === true
-		&& myFullHash !== null
-		&& declaredStart !== myFullHash
-		&& header.targetBaselineHash !== myFullHash
-		? startPointOf(header, deliveredFiles, state.generation)
-		: null;
+	/**
+	 * **按包的起点对齐**那一趟：基准按**包的声明**接过去（不按我原来记的那份）。
+	 * 清单就用那份完整包自己的（`anchor.listing`），并且记上**包文件**——
+	 * 它确实在本机，之后"恢复本机改动"还能按名字找到它。
+	 */
+	const adoptBaseline = anchor
+		? {
+			files: anchor.listing,
+			generation: anchor.source.info.header.targetGeneration ?? state.generation,
+			hash: header.baselineHash as string,
+			file: anchor.source.file,
+		}
+		: declaredStart !== null
+			&& header.targetFullBundle !== true
+			&& header.baseFullBundle === true
+			&& myFullHash !== null
+			&& declaredStart !== myFullHash
+			&& header.targetBaselineHash !== myFullHash
+			? startPointOf(header, deliveredFiles, state.generation)
+			: null;
 
 	const foldersToRemove: string[] = [];
 	/** 想删却删不掉的：清单里看着是空的，磁盘上还有东西（被排除规则挡住的文件） */
@@ -1680,7 +1981,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	const report: ApplyReport = {
-		mode: fastPath ? 'fast' : 'merge',
+		mode: anchor ? 'merge' : (fastPath ? 'fast' : 'merge'),
 		sameLineage,
 		sameGeneration,
 		// 只报"导出方的上一份导出"这件事实，**界面不拿它判漏包**（见 `ApplyReport.parentMatches` 那段）
@@ -1708,7 +2009,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		targetBaseline: header.targetBaselineHash ?? null,
 		targetIsMine: (header.targetBaselineHash ?? null) !== null
 			&& header.targetBaselineHash === state.bundle?.fullHash,
-		viaMine: ancestor.viaLanding === true || (header.viaHashes ?? []).includes(state.bundle?.fullHash ?? ''),
+		viaMine: (ancestor.ok && ancestor.viaLanding === true)
+			|| (header.viaHashes ?? []).includes(state.bundle?.fullHash ?? ''),
 		peerStateId: header.stateId ?? null,
 		forced: mirrorFull || strictness !== 'normal',
 		adds,
@@ -1724,8 +2026,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		restored: restoreActions.length,
 		synchronized,
 		syncPercent: total === 0 ? 100 : Math.round((synchronized / total) * 100),
-		pendingChanges: anchor ? pendingChanges : null,
-		pendingDeletes: anchor ? pendingDeletes : null,
+		pendingChanges: fullFilesBefore ? pendingChanges : null,
+		pendingDeletes: fullFilesBefore ? pendingDeletes : null,
 		moves,
 		moveReplacements,
 		// 本地还没有的目录都算"要补建"：有文件的那些会随文件写入顺带建出来，
@@ -1750,6 +2052,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		contentBefore,
 		relocated: relocations,
 		adoptBaseline,
+		baselineAnchor: anchor
+			? {
+				file: anchor.source.file,
+				hash: header.baselineHash as string,
+				generation: anchor.source.info.header.targetGeneration,
+				localChanges: anchor.localChanges,
+			}
+			: null,
 		alignToPeer,
 		deliveredDirs: [...deliveredDirs].sort(),
 		foldersKept: [...foldersKept].sort(),
@@ -1814,6 +2124,54 @@ interface BaselineBundleSource {
  * 找的地方按"最可能"排：包目录的 `full/`、包目录本身、当前包旁边的 `full/`、当前包所在目录。
  * 找不到就**抛错并指路**，绝不悄悄拿别的完整包恢复 —— 那会把内容写成另一份状态。
  */
+/** 找完整包时要看的目录（按"最可能"排：包目录的 `full/`、包目录本身、当前包旁边的 `full/`、当前包所在目录） */
+function baselineSearchDirs(options: ApplyOptions): string[] {
+	const dirs: string[] = [];
+	if (options.bundleDir) {
+		dirs.push(path.join(options.bundleDir, 'full'), options.bundleDir);
+	}
+	const near = path.dirname(options.file);
+	dirs.push(path.join(near, '..', 'full'), near);
+	return [...new Set(dirs)];
+}
+
+/**
+ * 按**基准指纹**在包目录里找一份完整包。
+ *
+ * 认指纹不认文件名（重算 `baselineOfFullBundle(entries)`，见 `bundle/baseline.ts`）：
+ * 用户可能把包改过名、挪过目录，按名字找必然找不到；而指纹是包里清单算出来的，
+ * 换个名字也还是它。找不到返回 null（调用方决定是报错还是走别的路）。
+ *
+ * 两处用它：`findBaselineBundle`（"我站的这一份"）、`resolveAnchor`（"**包声明的**那一份"）。
+ */
+function findFullBundleByHash(options: ApplyOptions, hash: string | null): BaselineBundleSource | null {
+	if (!hash) return null;
+	const candidates = new Set<string>();
+	for (const dir of baselineSearchDirs(options)) {
+		let names: string[];
+		try {
+			names = fs.readdirSync(dir);
+		} catch {
+			continue;
+		}
+		for (const name of names) {
+			if (name.toLowerCase().endsWith('.lsave')) candidates.add(path.join(dir, name));
+		}
+	}
+	for (const file of candidates) {
+		let info: BundleInfo;
+		try {
+			info = readBundleInfoSync(file);
+		} catch {
+			continue;
+		}
+		if (info.header.mode !== 'full') continue;
+		if (baselineOfFullBundle(info.header.entries) !== hash) continue;
+		return { file, info };
+	}
+	return null;
+}
+
 function findBaselineBundle(
 	state: PluginState,
 	options: ApplyOptions,
@@ -1831,43 +2189,24 @@ function findBaselineBundle(
 			+ '先应用一份完整副本当基准，再让对方按那份基准重导更新包',
 		);
 	}
-	const dirs = new Set<string>();
-	if (options.bundleDir) {
-		dirs.add(path.join(options.bundleDir, 'full'));
-		dirs.add(options.bundleDir);
-	}
-	const near = path.dirname(options.file);
-	dirs.add(path.join(near, '..', 'full'));
-	dirs.add(near);
-
 	const wanted = state.bundle?.fullFile ?? null;
-	const candidates = new Set<string>();
+	// 先试记着的那个文件名（包被挪到别的目录也能找到），再按指纹扫一遍
 	if (wanted) {
-		for (const dir of dirs) candidates.add(path.join(dir, wanted));
-	}
-	for (const dir of dirs) {
-		let names: string[];
-		try {
-			names = fs.readdirSync(dir);
-		} catch {
-			continue;
+		for (const dir of baselineSearchDirs(options)) {
+			const file = path.join(dir, wanted);
+			if (!fs.existsSync(file)) continue;
+			try {
+				const info = readBundleInfoSync(file);
+				if (info.header.mode === 'full' && baselineOfFullBundle(info.header.entries) === hash) {
+					return { file, info };
+				}
+			} catch {
+				// 读不出头部：继续按指纹扫
+			}
 		}
-		for (const name of names) {
-			if (name.toLowerCase().endsWith('.lsave')) candidates.add(path.join(dir, name));
-		}
 	}
-
-	for (const file of candidates) {
-		let info: BundleInfo;
-		try {
-			info = readBundleInfoSync(file);
-		} catch {
-			continue;
-		}
-		if (info.header.mode !== 'full') continue;
-		if (baselineOfFullBundle(info.header.entries) !== hash) continue;
-		return { file, info };
-	}
+	const found = findFullBundleByHash(options, hash);
+	if (found) return found;
 
 	throw new Error(
 		`本机有 ${needed} 个改动不在这份包里${where}；要按“仅拉＝跟对面严格相等”把它们恢复成基准那一版，`
@@ -1875,6 +2214,15 @@ function findBaselineBundle(
 		+ '下一步：把那份完整包放回同步包文件夹的 full/ 再应用；'
 		+ '或者让对方导一份新的完整副本过来（完整清单自带基准，谁都能应用）',
 	);
+}
+
+/** 调用方点名的那份完整包（`ApplyOptions.baselineOverride`）：读头部、确认真是完整副本 */
+async function readBaselineOverride(override: { file: string }): Promise<BaselineBundleSource> {
+	const info = await readBundleInfo(override.file);
+	if (info.header.mode !== 'full') {
+		throw new Error(`要按「${path.basename(override.file)}」对齐，但它不是完整副本 —— 这一步需要一份完整包`);
+	}
+	return { file: override.file, info };
 }
 
 /**
@@ -1977,7 +2325,12 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 							stamp,
 						);
 					}
-					await extractEntry(options.file, plan.info, action.entry, target);
+					await extractEntry(
+						action.sourceFile ?? options.file,
+						action.sourceInfo ?? plan.info,
+						action.entry,
+						target,
+					);
 					result.written++;
 					result.bytesWritten += action.entry.size;
 					break;
@@ -2196,16 +2549,42 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 * - 旧包没记状态编号 → 只能按"内容就是包"处理（照旧采纳目标的号）。
 	 */
 	const exactTarget = plan.info.header.stateId ? result.stateIdCompare === 'match' : true;
-	state.generation = exactTarget
+	/**
+	 * **完整副本镜像一律采纳包的号**（见上面那段"世代 ＝ 内容版本号"）。
+	 *
+	 * 为什么不再用 `max()`：镜像没落准时（有删不掉的目录 / 写失败的文件），老号会一直挂着 ——
+	 * 用户那台机器就是这样对外报"我在第 392 代"，而内容其实停在第 112 代，
+	 * 连对表文件（peer）都这么写，对面的人与 agent 全被带偏。落不准由 `applyDrift` 如实说。
+	 */
+	const isFull = plan.info.header.mode === 'full';
+	state.generation = (isFull || exactTarget)
 		? plan.info.header.targetGeneration
 		: Math.max(state.generation, plan.info.header.targetGeneration);
 	// 高水位只增不减：应用别人的包时把它报过的号一并算进来（回退那一趟不会把水位拉低，
 	// 于是"回退之后再导出"不会去撞历史上用过的号，见 sync/state.ts 的 maxGeneration）
 	raiseGeneration(state, plan.info.header.targetGeneration, plan.info.header.baseGeneration);
+	/**
+	 * **该落到的没落到**（完整副本镜像 / 严格镜像出现失败或删不掉的目录）→ 记一笔"内容与那一代不一致"。
+	 *
+	 * 不这样记的话，状态里那个号、对表文件、更新记录全是"我就在那一代"的口径，
+	 * 排查的人只能靠肉眼发现对不上（本次 112/392 就是这么来的）。合并档与本机改动保留的那种
+	 * 天然不会 `match`，不算 drift。
+	 */
+	const shouldLandExactly = isFull || plan.report.strictness === 'mirror';
+	if (shouldLandExactly && plan.info.header.stateId && result.stateIdCompare !== 'match') {
+		state.applyDrift = {
+			expected: plan.info.header.stateId.id,
+			actual: stateIdInfo.id,
+			generation: plan.info.header.targetGeneration,
+			at: Date.now(),
+		};
+	} else {
+		state.applyDrift = null;
+	}
 
 	// 应用**完整包** ＝ 我这边也有了一个新基准（之后可以照着它往外导更新包），
 	// 所以中间版本记录重置；应用更新包则保留
-	const isFull = plan.info.header.mode === 'full';
+	// （`isFull` 在上面那段"世代说真话"里已经取过）
 
 	// 基准的正确含义是**"两边上次达成一致的样子"**，所以只能记两边都见过的东西：
 	// - 包里有的 → 真的写成了包里的样子才记（冲突没写成的、失败的都不记）
@@ -2413,8 +2792,12 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 				fullFiles: adopt.files,
 				fullGeneration: adopt.generation,
 				fullHash: adopt.hash,
-				// 接过别人的起点时那份包**不在本机**（从头部与 base 倒推出来的）→ 如实留空
-				fullFile: null,
+				/**
+				 * 记得住包文件就记（「按包的起点对齐」那一趟：它确实在本机）——
+				 * 之后"恢复本机改动"`findBaselineBundle` 按名字就能找到它。
+				 * 从头部与 `base` **倒推**出来的那种（`startPointOf`）不在本机 → 如实留空。
+				 */
+				fullFile: adopt.file ? path.basename(adopt.file) : null,
 			}
 			: fallback);
 	state.bundle = {
@@ -2581,7 +2964,15 @@ export async function recoverToBaselineAndApply(options: ApplyOptions): Promise<
 	baselineGeneration: number | null;
 }> {
 	const state = await loadState(options.stateFile);
-	const baseline = findBaselineBundle(state, options, 1);
+	/**
+	 * **按哪一份完整副本对齐**：
+	 * - 平时 ＝ "我站的那一份"（`state.bundle.fullHash`，`findBaselineBundle`）；
+	 * - 传了 `baselineOverride` ＝ **包自己声明的那一份起点**（`planBundleApply` 抛的
+	 *   `baselineReset` 里带出来的）—— 现场是"我记的基准是老遗留，包里写的那个起点才是我该站的"。
+	 */
+	const baseline = options.baselineOverride
+		? await readBaselineOverride(options.baselineOverride)
+		: findBaselineBundle(state, options, 1);
 	const fullOptions: ApplyOptions = {
 		...options,
 		file: baseline.file,

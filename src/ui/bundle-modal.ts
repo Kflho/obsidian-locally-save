@@ -1,7 +1,7 @@
 import { Modal, Notice, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
-import { executeBundlePlan, isDestructivePlan, planBundleApply, recoverToBaselineAndApply, shouldParkLocalChanges } from '../bundle/apply';
+import { baselineResetHint, executeBundlePlan, isDestructivePlan, planBundleApply, recoverToBaselineAndApply, shouldParkLocalChanges } from '../bundle/apply';
 import type { ApplyOptions, ApplyPlan } from '../bundle/apply';
 import { describeStateId, describeExportRange, describeExportStart } from '../bundle/log';
 import { exportBundle, parkLocalChangesFor, plannedExportModes } from '../bundle/export';
@@ -669,8 +669,22 @@ export class ApplyBundleModal extends Modal {
 			 * **兜底**：算不出计划（本机被改乱 / 移动的源缺了 / 目标被占…）时不要只剩一句报错。
 			 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准、再应用一遍一定能落
 			 * （`recoverToBaselineAndApply`）。基准包不在本机时它自己会报错并指路。
+			 *
+			 * **"包的起点在本机、但接不上"**（0.16.1）走另一个按钮：那份完整包就在包目录里，
+			 * 按它镜像对齐再应用（`baselineOverride`）—— 现场是"我记的基准是老遗留，
+			 * 包里写的那个起点才是对的"。
 			 */
 			this.applyButton?.setDisabled(true);
+			const hint = baselineResetHint(error);
+			if (hint) {
+				const tip = this.reportEl.createEl('p', {
+					text: `这个包从第 ${hint.generation ?? '?'} 代那份完整副本出发，那份包就在本机（${hint.file.split(/[\\/]/).pop() ?? hint.file}）：`
+						+ `${hint.reason}。按它镜像对齐再应用，会把仓库整到那份副本上（本机多出来的进回收目录，能捞回来）。`,
+				});
+				tip.addClass('locally-save-hint');
+				const align = this.reportEl.createEl('button', { text: `按第 ${hint.generation ?? '?'} 代镜像对齐再应用` });
+				align.addEventListener('click', () => { void this.forceRecover(file, hint.file); });
+			}
 			const button = this.reportEl.createEl('button', { text: '强制回退到基准包再应用' });
 			button.addEventListener('click', () => { void this.forceRecover(file); });
 		}
@@ -680,13 +694,21 @@ export class ApplyBundleModal extends Modal {
 	 * 打不开 / 对不上时的兜底入口：强制回退到基准完整副本，再把这一份应用一遍。
 	 *
 	 * 这是用户拍板的路线："有基准包和对应更新包，信息就是全的，不管本机怎么改过都要能成功。"
+	 *
+	 * `baselineFile` 传了就是**按包声明的那份起点**对齐（界面上那个「按第 N 代镜像对齐」按钮），
+	 * 不传就是"我记的那一份"（老行为）。
 	 */
-	private async forceRecover(file: string): Promise<void> {
+	private async forceRecover(file: string, baselineFile?: string): Promise<void> {
 		this.reportEl.empty();
-		this.reportEl.setText('正在强制回退到基准包，再把这一份应用一遍…');
+		this.reportEl.setText(baselineFile
+			? '正在按包里声明的那份起点镜像对齐，再把这一份应用一遍…'
+			: '正在强制回退到基准包，再把这一份应用一遍…');
 		this.plugin.reportProgress({ done: 0, total: 0, path: '', label: '应用中' });
 		try {
-			const again = await recoverToBaselineAndApply(this.optionsFor(file));
+			const again = await recoverToBaselineAndApply({
+				...this.optionsFor(file),
+				...(baselineFile ? { baselineOverride: { file: baselineFile } } : {}),
+			});
 			this.plugin.reportProgress(null);
 			await refreshStatusBar(this.plugin);
 			const matched = again.result.recovered?.matched === true;
@@ -743,7 +765,19 @@ export class ApplyBundleModal extends Modal {
 		const baseGen = plan.info.header.baseGeneration;
 		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 代`;
 		if (report.bundle.mode !== 'full') {
-			if (report.viaMine) {
+			if (plan.baselineAnchor) {
+				/**
+				 * **接上后续基准**（0.16.1）：包的起点比本机站的基准靠后、那份完整包又在本机。
+				 * 用户拍板的原话："对面有 320 代的，112 代只是之前遗留，明显可以同步。"
+				 */
+				const anchor = plan.baselineAnchor;
+				this.reportEl.createEl('p', {
+					text: `接上后续基准：这个包从第 ${anchor.generation ?? '?'} 代那份完整副本出发，`
+						+ '你站的是更早的一份。应用时按那份完整包对齐 —— 中间那一段会补上，'
+						+ `你自己相对本机基准的 ${anchor.localChanges.length} 处改动会留着。`,
+					cls: 'locally-save-hint',
+				});
+			} else if (report.viaMine) {
 				// 合并过历史遗留的小包之后常见：我站在被并掉的那个状态上，而这个包正好从那儿经过
 				this.reportEl.createEl('p', {
 					text: `这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
