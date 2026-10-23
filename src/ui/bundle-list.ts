@@ -358,7 +358,7 @@ export class BundleListView {
 			note: '删除后捞不回来。只想清出列表的话，用旁边的「挪进回收站」。',
 			confirmText: '彻底删除',
 			onConfirm: async () => {
-				const outcome = await deleteBundles([item.file]);
+				const outcome = await deleteBundles([item.file], this.options.baseDir());
 				if (outcome.failed.length > 0) {
 					new Notice(`没能删掉 ${outcome.failed[0]?.path}：${outcome.failed[0]?.error}`, 9000);
 				} else {

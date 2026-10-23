@@ -12,7 +12,7 @@ import { readPeers, writePeer, describePeerDetail, needsPeerRefresh } from '../g
 import { runGit } from '../git/run';
 import { isShelf, prepareShelf } from '../git/shelf';
 import type { ShelfOptions } from '../git/shelf';
-import { readShelfStatus, shelfIsDirty, syncShelf } from '../git/sync';
+import { readShelfStatus, refreshShelf, shelfIsDirty, syncShelf } from '../git/sync';
 import type { GitSyncReport } from '../git/sync';
 import type LocallySavePlugin from '../main';
 import { DIRECTION_OPTIONS } from '../settings/model';
@@ -585,6 +585,61 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 		confirmText: '以对面为准',
 		onConfirm: () => { void applyAlign(plugin, target.file); },
 	}).open();
+}
+
+/**
+ * **刷新包：把货架对齐到远程**（用户点的动作）。
+ *
+ * 用户现场："包弄乱了我会删，这时候要从远程重新拉最新的……现在删了他就不会拉了，
+ * 一直拉不下来。" 自动同步碰上"本地有提交 + 远程也有提交"必须停下（不能替用户 rebase 仓库），
+ * 于是给一个明确的出口：丢掉货架那一段的本地提交/改动，整段对齐远程，再把新包捡起来。
+ */
+export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<void> {
+	if (!plugin.settings.enabled) return;
+	if (!plugin.settings.gitEnabled) {
+		new Notice('先打开「启用 git 传输」：设置 → Git 远程');
+		return;
+	}
+	const shelf = shelfOptions(plugin);
+	if (!shelf) {
+		new Notice('先把「同步包文件夹」和「远程地址」填上', 9000);
+		return;
+	}
+	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) {
+		new Notice('这个文件夹还没接上 git：先点「接入这个远程…」', 9000);
+		return;
+	}
+	if (plugin.gitBusy || plugin.bundleBusy || plugin.incomingBusy || isApplying()) {
+		new Notice('正在同步 / 应用，等这一步做完再刷新', 6000);
+		return;
+	}
+	plugin.gitBusy = true;
+	try {
+		plugin.reportProgress({ done: 0, total: 0, path: '', label: '刷新中' });
+		const report = await refreshShelf({
+			...shelf,
+			onStage: stage => plugin.reportProgress({ done: 0, total: 0, path: '', label: stage }),
+		});
+		plugin.reportProgress(null);
+		plugin.log.debug(
+			`刷新包：丢掉本地 ${report.dropped} 笔提交，新到 ${report.pulled.length} 个包（HEAD ${report.head ?? '?'}）`,
+		);
+		new Notice(
+			`货架已对齐远程 · 丢掉本地 ${report.dropped} 笔货架提交`
+				+ `，新到 ${report.pulled.length} 个包`,
+			8000,
+		);
+		await refreshStatusBar(plugin);
+		// 新到的包可能就是要应用的那一份：按当前方向再走一遍收包
+		if (report.pulled.length > 0) await syncGitNow(plugin, { quiet: true });
+	} catch (error) {
+		plugin.reportProgress(null);
+		const message = error instanceof Error ? error.message : String(error);
+		new Notice(`刷新失败：${message}`, 9000);
+		plugin.log.error('刷新货架失败', error);
+	} finally {
+		plugin.gitBusy = false;
+	}
 }
 
 /** 真正按对方对齐（见 `downloadNow` 的说明）；strictness 用界面上那唯一一种：mirror */

@@ -5,6 +5,7 @@ import { BUNDLE_ROOT_DIR, bundleDirsToScan } from './paths';
 import type { BundleMode } from './paths';
 import { listFiles, moveToTrash, removeDirRecursive, removeEmptyDir, removeFile, scanTree } from '../sync/disk';
 import { formatStamp } from '../utils/format';
+import { noteBundleRemoved } from '../git/removals';
 import { toNative } from '../utils/paths';
 
 /**
@@ -181,14 +182,21 @@ export async function trashBundles(baseDir: string, files: string[]): Promise<Tr
 	const root = bundleTrashRoot(baseDir);
 	const stamp = formatStamp(Date.now());
 	const outcome: TrashOutcome = { moved: [], failed: [], target: toNative(root, stamp) };
+	const moved: string[] = [];
 	for (const file of files) {
 		try {
 			await moveToTrash(file, root, path.basename(file), stamp);
 			outcome.moved.push(path.basename(file));
+			moved.push(file);
 		} catch (error) {
 			outcome.failed.push({ path: file, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	/**
+	 * 记号：这些是**我主动撤下**的，同步时要把删除提交上去（推到对面）；
+	 * 用户自己在文件夹里删掉的没有这个记号 → 同步时会被当成"本地丢了"恢复回来。
+	 */
+	noteBundleRemoved(baseDir, moved);
 	outcome.moved.sort();
 	return outcome;
 }
@@ -239,16 +247,20 @@ export interface DeleteOutcome {
  *
  * 界面上必须**单独确认一次**，措辞也别跟"挪进回收站"混 —— 这一步之后真的捞不回来。
  */
-export async function deleteBundles(files: string[]): Promise<DeleteOutcome> {
+export async function deleteBundles(files: string[], baseDir?: string): Promise<DeleteOutcome> {
 	const outcome: DeleteOutcome = { deleted: [], failed: [] };
+	const gone: string[] = [];
 	for (const file of files) {
 		try {
 			await removeFile(file); // 文件本来就不在也算成功（可能刚被别的操作挪走）
 			outcome.deleted.push(path.basename(file));
+			gone.push(file);
 		} catch (error) {
 			outcome.failed.push({ path: file, error: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	// 同上：彻底删除也是"我主动撤下"，同步时要把删除提交上去
+	if (baseDir) noteBundleRemoved(baseDir, gone);
 	outcome.deleted.sort();
 	return outcome;
 }

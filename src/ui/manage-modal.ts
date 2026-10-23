@@ -9,6 +9,7 @@ import { loadState } from '../sync/state';
 import { scanTree } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
 import { ApplyBundleModal } from './bundle-modal';
+import { refreshBundlesAction } from './git';
 import { BundleListView } from './bundle-list';
 import { BundleLogModal } from './log-modal';
 import { openFolderInExplorer } from './reveal';
@@ -101,6 +102,10 @@ export class BundleManagerModal extends Modal {
 		void this.renderPosition();
 
 		new Setting(contentEl)
+			.addButton(button => button
+				.setButtonText('刷新包（对齐远程）')
+				.setTooltip('丢掉本地货架那一段没推的提交，整段对齐远程，把新包拉下来')
+				.onClick(() => { void refreshBundlesAction(this.plugin); }))
 			.addButton(button => button
 				.setButtonText('合并相邻的更新包…')
 				.setTooltip('把连着的一串小更新包并成一份大的，少几个文件要搬')

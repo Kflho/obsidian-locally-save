@@ -4,6 +4,7 @@ import { gitFailure } from './run';
 import type { GitResult } from './run';
 import { gitRunner, prepareShelf, readShelfLayout } from './shelf';
 import type { GitRunner, ShelfLayout, ShelfOptions } from './shelf';
+import { clearRemovals, readRemovals } from './removals';
 
 /**
  * 一次"和远程对一遍"：**提交本机的包 → 拉下别人的包 → 推上去**。
@@ -67,6 +68,16 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 
 	// 提交本机新写的包（含"撤下"的删除）
 	options.onStage?.('检查本机的包…');
+	/**
+	 * **本地把包删了 ≠ 我要远程也删掉**（用户报的："包弄乱了我会删，这时候要从远程重新拉最新的，
+	 * 现在删了他就不会拉了"）。两道处理：
+	 * - 插件**主动撤下**的（`bundle/manage.ts` 的挪进回收站 / 彻底删除、被新包取代的老包）记过记号，
+	 *   照旧提交并推到对面（"删包要同步"那条没变）；
+	 * - 别的（用户在文件夹里删的）一律当成"我这份副本丢了"：**从 HEAD 恢复回来**，
+	 *   于是这一趟只剩拉取，不会把自己删的东西推到远程、也不会因为多出一笔本地提交卡在"不能快进"。
+	 */
+	const restored = await restoreDroppedBundles(git, dir, layout);
+	if (restored.length > 0) options.onStage?.(`本机少掉的 ${restored.length} 个包已拉回来…`);
 	const before = await listBundlePaths(dir, options.trashDir);
 	options.onStage?.('提交本机的包…');
 	const committed = hosted ? await commitScoped(git, layout) : await commitPending(git);
@@ -97,6 +108,8 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	}
 
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+	// 该提交的删除都进仓库了，记号可以清掉（留着会挡住以后"我在文件夹里删了要恢复"的那种）
+	clearRemovals(dir);
 	return {
 		committed,
 		pulled,
@@ -139,9 +152,138 @@ export async function pushWithRetry(
 	throw gitFailure('把包推到远程', push);
 }
 
+/**
+ * **本地"丢"了的包，从货架（HEAD）恢复回来**（插件主动撤下的除外，见 `git/removals.ts`）。
+ *
+ * 判据用 `git diff HEAD --diff-filter=D`：只看"工作区/暂存区里没了、HEAD 里还有"的那些，
+ * 路径是**仓库根相对**的，所以 `git checkout` 一律带 `:(top)` 前缀 —— 货架是别人仓库的子目录时，
+ * cwd 在子目录里、裸路径会被 git 当成"相对当前目录"，恢复错文件（真踩过）。
+ *
+ * 只认包与对表文件（`.lsave` / `.lsave-peers/*.json`）：货架里本来就只有这两类，
+ * 别的路径就算被删了也不该由插件替用户恢复。
+ */
+async function restoreDroppedBundles(git: GitRunner, dir: string, layout: ShelfLayout): Promise<string[]> {
+	const diff = await git(['diff', '--diff-filter=D', '--name-only', '-z', 'HEAD', '--', '.']);
+	if (diff.code !== 0) return [];
+	const marked = readRemovals(dir);
+	const prefix = layout.hosted && layout.rel !== '' ? `${layout.rel}/` : '';
+	const dropped: string[] = [];
+	for (const repoRel of diff.stdout.split('\0')) {
+		if (repoRel === '') continue;
+		const lower = repoRel.toLowerCase();
+		const shelfRel = prefix !== '' && repoRel.startsWith(prefix) ? repoRel.slice(prefix.length) : repoRel;
+		const managed = lower.endsWith('.lsave') || shelfRel.startsWith('.lsave-peers/');
+		if (!managed) continue;
+		if (marked.has(shelfRel)) continue; // 我自己撤下的：要提交成删除，别恢复
+		dropped.push(repoRel);
+	}
+	if (dropped.length === 0) return [];
+	const checkout = await git(['checkout', '--', ...dropped.map(item => `:(top)${item}`)]);
+	if (checkout.code !== 0) return [];
+	return dropped;
+}
+
+export interface ShelfRefreshReport {
+	/** 本地原来比远程多几笔提交（这一趟被丢掉） */
+	dropped: number;
+	/** 对齐之后的 HEAD */
+	head: string | null;
+	/** 这一趟新出现的包（文件名） */
+	pulled: string[];
+}
+
+/**
+ * **刷新包：把货架对齐到远程**（用户点的动作，不是自动的）。
+ *
+ * 用户现场："包弄乱了我会删，这时候要从远程重新拉最新的……现在删了他就不会拉了"。
+ * 自动同步遇到"本地有提交 + 远程也有提交"时会停下（绝不能悄悄 rebase 用户的仓库），
+ * 所以给它一个**明确的**出口：
+ *
+ * 1. `fetch` 远程；
+ * 2. 子目录形态下先确认"本地多出来的提交只动货架那一段、货架之外没有未提交改动"
+ *    —— 不满足就报错，绝不动用户的其它文件；
+ * 3. `reset --hard origin/<分支>`（只重置，不合并、不留冲突），清掉"主动撤下"记号；
+ * 4. 返回新出现哪些包（界面接着说"新到 N 个包"）。
+ */
+export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshReport> {
+	const prepared = await prepareShelf(options);
+	const layout = prepared.layout;
+	const dir = path.resolve(options.dir);
+	const git = gitRunner(options);
+	const branch = layout.hosted ? layout.branch : options.branch;
+	if (layout.hosted && await hasStuckState(git, dir)) {
+		throw new Error('这个仓库里还有没做完的 rebase / merge：先把它收拾掉再刷新（插件不会替你中止）');
+	}
+	options.onStage?.('连接远程…');
+	const fetched = await git(['fetch', 'origin', branch], true);
+	if (fetched.code !== 0) throw gitFailure('从远程拉包', fetched);
+	const remoteRef = await git(['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
+	const target = remoteRef.stdout.trim();
+	if (remoteRef.code !== 0 || target === '') {
+		throw new Error(`远程还没有 ${branch} 分支：没有可拉的东西`);
+	}
+	const aheadResult = await git(['rev-list', '--count', `origin/${branch}..HEAD`]);
+	const dropped = aheadResult.code === 0 ? Number.parseInt(aheadResult.stdout.trim(), 10) || 0 : 0;
+	if (layout.hosted) await assertOnlyShelfLocalChanges(git, layout, branch);
+	options.onStage?.('把货架对齐到远程…');
+	const before = await listBundlePaths(dir, options.trashDir);
+	const reset = await git(['reset', '--hard', `origin/${branch}`]);
+	if (reset.code !== 0) throw gitFailure('把货架对齐到远程', reset);
+	clearRemovals(dir);
+	const after = await listBundlePaths(dir, options.trashDir);
+	const pulled = [...after].filter(item => !before.has(item)).sort();
+	const headResult = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+	return {
+		dropped,
+		head: headResult.code === 0 ? headResult.stdout.trim() : null,
+		pulled,
+	};
+}
+
+/**
+ * 子目录货架刷新前的闸门：**只同意丢掉"货架那一段"的本地提交/改动**。
+ *
+ * 外层是用户的仓库（可能还有别的项目在里面），`reset --hard` 会把整棵工作树对齐远程 ——
+ * 只要有一笔提交或一处改动落在货架之外，就不能替用户决定（报错，让他自己处理）。
+ */
+async function assertOnlyShelfLocalChanges(
+	git: GitRunner,
+	layout: ShelfLayout,
+	branch: string,
+): Promise<void> {
+	const prefix = layout.rel === '' ? '' : `${layout.rel}/`;
+	const commits = await git(['rev-list', `origin/${branch}..HEAD`]);
+	if (commits.code === 0) {
+		const list = commits.stdout.split('\n').map(item => item.trim()).filter(item => item !== '');
+		for (const commit of list) {
+			const files = await git(['diff-tree', '--no-commit-id', '--name-only', '-r', commit]);
+			const outside = files.stdout
+				.split('\n')
+				.map(item => item.trim())
+				.filter(item => item !== '')
+				.filter(item => prefix === '' || !item.startsWith(prefix));
+			if (outside.length > 0) {
+				throw new Error(
+					`本地有 ${list.length} 笔提交没推到远程，而且改到了货架之外（${outside[0]}…）：`
+					+ '先在仓库里把它们处理掉，再来刷新（插件不会替你的仓库做 reset）',
+				);
+			}
+		}
+	}
+	const status = await git(['status', '--porcelain', '-z']);
+	for (const raw of status.stdout.split('\0')) {
+		if (raw.length < 4) continue;
+		const file = raw.slice(3);
+		if (prefix !== '' && !file.startsWith(prefix)) {
+			throw new Error(
+				`仓库里还有货架之外的未提交改动（${file}）：先提交或 stash，再来刷新`,
+			);
+		}
+	}
+}
+
 /** 本机的包 → 一笔提交（没有变化就跳过，不产生空提交） */
-async function commitPending(git: GitRunner): Promise<{ commit: string; files: string[] } | null> {
-	// `git add -A` 只加得进 `.git/info/exclude` 放行的那几类（见 shelf.ts）：包，以及已跟踪文件的增删
+async function commitPending(git: GitRunner): Promise<{ commit: string; files: string[] } | null> {	// `git add -A` 只加得进 `.git/info/exclude` 放行的那几类（见 shelf.ts）：包，以及已跟踪文件的增删
 	// （完整包与回收站都被挡在外面 —— 完整包不推，回收站不进仓库）
 	const add = await git(['add', '-A']);
 	if (add.code !== 0) throw gitFailure('把包加进仓库', add);

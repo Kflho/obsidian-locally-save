@@ -8,6 +8,7 @@ import { baselineOfBundle, baselineOfFullBundle, listingHashOfFiles } from './ba
 import { describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
 import type { BundleAnchor } from './anchor';
 import { appendBundleLog } from './log';
+import { noteBundleRemoved } from '../git/removals';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
@@ -1975,6 +1976,7 @@ async function removeSupersededChanges(
 			continue;
 		}
 		await removeFile(candidate);
+		noteBundleRemoved(options.outDir, [candidate]);
 		removed.push(item.name);
 	}
 	removed.sort();

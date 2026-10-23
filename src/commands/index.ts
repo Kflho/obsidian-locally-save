@@ -9,7 +9,7 @@ import {
 	previewBundleExport,
 	syncNow,
 } from '../ui/actions';
-import { downloadNow, syncGitNow, uploadNow } from '../ui/git';
+import { downloadNow, refreshBundlesAction, syncGitNow, uploadNow } from '../ui/git';
 import { openPeerStatus } from '../ui/status';
 
 /**
@@ -67,6 +67,8 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 	register(plugin, 'manage-bundles', '管理同步包…', () => manageBundlesAction(plugin));
 	register(plugin, 'bundle-log', '同步包更新记录…', () => bundleLogAction(plugin));
 	register(plugin, 'git-sync', '与 git 远程同步一次', () => syncGitNow(plugin, { manual: true }));
+	register(plugin, 'refresh-bundles', '刷新包（丢掉本地货架提交，对齐远程重新拉）', () =>
+		refreshBundlesAction(plugin));
 	register(plugin, 'sync-status', '查看各台电脑同步状态…', () =>
 		openPeerStatus(plugin, () => { void syncGitNow(plugin, { manual: true }); }));
 
