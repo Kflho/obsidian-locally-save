@@ -13,6 +13,7 @@ import { loadStateSync } from '../sync/state';
 import { anchorFingerprintOf, coerceAnchorFingerprint } from '../settings/model';
 import type { DropdownComponent, TextComponent } from 'obsidian';
 import { BundleListView } from './bundle-list';
+import { renderShelfTools } from './shelf-tools';
 import { pickBundleFromDrop } from './drop';
 import { syncGitNow } from './git';
 import { refreshStatusBar } from './status';
@@ -263,6 +264,11 @@ export class ExportBundleModal extends Modal {
 			emptyText: '这个文件夹里还没有 .lsave 文件',
 		});
 		void this.list.refresh();
+		// 货架那两个动作（刷新包 / 合并相邻的更新包）**直接放在这个窗口里**：
+		// 用户提的"管理同步包那个窗口我根本不会打开，功能都移动到导出包和导入包界面"
+		renderShelfTools(contentEl, this.app, this.plugin, () => this.effectiveDir(), () => {
+			void this.list?.refresh();
+		});
 
 		new Setting(contentEl)
 			.addButton(button => button
@@ -509,11 +515,11 @@ export class ApplyBundleModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 
-		// 列表与导入弹窗、管理弹窗共用：点一行就检查它，行内还能打开所在文件夹 / 复制路径 / 删除
+		// 列表与导入弹窗、管理弹窗共用：行内按钮直接**应用**这个包（用户提的："包检查直接改成应用"）
 		this.list = new BundleListView(this.plugin, contentEl, {
 			baseDir: () => this.effectiveDir(),
-			actionLabel: '检查',
-			onAction: item => { void this.select(item.file); },
+			actionLabel: '应用…',
+			onAction: item => { void this.selectThenApply(item.file); },
 			onSelect: item => { void this.select(item.file); },
 			// 选中的包被挪走了：报告留着只会让人以为它还在，清掉并说明一句
 			onRemove: file => {
@@ -531,6 +537,10 @@ export class ApplyBundleModal extends Modal {
 		});
 		this.reportEl = contentEl.createDiv({ cls: 'locally-save-report' });
 		this.reportEl.setText('还没有选择同步包。');
+		// 货架那两个动作（刷新包 / 合并相邻的更新包）也放这儿：不用再开「管理同步包」
+		renderShelfTools(contentEl, this.app, this.plugin, () => this.effectiveDir(), () => {
+			void this.list?.refresh();
+		});
 		new Setting(contentEl)
 			.addButton(button => {
 				this.applyButton = button
@@ -569,6 +579,18 @@ export class ApplyBundleModal extends Modal {
 		this.reportEl.empty();
 		this.reportEl.setText('正在检查这个包…');
 		await this.replan();
+	}
+
+	/**
+	 * **一步到底**：行内那个「应用…」按钮 → 先算一遍（报告留在窗口里），能算出来就直接应用。
+	 *
+	 * 会删文件 / 覆盖本地改动的那种仍然会弹确认框（`apply()` 里的 `isDestructivePlan` 那道闸），
+	 * 所以少点一下不等于少看一眼。
+	 */
+	private async selectThenApply(file: string): Promise<void> {
+		await this.select(file);
+		if (!this.plan) return; // 算不出来：窗口里已经写着原因与兜底按钮
+		await this.apply();
 	}
 
 	/**
