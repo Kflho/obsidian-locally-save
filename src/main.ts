@@ -101,8 +101,24 @@ export default class LocallySavePlugin extends Plugin {
 		});
 		setDebugSink((event, data, error) => { void this.debugLog.log(event, data, error); });
 		// 第一笔就落盘：用户看到「没有 debug.log」时，能立刻区分"插件没加载"和"没出过错"
+		/**
+		 * **磁盘上的版本**（`manifest.json`）也记一笔。
+		 *
+		 * Obsidian 把 `manifest` 缓存在内存里：热重载换掉 `main.js` 之后，`this.manifest.version`
+		 * 仍然报旧号 —— 我们和对面都被这一点误导过（"已部署 0.16.8，但 plugin.loaded 还是 0.16.7"）。
+		 * 两个字段不一致就说明：**代码已经换了，版本号得重启一次 Obsidian 才刷新**。
+		 */
+		let onDisk = '';
+		try {
+			const rel = `${this.app.vault.configDir}/plugins/${this.manifest.id}/manifest.json`;
+			const raw = await this.app.vault.adapter.read(rel);
+			onDisk = (JSON.parse(raw) as { version?: string }).version ?? '';
+		} catch {
+			onDisk = '';
+		}
 		void this.debugLog.log('plugin.loaded', {
 			version: this.manifest.version,
+			onDisk,
 			enabled: this.settings.enabled,
 			debugLog: this.settings.debugLog !== false,
 			configDir: this.app.vault.configDir,
