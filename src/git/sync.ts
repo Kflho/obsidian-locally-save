@@ -49,6 +49,14 @@ export interface GitSyncReport {
 
 /** 把货架和远程对一遍（幂等：没有变化时只花几条本地 git 命令） */
 export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
+	/**
+	 * **同步是五个步骤**，界面按"第几步 / 共几步"显示（用户提的："连接远程这种信息经常闪现，
+	 * 改成步骤进度、用数字表示"）。步骤号在这里定，别在界面那边另编一套。
+	 */
+	const totalSteps = 5;
+	const stage = (index: number, label: string): void => {
+		options.onStage?.(label, { index, total: totalSteps });
+	};
 	const prepared = await prepareShelf(options);
 	const layout = prepared.layout;
 	const dir = path.resolve(options.dir);
@@ -67,7 +75,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	}
 
 	// 提交本机新写的包（含"撤下"的删除）
-	options.onStage?.('检查本机的包…');
+	stage(1, '检查本机的包…');
 	/**
 	 * **本地把包删了 ≠ 我要远程也删掉**（用户报的："包弄乱了我会删，这时候要从远程重新拉最新的，
 	 * 现在删了他就不会拉了"）。两道处理：
@@ -77,17 +85,17 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	 *   于是这一趟只剩拉取，不会把自己删的东西推到远程、也不会因为多出一笔本地提交卡在"不能快进"。
 	 */
 	const restored = await restoreDroppedBundles(git, dir, layout);
-	if (restored.length > 0) options.onStage?.(`本机少掉的 ${restored.length} 个包已拉回来…`);
+	if (restored.length > 0) stage(1, `本机少掉的 ${restored.length} 个包已拉回来…`);
 	const before = await listBundlePaths(dir, options.trashDir);
-	options.onStage?.('提交本机的包…');
+	stage(2, '提交本机的包…');
 	const committed = hosted ? await commitScoped(git, layout) : await commitPending(git);
 
 	// 拉：远程还是空仓库是正常情况（第一次推之前就是）
-	options.onStage?.('连接远程…');
+	stage(3, '连接远程…');
 	const fetched = await fetchRemote(git, branch);
 	let remoteEmpty = false;
 	if (fetched.kind === 'fetched') {
-		options.onStage?.('合并远程的包…');
+		stage(4, '合并远程的包…');
 		await mergeFetched(git, layout);
 	} else if (fetched.kind === 'empty') {
 		remoteEmpty = true;
@@ -102,7 +110,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	let counts = await aheadBehind(git, branch);
 	let pushed = false;
 	if (counts.ahead > 0) {
-		options.onStage?.('推送远程…');
+		stage(5, '推送远程…');
 		pushed = await pushWithRetry(options, 1, layout, branch);
 		counts = await aheadBehind(git, branch);
 	}
@@ -214,7 +222,11 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
 	if (layout.hosted && await hasStuckState(git, dir)) {
 		throw new Error('这个仓库里还有没做完的 rebase / merge：先把它收拾掉再刷新（插件不会替你中止）');
 	}
-	options.onStage?.('连接远程…');
+	const refreshSteps = 3;
+	const stage = (index: number, label: string): void => {
+		options.onStage?.(label, { index, total: refreshSteps });
+	};
+	stage(1, '连接远程…');
 	const fetched = await git(['fetch', 'origin', branch], true);
 	if (fetched.code !== 0) throw gitFailure('从远程拉包', fetched);
 	const remoteRef = await git(['rev-parse', '--verify', '--quiet', `origin/${branch}`]);
@@ -225,7 +237,7 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
 	const aheadResult = await git(['rev-list', '--count', `origin/${branch}..HEAD`]);
 	const dropped = aheadResult.code === 0 ? Number.parseInt(aheadResult.stdout.trim(), 10) || 0 : 0;
 	if (layout.hosted) await assertOnlyShelfLocalChanges(git, layout, branch);
-	options.onStage?.('把货架对齐到远程…');
+	stage(2, '把货架对齐到远程…');
 	const before = await listBundlePaths(dir, options.trashDir);
 	const reset = await git(['reset', '--hard', `origin/${branch}`]);
 	if (reset.code !== 0) throw gitFailure('把货架对齐到远程', reset);

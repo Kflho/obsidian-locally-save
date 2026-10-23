@@ -107,7 +107,9 @@ export async function syncGitNow(
 
 		const report = await syncShelf({
 			...shelf,
-			onStage: stage => plugin.statusBar.showActivity(`同步中：${stage}`),
+			onStage: (stage, step) => plugin.statusBar.showActivity(
+				step ? `同步 ${step.index}/${step.total} · ${stage}` : `同步中：${stage}`,
+			),
 		});
 		plugin.lastGitAt = Date.now();
 		plugin.gitFailures = 0;
@@ -618,7 +620,12 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 		plugin.reportProgress({ done: 0, total: 0, path: '', label: '刷新中' });
 		const report = await refreshShelf({
 			...shelf,
-			onStage: stage => plugin.reportProgress({ done: 0, total: 0, path: '', label: stage }),
+			onStage: (stage, step) => plugin.reportProgress({
+				done: 0,
+				total: 0,
+				path: '',
+				label: step ? `${step.index}/${step.total} ${stage}` : stage,
+			}),
 		});
 		plugin.reportProgress(null);
 		plugin.log.debug(

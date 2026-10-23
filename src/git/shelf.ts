@@ -38,8 +38,12 @@ export interface ShelfOptions {
 	networkTimeoutMs?: number;
 	/** 额外环境变量（测试用） */
 	env?: NodeJS.ProcessEnv;
-	/** 长活走到哪一步了（状态栏显示"正在拉取…"）；引擎不关心界面，只回调 */
-	onStage?: (stage: string) => void;
+	/**
+	 * 长活走到哪一步了（状态栏显示"同步 3/5 · 连接远程"）；引擎不关心界面，只回调。
+	 * `step` 给了就是"第几步 / 共几步"，界面按数字显示（用户提的："连接远程这种信息经常闪现，
+	 * 改成步骤进度、用数字表示"）。
+	 */
+	onStage?: (stage: string, step?: { index: number; total: number }) => void;
 }
 
 /**

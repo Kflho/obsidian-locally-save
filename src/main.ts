@@ -2,7 +2,10 @@ import { FileSystemAdapter, Notice, Plugin } from 'obsidian';
 import { registerCommands } from './commands';
 import { LocallySaveSettingTab, settingsFrom } from './settings';
 import type { PluginSettings } from './settings';
-import { STATE_FILE_NAME } from './sync/state';
+import { STATE_FILE_NAME, loadStateSync } from './sync/state';
+import type { PluginState } from './sync/state';
+import { bundleBaseDir } from './bundle/paths';
+import { needsPeerRefresh, readPeers } from './git/peers';
 import { applyBundleAction, checkIncomingBundles, exportBundleAction, exportBundlesNow, isReceiveOnly, syncNow } from './ui/actions';
 import { maybeGitSync, syncGitNow } from './ui/git';
 import { registerBundleDropTarget } from './ui/drop-watch';
@@ -16,6 +19,18 @@ import { toNative } from './utils/paths';
 
 /** 自动留包的检查节拍：每 30 秒看一次"到点了吗" */
 const TICK_MS = 30_000;
+
+/**
+ * 对表文件（"对方到哪一步了"）的快节拍：**只在两边还没对齐时**每 10 秒拉一次。
+ *
+ * 为什么单独一条：应用完 / 导出完，对面只改了 `.lsave-peers/<它的 copyId>.json`，
+ * 要等它下一次拉取才看得到 —— 30 秒那个节拍管的是留包和收包，拿它盯对表太慢，
+ * 用户看到的就是"一边一致、一边待上报，怎么刷新都不变"。
+ */
+const PEER_TICK_MS = 10_000;
+
+/** 静默对表的最小间隔：不管状态栏写什么，至少这么久拉一次（对方改了才收得到信号） */
+const PEER_SYNC_MS = 30_000;
 
 /**
  * 插件入口：只管生命周期与装配。
@@ -141,6 +156,13 @@ export default class LocallySavePlugin extends Plugin {
 		// 一个固定节拍管两种自动留包（定时 / 保存后），
 		// 这样改设置立刻生效，不用重建定时器（重建最容易漏清旧的）
 		this.registerInterval(window.setInterval(() => this.tick(), TICK_MS));
+		/**
+		 * **对表文件的快节拍**（用户提的："一边显示一致一边显示待上报，还是没有即时获取同步信息"）。
+		 *
+		 * 30 秒那个节拍管留包 / 收包，太重；这里只做一件事：状态"待上报 / 不同步 / 它还没报"
+		 * 时每 `PEER_TICK_MS` 拉一次对表文件，拿到对面新状态就停（`needsPeerRefresh` 自己会收敛）。
+		 */
+		this.registerInterval(window.setInterval(() => { void this.peerTick(); }, PEER_TICK_MS));
 		this.registerEvent(this.app.vault.on('modify', () => {
 			this.saveDirtyAt = Date.now();
 			this.pendingSave = true;
@@ -233,6 +255,45 @@ export default class LocallySavePlugin extends Plugin {
 		if (!this.settings.enabled) return;
 		if (this.bundleBusy || this.incomingBusy || this.gitBusy) return;
 		void this.runTick();
+	}
+
+	/**
+	 * **对表文件的快节拍**（每 10 秒，见 `PEER_TICK_MS`）：只在两边还没对齐时拉一次。
+	 *
+	 * 为什么要有它：应用完 / 导出完，对面只改了 `.lsave-peers/<它的 copyId>.json`，
+	 * 本机要等下一次拉取才看得到。30 秒那个节拍管的是留包与收包，拿它盯对表太慢 ——
+	 * 用户看到的就是"一边一致、一边待上报，刷新也不变"。
+	 *
+	 * 不干活的情形一律安静返回：没启用 / 没接 git / 正忙 / 没有对方 / 状态还没算过。
+	 */
+	private async peerTick(): Promise<void> {
+		if (!this.settings.enabled || !this.settings.gitEnabled) return;
+		if (this.gitBusy || this.bundleBusy || this.incomingBusy) return;
+		const base = bundleBaseDir(this.settings);
+		if (base === '') return;
+		let state: PluginState;
+		try {
+			state = loadStateSync(this.stateFile());
+		} catch {
+			return;
+		}
+		const mine = state.stateId?.id ?? null;
+		if (!mine) return;
+		const peers = readPeers(base, state.copyId);
+		if (peers.length === 0) return;
+		/**
+		 * 两种情况都拉一次：
+		 * - 对表文件明说"待上报 / 不同步"（`needsPeerRefresh`）→ 立刻拉，最多每 10 秒一次；
+		 * - 或者已经 30 秒没和远程说过话 → 也拉一次。只靠前一条不够：本机现在看到的是对方
+		 *   **旧文件**、结论可能还是"一致"，对方改了东西这边根本收不到信号（用户报的
+		 *   "一边一致、一边待上报，刷新也不变"）。30 秒一次的静默 fetch 就是这条信号。
+		 */
+		const stale = needsPeerRefresh(
+			peers, mine, state.stateId?.at ?? 0, this.lastGitAt, Date.now(), PEER_TICK_MS / 2,
+		);
+		if (!stale && Date.now() - this.lastGitAt < PEER_SYNC_MS) return;
+		this.log.debug(stale ? '对表文件还是旧的：主动拉一次' : '静默对表：拉一次');
+		await syncGitNow(this, { quiet: true });
 	}
 
 	/** 一拍的实际内容（异步）：**先和远程对一遍**，再收包，最后才考虑留包 */
