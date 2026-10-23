@@ -21,6 +21,14 @@ import { toNative } from './utils/paths';
 const TICK_MS = 30_000;
 
 /**
+ * **正在打字就不自动动仓库**的宽限期（`vault.on('modify')` 最近一次之后多久算"还在写"）。
+ *
+ * 10 秒的来由：Obsidian 输入时约 2 秒落一次盘，人停顿超过 10 秒基本就是"停下了"；
+ * 比这更短会在连续输入中间插进来（用户正在打字时被覆盖过）。
+ */
+const EDITING_GRACE_MS = 10_000;
+
+/**
  * 对表文件（"对方到哪一步了"）的快节拍：**只在两边还没对齐时**每 10 秒拉一次。
  *
  * 为什么单独一条：应用完 / 导出完，对面只改了 `.lsave-peers/<它的 copyId>.json`，
@@ -316,6 +324,24 @@ export default class LocallySavePlugin extends Plugin {
 	private async runTick(): Promise<void> {
 		// 先 git：拉下来的包，紧接着的收包就能看见（不用等下一拍）
 		await maybeGitSync(this);
+		/**
+		 * **正在打字就别动仓库**（用户报的："刚才我打字被强制同步了"）。
+		 *
+		 * 自动收包会**覆盖文件**：正在编辑的笔记被对面那一版盖掉，编辑器里的光标/选区当场跳走，
+		 * 未保存的那几个字也可能丢。所以：最近 `EDITING_GRACE_MS` 内有过改动（`vault.on('modify')`
+		 * 记的 `saveDirtyAt`）→ 这一拍**只做 git 推拉**（那只是搬包，不碰仓库内容），
+		 * 收包与自动留包都推迟到下一拍。
+		 *
+		 * 为什么不按"某个文件最近改过"逐个跳过：收包是**整包严格同步**，
+		 * 跳过一个文件就等于把包送到的状态改了一半（状态编号当场对不上），
+		 * 那比"晚 30 秒同步"糟得多。要整个推迟，而不是打补丁。
+		 *
+		 * 手动同步（命令 / 按钮）不受这条约束 —— 那是用户明确的动作。
+		 */
+		if (Date.now() - this.saveDirtyAt < EDITING_GRACE_MS) {
+			this.log.debug('正在编辑（最近 10 秒内有改动），这一拍跳过收包与自动留包');
+			return;
+		}
 		if (this.bundleBusy || this.incomingBusy) return;
 		const acted = await checkIncomingBundles(this);
 		if (acted) {
