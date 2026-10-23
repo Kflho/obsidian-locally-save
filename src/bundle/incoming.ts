@@ -102,6 +102,13 @@ export function pickIncoming(
 				&& Date.now() - record.at >= RETRY_FAILED_AFTER_MS;
 			if (!manual && !autoRetry) continue;
 		}
+		/**
+		 * **比本机更旧的更新包不自动"整体替换"**（0.16.10）。
+		 *
+		 * 注意：这里**不能一刀切跳过** —— 同一份基准上另一个源头导的包，号可能比本机小，
+		 * 但装的是"对方那一半改动"，`normal` 三方合并必须把它合进来（否则丢一半数据）。
+		 * 真正要防的是"整体替换成旧状态"，那道闸在 `apply.ts`（只对严格档生效）。
+		 */
 		out.push({ bundle, bundleId: header.bundleId });
 	}
 	return out;

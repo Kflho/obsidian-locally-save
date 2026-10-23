@@ -908,6 +908,36 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 */
 
 	const state = await loadState(options.stateFile);
+	/**
+	 * **不许拿更新包往回走**（0.16.10，用户报的现场：一个更旧的更新包把某篇笔记的内容退回了旧版，
+	 * 而且当时看着"成功"—— 因为他本来就在同一份基准上，`checkAncestor` 放行了）。
+	 *
+	 * 更新包是"从某份完整副本算到**某个状态**"的差量；应用它 ＝ 把内容整体换成那个状态。
+	 * 落点比本机的内容旧，就是**回退**（旧一点的笔记、已经被更新覆盖的文件回来了），
+	 * 而且因为"起点对得上"，它看起来完全合法 —— 这正是危险的地方。
+	 *
+	 * 规矩：**往前可以，往回只能靠完整副本**（完整副本本来就是还原点，用户是奔着那个状态去的）。
+	 * 两个例外：
+	 * - `alignToPeer`（「仅拉」）：那个方向的职责就是"让我和对面一模一样"，可以往回；
+	 * - 完整副本（`mirrorFull`）：它不是更新包，不受这条约束。
+	 */
+	const targetGeneration = header.targetGeneration;
+	/** 只有"整体替换成那个状态"的档才谈得上回退（`normal` 是三方合并，保留我这一半） */
+	const strictRequest = options.strictness === 'mirror' || options.strictness === 'bundle-wins';
+	const goingBack = header.mode === 'changes'
+		&& !mirrorFull
+		&& strictRequest
+		&& options.alignToPeer !== true
+		&& typeof targetGeneration === 'number'
+		&& targetGeneration < state.generation;
+	if (goingBack) {
+		throw new Error(
+			`这个更新包装的是第 ${targetGeneration} 代，比本机现在的第 ${state.generation} 代**旧** —— `
+			+ '应用它会把文件内容退回到那个时候（旧笔记复活、改过的东西被覆盖）。\n'
+			+ '更新包只能往前走；要回退请应用**完整副本**（它本来就是还原点），'
+			+ '或者让对方重新导一份更新的包。',
+		);
+	}
 	const sameLineage = header.lineage === state.lineage;
 	// 更新包是从**某一份完整副本**往外算的：接收方只要站在那份上（基准指纹相等）就能收
 	const sameGeneration = header.baseGeneration === null
