@@ -36,6 +36,8 @@ export class SyncStatusBar {
 	/** 上一次真的写了 DOM 的时间与文字（进度更新要节流，见 showProgress） */
 	private lastProgressAt = 0;
 	private lastProgressText = '';
+	/** `flash()` 那几秒的收尾定时器 */
+	private flashTimer: number | null = null;
 
 	constructor(el: HTMLElement, onClick?: () => void) {
 		this.el = el;
@@ -84,9 +86,34 @@ export class SyncStatusBar {
 	 * 传 null 收工，回到上次结果。
 	 */
 	showActivity(text: string | null): void {
+		// 真要演别的了，就别让 `flash` 的收尾定时器把新文案提前清掉
+		if (this.flashTimer !== null) {
+			window.clearTimeout(this.flashTimer);
+			this.flashTimer = null;
+		}
 		this.activity = text;
 		this.lastProgressText = '';
 		this.render();
+	}
+
+	/**
+	 * **顶一句结果、过几秒回到上次结果**（不弹通知的那种"报一句"）。
+	 *
+	 * 用在哪：自动收包把对方的改动落进仓库之后 —— 那是"你该知道、但不用你动手"的事。
+	 * 以前它是一条右上角通知，用户嫌"不断显示信息"；可完全不说不等于没事发生，
+	 * 所以放状态栏：`已应用对方更新 · 写入 3 · 删除 1`，看几秒就自动回到
+	 * `已推送 12:31 · 对方：一致` 那一句。
+	 */
+	flash(text: string, ms = 8000): void {
+		this.activity = text;
+		this.lastProgressText = '';
+		this.render();
+		if (this.flashTimer !== null) window.clearTimeout(this.flashTimer);
+		this.flashTimer = window.setTimeout(() => {
+			this.flashTimer = null;
+			this.activity = null;
+			this.render();
+		}, ms);
 	}
 
 	/** 收工后写一句结果 */

@@ -191,8 +191,16 @@ async function runExport(
 		// 「该立新完整包了」这句提醒：顺手留包（自动触发）时**只写状态栏与日志、不弹通知** ——
 		// 提醒不是"出事了"，没必要在用户眼前闪一条；手动留包时连着结果一起说。
 		const said = !quiet && result.advice ? `${text}、${result.advice}` : text;
-	// 通知只说结果（一句）；文件名、路径、世代这些细节在更新记录 / 日志里
-		if (!options.silent) new Notice(shortNotice(label, result.wrote, result.noChanges, result.fullWritten), 5000);
+		// 通知只说结果（一句）；文件名、路径、世代这些细节在更新记录 / 日志里
+		/**
+		 * **自动触发（quiet）只在"真需要你动手"时弹**（0.16.14）：
+		 * 完整副本不进 git，得自己拷给对方 —— 这一句必须说；更新包写完会自己推上去，
+		 * 属例行结果，只写状态栏与日志（用户报的"右上角不断显示信息"：
+		 * 每 5 分钟一条"定时同步：已留更新包"，其实没人需要看）。
+		 */
+		if (!options.silent && (!quiet || result.fullWritten)) {
+			new Notice(shortNotice(label, result.wrote, result.noChanges, result.fullWritten), 5000);
+		}
 		await refreshStatusBar(plugin);
 		plugin.log.debug(`${label}：${text}${result.advice ? `；${result.advice}` : ''}`);
 		return { text: said, wrote: result.wrote, advice: result.advice, noChanges: result.noChanges, fullWritten: result.fullWritten };
@@ -846,7 +854,18 @@ async function reportIncomingSweep(
 			: item.pending > 0
 				? ` · 你还有 ${item.pending} 个待发`
 				: ' · 编号还差一点';
-		new Notice(`已自动应用对方更新 · ${parts.join('、')}${tail}`, 7000);
+		plugin.log.debug(`已自动应用对方更新 · ${parts.join('、')}${tail}`);
+		/**
+		 * **自动收包不弹通知，只在状态栏顶一句**（0.16.14）：写进来几个新文件是同步的本分，
+		 * 每收一份包弹一条"已自动应用对方更新"就是用户说的"右上角不断显示信息"。
+		 * 状态栏那句几秒后自己回到"已推送 · 对方：一致"，不打扰。
+		 * 真正要弹通知的是"动了你已有的东西"：**删了本机文件**、**从基准恢复了本机误改**、
+		 * **走过强制回退**（仓库被整体对齐过）。
+		 */
+		plugin.statusBar.flash(`已应用对方更新 · ${parts.join('、')}${tail}`);
+		if (item.deleted > 0 || item.restored > 0 || item.recovered === true) {
+			new Notice(`已自动应用对方更新 · ${parts.join('、')}${tail}`, 7000);
+		}
 	}
 	if (sweep.applied.length > 0) await refreshStatusBar(plugin);
 

@@ -317,7 +317,8 @@ export default class LocallySavePlugin extends Plugin {
 		);
 		if (!stale && Date.now() - this.lastGitAt < PEER_SYNC_MS) return;
 		this.log.debug(stale ? '对表文件还是旧的：主动拉一次' : '静默对表：拉一次');
-		await syncGitNow(this, { quiet: true });
+		// 后台对表：只更新结果，不往状态栏演"同步中…"（见 `GitSyncOptions.background`）
+		await syncGitNow(this, { quiet: true, background: true });
 	}
 
 	/** 一拍的实际内容（异步）：**先和远程对一遍**，再收包，最后才考虑留包 */

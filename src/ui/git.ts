@@ -40,6 +40,15 @@ export interface GitSyncOptions {
 	quiet?: boolean;
 	/** 用户点的：无论结果都回一句 */
 	manual?: boolean;
+	/**
+	 * **后台的例行对表**（每 10 / 30 秒那一拍）：**连状态栏也不写**。
+	 *
+	 * 这些同步只是"看看对面有没有新包"，几秒就完；把「同步中…/同步 2/5 · 连接远程…」
+	 * 写进右下角，用户看到的就是"一直在同步"（用户报的：右下角不断显示同步远程）。
+	 * 结果本来就会落在状态栏那一句总结里（`已推送 12:31 · 对方：一致`），不必再演一遍过程。
+	 * 手动点的同步 / 「立即同步」仍照常显示进度。
+	 */
+	background?: boolean;
 }
 
 /** 从设置拼出引擎要的货架参数；没填全就返回 null */
@@ -96,7 +105,9 @@ export async function syncGitNow(
 	}
 
 	plugin.gitBusy = true;
-	plugin.statusBar.showActivity('同步中…');
+	/** 后台对表**不演过程**（见 `GitSyncOptions.background`）；手动 / 前台照常显示进度 */
+	const narrate = options.background !== true;
+	if (narrate) plugin.statusBar.showActivity('同步中…');
 	try {
 		// 先把自己的状态写进货架（别人拉下来就知道我在哪一步），再提交 / 拉 / 推
 		const state = await loadState(plugin.stateFile());
@@ -107,9 +118,13 @@ export async function syncGitNow(
 
 		const report = await syncShelf({
 			...shelf,
-			onStage: (stage, step) => plugin.statusBar.showActivity(
-				step ? `同步 ${step.index}/${step.total} · ${stage}` : `同步中：${stage}`,
-			),
+			...(narrate
+				? {
+					onStage: (stage: string, step?: { index: number; total: number }) => plugin.statusBar.showActivity(
+						step ? `同步 ${step.index}/${step.total} · ${stage}` : `同步中：${stage}`,
+					),
+				}
+				: {}),
 		});
 		plugin.lastGitAt = Date.now();
 		plugin.gitFailures = 0;
@@ -130,7 +145,20 @@ export async function syncGitNow(
 				: null;
 			new Notice(describeReport(report, peer), 9000);
 		} else if (report.pulled.length > 0) {
-			new Notice(`从 git 远程收到 ${report.pulled.length} 个包`, 9000);
+			/**
+			 * **拉下来的包不在这里报数**（0.16.14）：拉下来只说明"货架上多了个文件"，
+			 * 真正要用户知道的是"它被应用了没有、动了什么" —— 那由收包那条路说
+			 * （`reportIncomingSweep`：只有删 / 覆盖 / 兜底回退才弹）。两句一起弹，
+			 * 用户看到的就是"同步成功 + 收到 1 个包 + 已应用 3 个文件"三连，
+			 * 每 5 分钟一轮（用户报的"右上角不断显示信息"）。
+			 *
+			 * **仅推例外**：那个方向根本不看收件箱（`wantsIncoming` 为 false），
+			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在货架上。
+			 */
+			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包`);
+			if (plugin.settings.syncDirection === 'upload') {
+				new Notice(`从 git 远程收到 ${report.pulled.length} 个包（仅推：不会自动应用）`, 9000);
+			}
 		}
 		return true;
 	} catch (error) {
@@ -155,7 +183,8 @@ export async function syncGitNow(
 		return false;
 	} finally {
 		plugin.gitBusy = false;
-		plugin.statusBar.showActivity(null);
+		// 后台对表没写过状态栏，就不去动它（否则会把正在显示的导出 / 应用进度清掉）
+		if (narrate) plugin.statusBar.showActivity(null);
 	}
 }
 
@@ -206,7 +235,8 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 		)
 		: false;
 	if (!due && !pendingPush && !peer.written && !refreshDue && !(await shelfIsDirty(shelf))) return false;
-	return syncGitNow(plugin, { quiet: true });
+	// 自动节拍：安静 + **不演状态栏**（用户报的"右下角一直显示同步远程"）
+	return syncGitNow(plugin, { quiet: true, background: true });
 }
 
 /**
