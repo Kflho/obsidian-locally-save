@@ -667,23 +667,20 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 	if (direction === 'both') {
 		if (plugin.settings.autoApplyIncomingBoth) {
 			/**
-			 * **无人值守的「双向」不再镜像**（0.16.12，用户报的"写完又被回退了"）。
+			 * **无人值守的「双向」：三方合并 + 两边都改时"留两份"**（0.16.13，场景 3 实测后改的）。
 			 *
-			 * 旧口径是 `mirror + alignToPeer`：把仓库变成**对面那一刻**，我正在写的东西整片被覆盖
-			 * （覆盖的进回收目录，但人已经看着文件跳回旧版了），而且"我这一半"只能等下次回礼。
-			 * 现在的口径是**三方合并、冲突听本地的**：
-			 * - 我改过的文件：**保持不动**（local-wins）；
-			 * - 对方新增 / 修改、我没动的：合进来；
-			 * - 合并完状态编号必然与包不同 → 上层那条"回礼"会把合并后的我这一半导出回去，
-			 *   对面收下就也是这一份（两边收敛，谁都没被回退）。
+			 * 0.16.12 用的是 `local-wins`，本机这一半保住了，但**对方那一半会静默消失**：
+			 * 场景 3 里对方加了行、我们这边应用时被判成"已经一致（already）"，他们的行根本没落地，
+			 * 而他们的包也已经发过了 —— 谁都没报错，两边却各只有自己那一行。
 			 *
-			 * `normal` 仍然要求同一份基准（`checkAncestor`），接不上的包照旧等或拒，
-			 * 不会拿"合并不上"的包去覆盖仓库。
+			 * 现在改成 `keep-both`：mtime 新的占原名、旧的那份存成**冲突副本**。
+			 * 两份内容都还在（一份在原路径、一份在同目录的冲突副本里），谁都不会被静默丢掉；
+			 * 用户看到冲突副本就知道该合哪一份。
 			 */
 			return {
 				force: true,
 				allowFull: true,
-				apply: { strictness: 'normal', conflictStrategy: 'local-wins' },
+				apply: { strictness: 'normal', conflictStrategy: 'keep-both' },
 			};
 		}
 		// 免确认但**不镜像**的合并开关已经撤掉：它只是绕过确认框，和"先应用、再导出回传"
