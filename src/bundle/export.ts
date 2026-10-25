@@ -9,6 +9,8 @@ import { describeAnchorList, listFullAnchors, pickAnchor } from './anchor';
 import type { BundleAnchor } from './anchor';
 import { appendBundleLog } from './log';
 import { noteBundleRemoved } from '../git/removals';
+import { readPeers } from '../git/peers';
+import type { PeerState } from '../git/peers';
 import { DEFAULT_MTIME_TOLERANCE_MS, sameRecord } from '../sync/diff';
 import { listFiles, removeFile, scanTree, statFile } from '../sync/disk';
 import { VAULT_TRASH_DIR, excludePatterns } from '../sync/vault';
@@ -211,6 +213,13 @@ export interface ExportOutcome {
 export interface SupersededReport {
 	removed: string[];
 	kept: { name: string; why: string }[];
+	/**
+	 * 删掉的那些的明细：包 id + 依据（本机 apply 记录 / 对方 peer 记录的世代）。
+	 *
+	 * 为什么要有：两边的清理规则对称，但对账时需要看出"这一份为什么在那边被清了"。
+	 * 写进 `debug.log`，也随导出结果返回（界面暂时只显示 `removed` 的条数）。
+	 */
+	details?: { name: string; bundleId: string | null; why: string }[];
 }
 
 /**
@@ -1599,7 +1608,19 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	// 旧包是"目前唯一的改动备份"，新包还没落地就先把旧的删了，导出一旦失败就什么都不剩。
 	// 一律清理（以前是个设置项）：更新包是累积的，旧包留着纯占地、还让人以为漏应用了；
 	// 没删掉的那些会在报告里如实说明理由（别的血脉 / 世代不比新包小）
-	const prune = await removeSupersededChanges(options, header, file, state.generation);
+	/**
+	 * 本机**已经应用过**的包：bundleId → 那份包送到的世代（`bundleLog` 里的 apply 记录）。
+	 *
+	 * 对面包被应用过一次，它那一半改动就已经在本机状态里了；再加上"内容被这次导出完全覆盖"
+	 * 与对面的 `peer` 记录两道闸，下一份导出成功之后它才算过时的包 —— 见
+	 * `removeSupersededChanges` 里"两边都清"那一段。
+	 */
+	const applied = new Map<string, number>(
+		(state.bundleLog ?? [])
+			.filter(entry => entry.direction === 'apply' && entry.bundleId)
+			.map(entry => [entry.bundleId as string, entry.target ?? 0]),
+	);
+	const prune = await removeSupersededChanges(options, header, file, state.generation, applied);
 	const superseded = prune.removed;
 
 	options.log.debug(
@@ -1607,7 +1628,10 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		+ `${anchorReport
 			? `，第 ${anchorReport.generation} → ${checkpoint ? anchorReport.targetGeneration : '最新'} 代`
 			: ''}）`
-		+ (superseded.length > 0 ? `；顺手清掉 ${superseded.length} 个被它取代的旧更新包` : '')
+		+ (superseded.length > 0
+			? `；顺手清掉 ${superseded.length} 个过时的更新包（${(prune.details ?? [])
+				.map(item => `${item.name}：${item.why}`).join('；')}）`
+			: '')
 		+ (prune.kept.length > 0 ? `；changes 里还有 ${prune.kept.length} 个更新包没动（${prune.kept.map(item => item.why).join('、')}）` : ''),
 	);
 
@@ -1830,12 +1854,17 @@ export async function parkLocalChangesFor(
  * 其余一律留着，并说明为什么（`kept`）：悄悄留着会让人以为"清理没生效"，
  * 或者当成偶发 bug（用户报过：同一个操作第一遍没清、第二遍清了）。特别是
  * **另一台机器从同一份完整副本导出来的那一份**：那装的是**它那一半改动**，删了就丢数据。
+ * 唯一例外是**本机已经应用过它**（`appliedBundleIds`）、并且**它的内容已被这次导出完全覆盖**
+ * （每个条目同路径同指纹）：那时内容已经进本机状态、新包里也有一份，它就成了过时的包 ——
+ * 这条 0.16.15 起对"两边"都生效，不再只清自己导的；本机后来又改过 / 回退过的对面包不算覆盖，
+ * 继续留着当回溯材料。
  *
  * 只删**确定**能删的，条件缺一不可：
  * - 同一个 `changes` 目录里的 `.lsave`（别的目录不碰）；
  * - 是**更新包**（完整包不碰：那是你的还原点）；
  * - 同一条血脉（`lineage` 一致）—— 别的血脉的包不动；
- * - 世代**严格更小**；而且不是刚写出来的那个。
+ * - 世代**严格更小**；而且不是刚写出来的那个；
+ * - 对面包还必须**本机应用过它**（不在 `appliedBundleIds` 里的对面包一律留着）。
  *
  * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导完整包、再导更新包，
  * 不排除它的话，用户明明要了两个，最后只剩完整包一个。
@@ -1849,6 +1878,15 @@ async function removeSupersededChanges(
 	keep: string,
 	/** 新包落地之后本机所在的世代（判"这个旧包是不是比我更新"用它，见下面那段） */
 	generation: number,
+	/**
+	 * 本机**已经应用过**的包：bundleId → 那份包送到的世代（`bundleLog` 的 apply 记录）。
+	 *
+	 * 从 0.16.15 起，"另一边导的包"不再一律留着：**本机应用过它**（内容已经进本机状态）
+	 * 且**它的内容被这次导出完全覆盖**（逐条同路径同大小同指纹），它就是过时的包，可以退休。
+	 * 没应用过、或应用后又改过 / 回退过的对面包一律不碰 —— 那可能是对面较新的那一半改动，
+	 * 也可能是回溯材料，删了就只能让对方重导。
+	 */
+	applied: ReadonlyMap<string, number> = new Map(),
 ): Promise<SupersededReport> {
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
@@ -1859,6 +1897,65 @@ async function removeSupersededChanges(
 	const myTarget = header.mode === 'full' ? null : (header.targetBaselineHash ?? null);
 	const removed: string[] = [];
 	const kept: { name: string; why: string }[] = [];
+	/**
+	 * 这次导出的内容（路径 → 大小＋指纹）：判"对面包送到的内容有没有被它完全覆盖"。
+	 *
+	 * 应用过只是"那一刻收到了"；之后本机又改过 / 回退过，旧包里的版本就不再是当前内容，
+	 * 它仍然是回溯材料（实测：回退用例里那份 1→3 代包被误删后，后续步骤就应用不回来了）。
+	 * 所以只有**对面包的每个条目都能在新包里原样找到**（同路径、同大小、同指纹）、
+	 * 并且**它点名的删除在新包的点名删除里也找得到**，才算覆盖。
+	 */
+	const myContent = new Map<string, string>(
+		(header.entries ?? []).map(entry => [entry.path, `${entry.size}:${entry.hash ?? ''}`]),
+	);
+	const myDeletes = new Set((header.deleted ?? []).map(entry => entry.path));
+	const coverageOf = (other: BundleHeader): string[] => {
+		const missing: string[] = [];
+		for (const entry of other.entries ?? []) {
+			if (myContent.get(entry.path) !== `${entry.size}:${entry.hash ?? ''}`) missing.push(entry.path);
+		}
+		for (const gone of other.deleted ?? []) {
+			if (!myDeletes.has(gone.path)) missing.push(gone.path);
+		}
+		return missing;
+	};
+	/** 货架上各台机器写来的 `peer` 记录（`.lsave-peers/<copyId>.json`）：按 copyId 取世代 */
+	const peers: PeerState[] = readPeers(options.outDir, header.source?.copyId ?? '');
+	const peerGenerations = new Map<string, number>(peers.map(peer => [peer.copyId, peer.generation]));
+	const details: { name: string; bundleId: string | null; why: string }[] = [];
+	/**
+	 * 对面包能不能退休：返回「留着的理由」，`null` 表示可以走删除。
+	 *
+	 * 三道闸缺一不可（用户 + 对面 0.16.15 拍板的两条硬条件）：
+	 * 1. 本机**应用过**它，而且那次应用的目标世代 ≤ 本机当前世代（回退过就不算）；
+	 * 2. **对面也走过这一份**（它的 `peer` 记录里 generation ≥ 包的 target）——
+	 *    否则对面可能还拿这一份当基准；
+	 * 3. 内容被这次导出**完全覆盖**（见 `coverageOf`）。
+	 */
+	const peerKeepReason = (other: BundleHeader, otherCopy: string): string | null => {
+		const appliedTarget = applied.get(other.bundleId);
+		if (appliedTarget === undefined) {
+			return '另一台机器导的、本机还没应用过（对面较新的那一半改动可能只在这一份里），留着';
+		}
+		if (appliedTarget > generation) {
+			return `本机应用它的那一步比现在还靠后（apply target ${appliedTarget} > 本机第 ${generation} 代，`
+				+ '回退过），留着';
+		}
+		const peerGeneration = peerGenerations.get(otherCopy);
+		if (peerGeneration === undefined) {
+			return '对面包，但货架上没有它的 peer 记录（对表文件），没法确认对面已走过这一份，留着';
+		}
+		if (peerGeneration < other.targetGeneration) {
+			return `对面包，对面还停在第 ${peerGeneration} 代（< 包 target 第 ${other.targetGeneration} 代），`
+				+ '可能还要拿它当基准，留着';
+		}
+		const uncovered = coverageOf(other);
+		if (uncovered.length > 0) {
+			return `对面包、本机应用过但内容没被这次导出完全覆盖（${uncovered.length} 个条目不在新包里，`
+				+ '可能是后来改过 / 回退过），留着当回溯材料';
+		}
+		return null;
+	};
 	for (const item of await listFiles(dir)) {
 		if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
 		const candidate = path.join(dir, item.name);
@@ -1901,8 +1998,9 @@ async function removeSupersededChanges(
 			 *
 			 * 两条不能省：
 			 * - **只限同一形态**："到另一份完整副本"的差量包与"到最新状态"的更新包终点不一样，各自有用；
-			 * - **只限我自己导的**：另一台机器从同一份完整包导出来的那一份装的是**它那一半改动**，
-			 *   删了就丢数据（这台机器只有我导的东西，对方那半还没收到）。
+			 * - **对面包要看应用记录**：另一台机器导的那一份装的是**它那一半改动**，没应用过就删了会丢数据；
+			 *   本机**已经应用过**（`bundleId` 在 `appliedBundleIds` 里）、且它的内容**被这次导出完全覆盖**
+			 *   （`coverageOf`）之后，那一半改动已经进本机状态、新包里也有一份，可以退休。
 			 */
 			const mineIsCheckpoint = header.targetFullBundle === true;
 			const otherIsCheckpoint = other.targetFullBundle === true;
@@ -1924,27 +2022,43 @@ async function removeSupersededChanges(
 			} else {
 				const otherCopy = other.source?.copyId;
 				const myCopy = header.source?.copyId;
-				if (!otherCopy || !myCopy || otherCopy !== myCopy) {
+				if (!otherCopy || !myCopy) {
 					kept.push({
 						name: item.name,
 						why: '认不出是不是我这台机器导的（另一台导的那一份是它那一半改动），留着',
 					});
 					continue;
 				}
+				if (otherCopy !== myCopy) {
+					const why = peerKeepReason(other, otherCopy);
+					if (why) {
+						kept.push({ name: item.name, why });
+						continue;
+					}
+				}
 			}
 		} else {
 			/**
 			 * **完整副本取代更新包**：它是完整清单，换基准那条路上谁都能直接应用它。
 			 *
-			 * **但只取代我自己导的那些** —— 别的机器从同一血脉导出来的更新包装的是
+			 * **没应用过的对面包不取代** —— 别的机器从同一血脉导出来的更新包装的是
 			 * **它那一半改动**，我这份完整副本里根本没有那些内容。凭"我这份是完整的"就把它删了，
-			 * 那半边数据就只能靠对方重导一次（0.14 起的规矩：不同源头的东西一律留着）。
+			 * 那半边数据就只能靠对方重导一次（0.14 起的规矩）。
+			 * 本机**已经应用过**的对面包（`appliedBundleIds`）内容已经在本机状态里，
+			 * 这份完整副本也含它，可以一起退休。
 			 */
 			const otherCopy = other.source?.copyId;
 			const myCopy = header.source?.copyId;
-			if (!otherCopy || !myCopy || otherCopy !== myCopy) {
-				kept.push({ name: item.name, why: '别的机器导的（装的是它那一半改动），留着' });
+			if (!otherCopy || !myCopy) {
+				kept.push({ name: item.name, why: '认不出来源（另一台导的那一份是它那一半改动），留着' });
 				continue;
+			}
+			if (otherCopy !== myCopy) {
+				const why = peerKeepReason(other, otherCopy);
+				if (why) {
+					kept.push({ name: item.name, why });
+					continue;
+				}
 			}
 		}
 		/**
@@ -1978,10 +2092,19 @@ async function removeSupersededChanges(
 		await removeFile(candidate);
 		noteBundleRemoved(options.outDir, [candidate]);
 		removed.push(item.name);
+		const appliedTarget = applied.get(other.bundleId);
+		details.push({
+			name: item.name,
+			bundleId: other.bundleId ?? null,
+			why: appliedTarget === undefined
+				? '自己导的旧包，被这次导出取代'
+				: `对面包：本机 apply target 第 ${appliedTarget} 代 ≤ 第 ${generation} 代，`
+					+ `对方第 ${peerGenerations.get(other.source?.copyId ?? '')} 代 ≥ 包 target 第 ${other.targetGeneration} 代`,
+		});
 	}
 	removed.sort();
 	kept.sort((a, b) => a.name.localeCompare(b.name));
-	return { removed, kept };
+	return { removed, kept, details };
 }
 
 /**
