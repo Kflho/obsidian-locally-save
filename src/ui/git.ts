@@ -34,19 +34,17 @@ import { peerStatusText, refreshStatusBar } from './status';
  *   安全边界（只自动应用不会动本地东西的更新包）仍然只有一份。
  */
 
-/** 同步的入口参数：手动那一路要说话，自动那一路安静（真出事再说） */
+/** 同步的入口参数：手动那一路演一句过程，其余安静（真出事再说） */
 export interface GitSyncOptions {
-	/** 自动触发（定时 / 留包后）：正常结果不弹通知 */
+	/** 自动 / 顺手推（导出、应用之后）：正常结果不弹通知，**也不写状态栏**（发起方自己有文案） */
 	quiet?: boolean;
-	/** 用户点的：无论结果都回一句 */
+	/** 用户点的：开头一句「正在同步…」，结束时给结果 + 对方状态 */
 	manual?: boolean;
 	/**
-	 * **后台的例行对表**（每 10 / 30 秒那一拍）：**连状态栏也不写**。
+	 * **后台的例行对表**（每 30 秒那一拍）：连状态栏都不写。
 	 *
-	 * 这些同步只是"看看对面有没有新包"，几秒就完；把「同步中…/同步 2/5 · 连接远程…」
-	 * 写进右下角，用户看到的就是"一直在同步"（用户报的：右下角不断显示同步远程）。
-	 * 结果本来就会落在状态栏那一句总结里（`已推送 12:31 · 对方：一致`），不必再演一遍过程。
-	 * 手动点的同步 / 「立即同步」仍照常显示进度。
+	 * 这些同步只是"看看对面有没有新包"，几秒就完；结果本来就会落在状态栏那一句总结里
+	 * （`已推送 12:31 · 对方：一致`），不必再演一遍过程。
 	 */
 	background?: boolean;
 }
@@ -105,9 +103,16 @@ export async function syncGitNow(
 	}
 
 	plugin.gitBusy = true;
-	/** 后台对表**不演过程**（见 `GitSyncOptions.background`）；手动 / 前台照常显示进度 */
-	const narrate = options.background !== true;
-	if (narrate) plugin.statusBar.showActivity('同步中…');
+	/**
+	 * **只有用户点的同步才演过程**：开头一句「正在同步…」，收工回车。
+	 *
+	 * 原来按五个步骤刷「同步 2/5 · 连接远程…」；导出 / 应用之后顺手推的那一下
+	 * 也走这条路，右下角就一直在跳状态（用户报的"连跳很多状态"）。
+	 * 现在：quiet（发起方自己有文案）与后台对表都不写，结果就一条 ——
+	 * 完成后的动作 + 对方的内容状态（`refreshStatusBar` 那一句）。
+	 */
+	const narrate = options.manual === true;
+	if (narrate) plugin.statusBar.showActivity('正在同步…');
 	try {
 		// 先把自己的状态写进货架（别人拉下来就知道我在哪一步），再提交 / 拉 / 推
 		const state = await loadState(plugin.stateFile());
@@ -116,16 +121,7 @@ export async function syncGitNow(
 		const peer = await writePeer(shelf.dir, state, plugin.vaultName());
 		if (peer.error) plugin.log.debug(`写本机状态失败：${peer.error}`);
 
-		const report = await syncShelf({
-			...shelf,
-			...(narrate
-				? {
-					onStage: (stage: string, step?: { index: number; total: number }) => plugin.statusBar.showActivity(
-						step ? `同步 ${step.index}/${step.total} · ${stage}` : `同步中：${stage}`,
-					),
-				}
-				: {}),
-		});
+		const report = await syncShelf(shelf);
 		plugin.lastGitAt = Date.now();
 		plugin.gitFailures = 0;
 		plugin.gitBackoffUntil = 0;
@@ -183,7 +179,7 @@ export async function syncGitNow(
 		return false;
 	} finally {
 		plugin.gitBusy = false;
-		// 后台对表没写过状态栏，就不去动它（否则会把正在显示的导出 / 应用进度清掉）
+		// 只有演过「正在同步…」才需要回车；quiet / 后台没写过，别去动发起方的文案
 		if (narrate) plugin.statusBar.showActivity(null);
 	}
 }

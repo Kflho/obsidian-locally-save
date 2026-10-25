@@ -50,8 +50,10 @@ export interface GitSyncReport {
 /** 把货架和远程对一遍（幂等：没有变化时只花几条本地 git 命令） */
 export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	/**
-	 * **同步是五个步骤**，界面按"第几步 / 共几步"显示（用户提的："连接远程这种信息经常闪现，
-	 * 改成步骤进度、用数字表示"）。步骤号在这里定，别在界面那边另编一套。
+	 * **同步是五个步骤**，步骤号在这里定，别在界面那边另编一套。
+	 *
+	 * 界面按需用这个回调：手动同步现在只演一句「正在同步…」（用户报的"连跳很多状态"），
+	 * 「刷新包」那条仍借它显示进度。引擎只报事实，演不演由调用方决定。
 	 */
 	const totalSteps = 5;
 	const stage = (index: number, label: string): void => {
