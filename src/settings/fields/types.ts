@@ -34,10 +34,10 @@ export type ControlSpec<T = PluginSettings> =
 	 * 选项是磁盘上那几份完整包，每台机器、每个时刻都不一样）。函数拿到插件，
 	 * 自己去读包文件夹与状态文件；读不出来时至少要把「最新」那一项给出来。
 	 */
-	| { type: 'dropdown'; options: DropdownOptions<T> };
+	| { type: 'dropdown'; options: DropdownOptions };
 
 /** 下拉框的选项：固定表，或者按当前插件算出来的一张表 */
-export type DropdownOptions<T = PluginSettings> =
+export type DropdownOptions =
 	| Record<string, string>
 	| ((plugin: LocallySavePlugin) => Record<string, string>);
 

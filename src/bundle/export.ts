@@ -1642,7 +1642,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const applied = new Map<string, number>(
 		(state.bundleLog ?? [])
 			.filter(entry => entry.direction === 'apply' && entry.bundleId)
-			.map(entry => [entry.bundleId as string, entry.target ?? 0]),
+			.map(entry => [entry.bundleId, entry.target ?? 0]),
 	);
 	const prune = await removeSupersededChanges(options, header, file, state.generation, applied);
 	const superseded = prune.removed;

@@ -587,7 +587,7 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 	let state: PluginState;
 	try {
 		state = await loadState(plugin.stateFile());
-	} catch (error) {
+	} catch {
 		new Notice('读不到本机状态', 6000);
 		return;
 	}

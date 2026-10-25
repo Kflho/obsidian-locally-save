@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { debugEvent } from '../debugLog';
 import { readBundleInfo, readBundleInfoSync, verifyBundle } from './format';
@@ -1032,6 +1033,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		...(trackedBefore),
 	};
 	/**
+	 * **起点那份完整副本的清单**：判「这个路径在不在起点里」只能看它 ——
+	 * 上次交换记录（`state.bundle.files`）里有后来新增的文件，拿它当起点会让幽灵删除失效。
+	 */
+	const baseFullHas = new Set(Object.keys(anchor ? anchor.baseListing : (state.bundle?.fullFiles ?? {})));
+	/**
 	 * 包**自己带的 base** 只在它比本机记录**更新**时才算数。
 	 *
 	 * 为什么需要它：本机那份记录只是"上一次我这边记下的样子"—— 接收方明明停在
@@ -1116,10 +1122,22 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * （＝ base 之后新增、双方都收到过、后来删掉的），只有本地确实还是"那一版"才删；
 	 * 本地改过 / 回退过就留着当回溯材料 —— 否则会拿一条"对方没见过"的删除去删本机的新内容。
 	 */
-	const ghostDeleteAllowed = (item: BundleDeletedEntry, here: FileRecord): boolean => {
-		if (baseline[item.path]) return true;
+	const ghostDeleteAllowed = (item: BundleDeletedEntry, here: FileRecord, root: string): boolean => {
+		if (baseFullHas.has(item.path)) return true;
 		if (item.baseSize === undefined || item.baseMtime === undefined) return false;
-		return here.size === item.baseSize && Math.abs(here.mtime - item.baseMtime) <= TOLERANCE;
+		if (here.size !== item.baseSize || Math.abs(here.mtime - item.baseMtime) > TOLERANCE) return false;
+		if (!item.baseHash) return true;
+		/**
+		 * 有指纹就以指纹为准：size+mtime 恰好相同、内容却不同的情况极小但真实存在
+		 * （对面独立建了同名文件、或本机改过又凑巧同长同时间）。读不到文件就不删，宁可留着。
+		 */
+		try {
+			const digest = createHash('sha256');
+			digest.update(fs.readFileSync(toNative(root, item.path)));
+			return digest.digest('hex').slice(0, item.baseHash.length) === item.baseHash;
+		} catch {
+			return false;
+		}
 	};
 
 	/**
@@ -1177,7 +1195,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		: { ...contentBefore };
 	if (header.mode !== 'full') {
 		for (const entry of header.entries) deliveredFiles[entry.path] = { size: entry.size, mtime: entry.mtime };
-		for (const item of header.deleted) delete deliveredFiles[item.path];
+		for (const item of header.deleted) {
+			/**
+			 * 幽灵删除被本地改过 / 指纹不符时是**留着**的（见 `ghostDeleteAllowed`）：
+			 * 落点里也不能把它划掉，否则严格镜像的"本机多出来的全删"会绕过那道闸把它删了。
+			 */
+			const here = local.files.get(item.path);
+			if (here && !ghostDeleteAllowed(item, here, options.vaultRoot)) continue;
+			delete deliveredFiles[item.path];
+		}
 	}
 
 	// ------------------------------------------- 不走三方比对的两条路
@@ -1242,7 +1268,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			for (const item of header.deleted) {
 				const here = local.files.get(item.path);
 				if (!here) continue;
-				if (!ghostDeleteAllowed(item, here)) continue;
+				if (!ghostDeleteAllowed(item, here, options.vaultRoot)) continue;
 				deletes++;
 				actions.push({ kind: 'delete', path: item.path });
 			}
@@ -1319,7 +1345,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					|| anchor !== null;
 				if (!deletable) break;
 				const here = local.files.get(action.path);
-				if (item && here && !ghostDeleteAllowed(item, here)) break;
+				if (item && here && !ghostDeleteAllowed(item, here, options.vaultRoot)) break;
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
@@ -2777,6 +2803,16 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		if (agreed) freshAnchor[action.path] = { size: action.entry.size, mtime: action.entry.mtime };
 	}
 	for (const item of plan.info.header.deleted) {
+		/**
+		 * 幽灵删除被保留时文件还在：状态里也要继续记着它，否则下一轮会把它当成"本机新文件"
+		 * 又导回对面（真删掉的、删除失败的也一样按实际文件在不在来记）。
+		 */
+		const still = await statFile(toNative(options.vaultRoot, item.path));
+		if (still) {
+			contentBefore[item.path] = still;
+			freshAnchor[item.path] = still;
+			continue;
+		}
 		delete contentBefore[item.path];
 		delete freshAnchor[item.path];
 	}
