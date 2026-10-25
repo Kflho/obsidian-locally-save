@@ -995,6 +995,30 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	}
 
 	/**
+	 * **幽灵文件**：base 之后新增、双方都收到过、后来本地删掉的路径。
+	 *
+	 * 为什么 base 差集抓不到：它不在起点清单里，删掉只是"回到基准状态"，永远进不了 `deleted`；
+	 * 但对面已经通过之前的更新包收到了它，没人告诉它就永远留着（509 那 7 条就是这么来的）。
+	 * 已知清单只取**本机导出/应用过的上一版**（`previous`）：它包含"上次交换时双方手上的样子"，
+	 * 删掉之后就没人再提；起点清单里有的走上面的差集，不在这里重复。
+	 * 对面自己新建、我们从来没收到过的路径不会出现在 `previous` 里，所以永不会被当成删除目标；
+	 * 就算两边各自有同路径的文件，接收方还会按 `baseSize/baseMtime` 判一次，改过就留着。
+	 */
+	if (mode === 'changes' && target === null) {
+		const seenGhost = new Set(deleted.map(item => item.path));
+		/** 改名/移动里出现过的路径不参与幽灵删除：移动由 `moves` 负责，再补删除会让接收方两边打架 */
+		const inMove = (file: string): boolean => finalMoves.some(move => (move.kind === 'file'
+			? file === move.from || file === move.to
+			: file.startsWith(`${move.from}/`) || file.startsWith(`${move.to}/`)));
+		for (const [file, record] of Object.entries(previous)) {
+			if (skip.has(file) || inventory.files.has(file) || seenGhost.has(file)) continue;
+			if (anchorFiles?.[file] || inMove(file)) continue;
+			pushDeleted(file, record);
+			seenGhost.add(file);
+		}
+	}
+
+	/**
 	 * **强制装进包里的路径**（`forcePaths`）：正常更新包只装"相对起点变过的"，
 	 * 但"让对面撤销误改"需要的是**我们这一版原样覆盖回去**，哪怕我们从来没动过它。
 	 *

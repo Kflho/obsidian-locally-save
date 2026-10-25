@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { debugEvent } from '../debugLog';
 import { readBundleInfo, readBundleInfoSync, verifyBundle } from './format';
-import type { BundleEntry, BundleHeader, BundleInfo, BundleMove } from './format';
+import type { BundleDeletedEntry, BundleEntry, BundleHeader, BundleInfo, BundleMove } from './format';
 import { baselineOfBundle, baselineOfFullBundle, compareBaseline, listingHashOfFiles } from './baseline';
 import type { BaselineMatch } from './baseline';
 import { appendBundleLog } from './log';
@@ -1108,7 +1108,19 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let extraDeletes = 0;
 	/** 严格档下"本地多出来、要挪走"的文件数（见报告里的 `localExtras`） */
 	let localExtras = 0;
-	const localDeleted = new Set(header.deleted.map(item => item.path));
+	/** 包里点名的删除：路径 → 那条记录（幽灵删除要拿它判"本地是不是还是那一版"） */
+	const deletedItems = new Map(header.deleted.map(item => [item.path, item]));
+	const localDeleted = new Set(deletedItems.keys());
+	/**
+	 * **幽灵删除**（0.16.15，509 之后的口径）：点名的路径如果**不在起点清单里**
+	 * （＝ base 之后新增、双方都收到过、后来删掉的），只有本地确实还是"那一版"才删；
+	 * 本地改过 / 回退过就留着当回溯材料 —— 否则会拿一条"对方没见过"的删除去删本机的新内容。
+	 */
+	const ghostDeleteAllowed = (item: BundleDeletedEntry, here: FileRecord): boolean => {
+		if (baseline[item.path]) return true;
+		if (item.baseSize === undefined || item.baseMtime === undefined) return false;
+		return here.size === item.baseSize && Math.abs(here.mtime - item.baseMtime) <= TOLERANCE;
+	};
 
 	/**
 	 * **我站的那一份完整副本**（`state.bundle.fullFiles`）—— 只在三处当"原版参考"：
@@ -1228,7 +1240,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (!mirrorFull && !strict) {
 			// `listed-wins`：只删 `header.deleted` **点名**的那些，其余一个不动
 			for (const item of header.deleted) {
-				if (!local.files.has(item.path)) continue;
+				const here = local.files.get(item.path);
+				if (!here) continue;
+				if (!ghostDeleteAllowed(item, here)) continue;
 				deletes++;
 				actions.push({ kind: 'delete', path: item.path });
 			}
@@ -1299,10 +1313,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				// **接上后续基准**是第三种情况：对方那一点 ＝ 起点完整包 ＋ 这个包，
 				// 那里没有它，就说明它是在"我站的旧基准 → 包声明的起点"之间被删掉的 ——
 				// 那一段内容本来就在这份包里，按它对齐就得跟着删（否则永远停在旧内容上）。
+				const item = deletedItems.get(action.path);
 				const deletable = header.mode === 'full'
-					|| localDeleted.has(action.path)
+					|| item !== undefined
 					|| anchor !== null;
 				if (!deletable) break;
+				const here = local.files.get(action.path);
+				if (item && here && !ghostDeleteAllowed(item, here)) break;
 				deletes++;
 				actions.push({ kind: 'delete', path: action.path });
 				break;
