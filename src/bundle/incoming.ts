@@ -246,6 +246,12 @@ export async function handleIncoming(
 		// 完整包默认不自动应用：它可能删掉本机独有的文件，只提示一句让人自己看。
 		// 「仅拉」是"变成对面那样"，调用方会开 allowFull —— 那不是悄悄删，是用户的明确选择。
 		if (candidate.bundle.header?.mode !== 'changes' && !policy.allowFull) {
+			debugEvent('incoming.skip', {
+				file: name,
+				bundleId: candidate.bundleId,
+				reason: 'full-not-auto',
+				targetGeneration: candidate.bundle.header?.targetGeneration,
+			});
 			await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
 			return {
 				kind: 'needs-review',
@@ -272,6 +278,13 @@ export async function handleIncoming(
 				candidate.bundle.header,
 			);
 			if (newer) {
+				// 排障要能回答「为什么这份没吃」：把同代里谁更新记下来
+				debugEvent('incoming.skip', {
+					file: name,
+					bundleId: candidate.bundleId,
+					reason: 'newer-same-generation-sibling',
+					targetGeneration: candidate.bundle.header.targetGeneration,
+				});
 				await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
 				return {
 					kind: 'needs-review',
@@ -302,6 +315,18 @@ export async function handleIncoming(
 					...(hint ? { baselineOverride: { file: hint.file } } : {}),
 				});
 				await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
+				debugEvent('incoming.applied', {
+					file: name,
+					bundleId: candidate.bundleId,
+					baseGeneration: again.plan.info.header.baseGeneration,
+					targetGeneration: again.plan.info.header.targetGeneration,
+					strictness: applyOptions.strictness,
+					alignToPeer: again.plan.alignToPeer === true,
+					written: again.result.written,
+					deleted: again.result.deleted,
+					stateIdCompare: again.result.stateIdCompare,
+					recovered: true,
+				});
 				return {
 					kind: 'applied',
 					file: name,
@@ -385,6 +410,22 @@ export async function handleIncoming(
 			recovered = true;
 		}
 		await rememberDecision(options.stateFile, candidate.bundleId, 'applied', name);
+		// 真机排障要的就是这一行：哪份包、从哪一代到哪一代、动了什么、编号对没对上
+		debugEvent('incoming.applied', {
+			file: name,
+			bundleId: candidate.bundleId,
+			baseGeneration: plan.info.header.baseGeneration,
+			targetGeneration: plan.info.header.targetGeneration,
+			strictness: applyOptions.strictness,
+			alignToPeer: plan.alignToPeer === true,
+			written: result.written,
+			deleted: result.deleted,
+			restored: result.restored,
+			conflicts: plan.report.conflicts,
+			forcedOverwrites: plan.report.forcedOverwrites,
+			stateIdCompare: result.stateIdCompare,
+			recovered,
+		});
 		return {
 			kind: 'applied',
 			file: name,
