@@ -1256,9 +1256,15 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				kind: 'write',
 				path: entry.path,
 				entry,
-				// 本地那份动过的先挪进回收目录 —— 严格档下 `keepBackup` 本来就是 true
-				// （见上面那段：强制档必然先备份），绝不让"严格同步"顺手抹掉本地改动
-				backup: localChanged && keepBackup,
+				/**
+				 * **覆盖本地已有的东西就备份**，不管它相对基准改没改。
+				 *
+				 * 真机现场（2026-10-26）：本机基准已经是 v2，对面发来一份**代数更新、内容更旧**
+				 * 的包（对方那条笔记停在几十分钟前）。按旧判据 `localChanged` 为假 —— 因为
+				 * 本机刚导过 v2、基准就是 v2 —— 于是覆盖时**没备份**，用户新版直接消失，
+				 * 只能靠编辑器 undo 救回来。基准确认不了"我要被旧内容盖掉"，那就一律先留一份。
+				 */
+				backup: keepBackup,
 			});
 		}
 
@@ -1322,8 +1328,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					path: action.path,
 					entry: source.entry,
 					...from,
-					// 完整副本镜像时，本地那份动过的要先挪进回收目录（默认档下走到这儿说明它没动过）
-					backup: (mirrorFull || localChanged) && keepBackup,
+					// 「仅拉 / 镜像」是"以包为准"，但**本地那份必须先进回收目录**：
+					// 包里那条内容可能比本机基准还旧（0.16.14 真机回退事故），
+					// 只按 `localChanged` 判断会漏备份 —— 见上面 1231 那段的说明。
+					backup: keepBackup,
 				});
 				break;
 			}
