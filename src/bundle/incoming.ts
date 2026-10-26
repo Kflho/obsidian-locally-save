@@ -25,6 +25,32 @@ export const MAX_FAILED_ATTEMPTS = 3;
 export const RETRY_FAILED_AFTER_MS = 10 * 60 * 1000;
 
 /**
+ * 货架上有没有**同一代、更晚导出**的包 —— 口径：**同一代只吃最新的那一份**
+ * （用户 2026-10-26 拍板："更新包只留最新的就行了"）。
+ *
+ * 2026-10-26 真机事故：两台机器各自导过第 563 代、内容不同（其中一份还带着一条临时笔记）。
+ * 先应用最新那份、再回头吃同代旧的那份 → **删掉的文件复活**。所以在应用一份更新包之前，
+ * 先看同代里有没有更晚创建的；有就先让位，等最新那份来。
+ *
+ * 只比"同代更新"，不拦往回走的恢复包（`download` / 锚点恢复本来就是往回拉）。
+ */
+export function hasNewerSameGenerationSibling(
+	others: { header?: { mode?: string; targetGeneration?: number; bundleId?: string; created?: number } | null }[],
+	mine: { mode?: string; targetGeneration?: number; bundleId?: string; created?: number } | null | undefined,
+): boolean {
+	if (!mine || mine.mode !== 'changes') return false;
+	const generation = mine.targetGeneration ?? 0;
+	const created = mine.created ?? 0;
+	return others.some(item => {
+		const other = item.header;
+		if (!other || other.mode !== 'changes') return false;
+		if ((other.targetGeneration ?? 0) !== generation) return false;
+		if ((other.bundleId ?? '') === (mine.bundleId ?? '')) return false;
+		return (other.created ?? 0) > created;
+	});
+}
+
+/**
  * 「收到的包」—— **自动应用**那一步要用的挑选与判断。
  *
  * 为什么要有这个功能：砍掉「同步到本地副本」之后，接收端只剩手动一条路
@@ -229,6 +255,33 @@ export async function handleIncoming(
 		}
 
 		const applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
+
+		/**
+		 * **同一代只吃最新的那一份**（用户 2026-10-26 拍板："更新包只留最新的就行了"）。
+		 *
+		 * 真机事故：两台机器各自导过第 563 代、内容不同（我这台那份里还带着一条临时笔记）。
+		 * 对方先删了笔记，随后又吃到我这台那份同代包 → **删掉的文件复活**。
+		 * 所以：货架上有更晚创建的同代包时，这份先不应用 —— 等最新那份来处理。
+		 *
+		 * 只比"同代且更新"，不拦"往回"的恢复包：`download`/恢复路径本来就要把本机拉回
+		 * 对面那一点，那是用户明确选的方向，不能按这条挡。
+		 */
+		if (candidate.bundle.header?.mode === 'changes' && options.bundleDir) {
+			const newer = hasNewerSameGenerationSibling(
+				await listBundles(options.bundleDir),
+				candidate.bundle.header,
+			);
+			if (newer) {
+				await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);
+				return {
+					kind: 'needs-review',
+					file: name,
+					why: `同一代（第 ${candidate.bundle.header.targetGeneration ?? 0} 代）还有更晚导出的包，`
+						+ '只吃最新那份，这份先不应用',
+				};
+			}
+		}
+
 		/**
 		 * **「仅拉」的兜底**：本机被改乱、算不出计划时别直接记成失败 ——
 		 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准，再应用一遍就落。
