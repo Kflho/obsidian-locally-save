@@ -1258,13 +1258,20 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			 * 正常的"追上更新版本"仍然不搬东西进回收目录（否则每份累积包都要备份一堆）。
 			 */
 			const olderThanBase = base ? entry.mtime < base.mtime - TOLERANCE : false;
+			/**
+			 * **防呆：更新包只能把内容往前走，回退只能靠应用完整副本**（用户 2026-10-26 口径）。
+			 *
+			 * 包里这条比本机基准还旧 = 往回写 → **保留本机那份，不覆盖**。
+			 * 想回退就应用一份完整副本（那是镜像是设计目的），或者手动打开同步包再应用。
+			 */
+			if (olderThanBase && !mirrorFull) continue;
 			if (localChanged) forcedOverwrites++;
 			overwrites++;
 			actions.push({
 				kind: 'write',
 				path: entry.path,
 				entry,
-				backup: (localChanged || olderThanBase) && keepBackup,
+				backup: localChanged && keepBackup,
 			});
 		}
 
@@ -1321,8 +1328,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				const localChanged = base
 					? here.size !== base.size || Math.abs(here.mtime - base.mtime) > TOLERANCE
 					: false;
-				/** 包里这条比本机基准还旧 = 往回写（见上面那段真机事故），必须备份 */
+				/** 包里这条比本机基准还旧 = 往回写（见上面那段真机事故） */
 				const olderThanBase = base ? source.entry.mtime < base.mtime - TOLERANCE : false;
+				// 防呆：更新包不回退内容 —— 本机那份更新就留着；回退只能应用完整副本
+				if (olderThanBase && !mirrorFull) break;
 				if (localChanged) forcedOverwrites++;
 				overwrites++;
 				actions.push({
@@ -1330,8 +1339,8 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					path: action.path,
 					entry: source.entry,
 					...from,
-					// 本地动过、或包里给的是往回写的旧内容 —— 都先把本地那份挪进回收目录
-					backup: (mirrorFull || localChanged || olderThanBase) && keepBackup,
+					// 本地动过的先挪进回收目录
+					backup: (mirrorFull || localChanged) && keepBackup,
 				});
 				break;
 			}
