@@ -1582,7 +1582,6 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			|| next.from === move.to
 			|| next.from.startsWith(`${move.to}/`)
 			|| move.to.startsWith(`${next.from}/`));
-		const fromAbs = toNative(options.vaultRoot, move.from);
 		const toAbs = toNative(options.vaultRoot, move.to);
 		if (move.from === move.to || move.to.startsWith(`${move.from}/`)) {
 			throw new Error(`包里的移动操作不合法：${move.from} → ${move.to}`);
@@ -1596,43 +1595,56 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			&& (spec.mtime === undefined || Math.abs(record.mtime - spec.mtime) <= TOLERANCE);
 
 		if (move.kind === 'file') {
-			const disk = plannedFiles.get(move.from);
+			/**
+			 * **源可能停在某个中间路径上**（0.17）：累积包现在只留"基准 → 现在"这一条移动，
+			 * 上几份包把它搬到的那个中间路径由 `header.deleted` 点名（`state.bundle.ghosts`）。
+			 * 两个路径都不在时，按包带的 `size/mtime` 找唯一对得上的那一份当源 —— 见 `aliasSourceForFile`。
+			 */
+			let from = move.from;
+			let disk = plannedFiles.get(from);
 			const targetRecord = plannedFiles.get(move.to);
 			// 这一份是**累积**更新包：同一条移动可能早在上一份包里就做过了。
 			// 源没了、目标在 → 当成"已经搬过"，不重复做，也不报错。
 			// 但**状态里的记录得跟着走**（`relocations`）：否则下一份累积包按旧路径算
 			// "点上有什么"，目标那边的东西又会被当成"本地多出来的"删掉。
 			if (!disk && targetRecord) {
-				if (deliveredFiles[move.from]) delete deliveredFiles[move.from];
+				if (deliveredFiles[from]) delete deliveredFiles[from];
 				deliveredFiles[move.to] = { size: targetRecord.size, mtime: targetRecord.mtime };
-				if (movable.delete(move.from)) movable.add(move.to);
-				if (contentBefore[move.from]) relocations.push({ from: move.from, to: move.to });
+				if (movable.delete(from)) movable.add(move.to);
+				if (contentBefore[from]) relocations.push({ from, to: move.to });
 				continue;
 			}
-			// 源和目标都没有：可能后面还有一条"上一份状态 → 现在"的链式移动接着搬（见导出端）；
-			// 没有的话就是真对不上（漏了包 / 本地删过），报出来，别悄悄落一个不完整的状态。
+			// 源和目标都没有：可能停在某个中间路径上（按记录认出来当源），
+			// 也可能后面还有一条链式移动接着搬（老包）；都没有就是真对不上。
 			if (!disk && !targetRecord) {
-				if (laterReaches) continue;
-				throw new Error(
-					`包里要把 ${move.from} 改名成 ${move.to}，但本地两个路径都不在。`
-					+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个路径去哪了'
-					+ '（被删掉或挪走了？回收目录里找找），或者把'
-					+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
-					+ '重新应用一遍，让本机回到基准，再应用这个包；'
-					+ '再不行就让对方导一份完整副本（或一份带这个文件内容的包）',
-				);
+				const alias = aliasSourceForFile(move, plannedFiles, deliveredFiles, localDeleted);
+				if (alias) {
+					from = alias;
+					disk = plannedFiles.get(alias);
+				} else if (laterReaches) {
+					continue;
+				} else {
+					throw new Error(
+						`包里要把 ${move.from} 改名成 ${move.to}，但本地两个路径都不在。`
+						+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个路径去哪了'
+						+ '（被删掉或挪走了？回收目录里找找），或者把'
+						+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
+						+ '重新应用一遍，让本机回到基准，再应用这个包；'
+						+ '再不行就让对方导一份完整副本（或一份带这个文件内容的包）',
+					);
+				}
 			}
 			if (!disk) throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地没有源文件：让对方重发一份带内容的包`);
-			const base = contentBefore[move.from];
+			const base = contentBefore[from];
 			/**
 			 * **链式移动的第二跳**：源是这一趟前面那条移动刚搬过来的（不在扫描快照里、
 			 * 在影子清单里）。`contentBefore` 记的是更早那个路径、没有这一版 ——
 			 * 拿包自己带的 `size` / `mtime` 核对（导出端记的就是源该有的那一版）。
 			 */
-			const producedHere = !local.files.has(move.from) && movedTo.has(move.from);
+			const producedHere = !local.files.has(from) && movedTo.has(from);
 			/** 磁盘上这份就是包里记着的那一版（文件移动带 `size` / `mtime`） */
 			const sameAsMove = sameMoveRecord(disk, move);
-			const caseRename = caseOnly(move.from, move.to);
+			const caseRename = caseOnly(from, move.to);
 			const targetTaken = !caseRename && await pathExists(toAbs);
 			/**
 			 * **源不是我记录里的那一份**、也不像包记录的版本 → 这个路径是后来新建的
@@ -1678,19 +1690,20 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				moveReplacements++;
 				replacedTargets.push({ path: move.to, dir: false });
 			}
-			const record = deliveredFiles[move.from];
+			/** 中间旧路径在删除清单里点过名时，`deliveredFiles` 里已经没有它了 —— 用我记录里那一版接上 */
+			const record = deliveredFiles[from] ?? contentBefore[from];
 			if (record) {
-				delete deliveredFiles[move.from];
+				delete deliveredFiles[from];
 				deliveredFiles[move.to] = record;
 			}
-			if (movable.delete(move.from)) movable.add(move.to);
-			plannedFiles.delete(move.from);
+			if (movable.delete(from)) movable.add(move.to);
+			plannedFiles.delete(from);
 			plannedFiles.set(move.to, { size: disk.size, mtime: disk.mtime });
 			movedTo.add(move.to);
 			moveActions.push({
 				kind: 'rename',
 				path: move.to,
-				from: move.from,
+				from,
 				...(replace ? { replace: true } : {}),
 			});
 			moves++;
@@ -1699,15 +1712,23 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 
 		// 目录移动：源整棵树没被本地改过 —— 目标不存在时整棵改名；目标在时按文件并进去
 		if (move.from === '' || move.to === '') throw new Error('包里的目录移动操作缺少路径');
-		const fromPrefix = `${move.from}/`;
+		/**
+		 * **源目录可能停在某个中间路径上**（0.17）：包里只留"基准 → 现在"这一条目录移动，
+		 * 上一份包把它搬成的中间目录由删除清单点名（`state.bundle.ghosts`）。
+		 * 两个目录都不在时按"子树里的文件与起点那一份逐条对得上"认出中间目录（`aliasSourceForDir`），
+		 * 整棵搬过去；认不出来才报错（走强制回退）。
+		 */
+		let fromDir = move.from;
+		let fromPrefix = `${fromDir}/`;
+		let fromAbs = toNative(options.vaultRoot, fromDir);
 		const toPrefix = `${move.to}/`;
 		/**
 		 * 源 / 目标都以**影子清单**为准（见上面 `plannedFiles` 那段）：链式目录移动的第二跳，
 		 * 源是前面那一条刚搬过来的，磁盘上还不在 —— 只看磁盘同样会误报"两个路径都不在"。
 		 */
-		const sourceUnder = [...plannedFiles.keys()].filter(file => file.startsWith(fromPrefix)).sort();
+		let sourceUnder = [...plannedFiles.keys()].filter(file => file.startsWith(fromPrefix)).sort();
 		const targetUnder = [...plannedFiles.keys()].filter(file => file.startsWith(toPrefix));
-		const sourceDir = sourceUnder.length > 0 || await dirExists(fromAbs);
+		let sourceDir = sourceUnder.length > 0 || await dirExists(fromAbs);
 		const targetIsDir = await dirExists(toAbs);
 		/** 目标位置站着的是个**同名文件**（不是文件夹）：要腾开只能替换它 */
 		const targetIsFile = !targetIsDir && await pathExists(toAbs);
@@ -1726,7 +1747,12 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				if (!file.startsWith(fromPrefix)) continue;
 				if (entriesByPath.has(file)) continue;
 				const toPath = toPrefix + file.slice(fromPrefix.length);
-				const record = deliveredFiles[file];
+				/**
+				 * **中间的旧路径在删除清单里点过名时，`deliveredFiles` 里已经没有它了**
+				 * （幽灵删除 / 别名那一跳）：这时用"我这边记录里那一版"把记录接到新路径上 ——
+				 * 不接的话严格镜像把刚搬过去的东西当成"本地多出来的"全挪进回收目录。
+				 */
+				const record = deliveredFiles[file] ?? contentBefore[file];
 				if (record) {
 					delete deliveredFiles[file];
 					deliveredFiles[toPath] = record;
@@ -1768,7 +1794,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			}
 			relocatePoint();
 			// 只改大小写不核对"点上缺没缺"：同一个目录在磁盘上只有一份，改名不会丢内容
-			moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true });
+			moveActions.push({ kind: 'rename', path: move.to, from: fromDir, dir: true });
 			moves++;
 			continue;
 		}
@@ -1781,23 +1807,41 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 * 全删了。现在点上的记录照样搬到新路径，目标那边的东西就都在"那一点"上了。
 		 */
 		if (!sourceDir || sourceUnder.length === 0) {
-			if (targetDir) {
-				relocatePoint();
-				verifyRelocated();
-				continue;
-			}
+			/**
+			 * **停在中间目录上**（0.17）：包里只有"基准 → 现在"这一条移动，上一份包已经把它
+			 * 搬成了某个中间目录；那个目录在删除清单里点着名。按子树的文件逐条对得上认出来，
+			 * 从这里整棵搬过去 —— 不必先镜像回基准。
+			 */
 			if (!sourceDir) {
-				if (laterReaches) continue;
-				throw new Error(
-					`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地两个路径都不在。`
-					+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个文件夹去哪了'
-					+ '（被删掉或挪走了？回收目录里找找），或者把'
-					+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
-					+ '重新应用一遍，让本机回到基准，再应用这个包；'
-					+ '再不行就让对方导一份完整副本（或一份带这些文件内容的包）',
-				);
+				const alias = aliasSourceForDir(move, fullFilesBefore ?? {}, plannedFiles, deliveredFiles, localDeleted);
+				if (alias) {
+					fromDir = alias;
+					fromPrefix = `${fromDir}/`;
+					fromAbs = toNative(options.vaultRoot, fromDir);
+					sourceUnder = [...plannedFiles.keys()].filter(file => file.startsWith(fromPrefix)).sort();
+					sourceDir = sourceUnder.length > 0 || await dirExists(fromAbs);
+				}
 			}
-			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有它下面的文件`);
+			// 认出中间那一跳了（真有文件在）：往下走正常的"整棵搬过去 / 按文件并"
+			if (!sourceDir || sourceUnder.length === 0) {
+				if (targetDir) {
+					relocatePoint();
+					verifyRelocated();
+					continue;
+				}
+				if (!sourceDir) {
+					if (laterReaches) continue;
+					throw new Error(
+						`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地两个路径都不在。`
+						+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个文件夹去哪了'
+						+ '（被删掉或挪走了？回收目录里找找），或者把'
+						+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
+						+ '重新应用一遍，让本机回到基准，再应用这个包；'
+						+ '再不行就让对方导一份完整副本（或一份带这些文件内容的包）',
+					);
+				}
+				throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地没有它下面的文件`);
+			}
 		}
 
 		/** 源里的文件得是原来那一份（改过就停下，包里没有内容可以覆盖） */
@@ -1838,7 +1882,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			 * 有基准完整副本就有内容，补得回来（用户要的"不管本机怎么改过都能成功"）。
 			 */
 			verifyRelocated();
-			moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true });
+			moveActions.push({ kind: 'rename', path: move.to, from: fromDir, dir: true });
 			moves++;
 			continue;
 		}
@@ -1860,7 +1904,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			verifyRelocated();
 			moveReplacements++;
 			replacedTargets.push({ path: move.to, dir: true });
-			moveActions.push({ kind: 'rename', path: move.to, from: move.from, dir: true, replace: true });
+			moveActions.push({ kind: 'rename', path: move.to, from: fromDir, dir: true, replace: true });
 			moves++;
 			continue;
 		}
@@ -2229,6 +2273,99 @@ function startPointOf(
 interface BaselineBundleSource {
 	file: string;
 	info: BundleInfo;
+}
+
+/**
+ * **移动的源停在某个中间路径上时，认出那一条**（0.17）。
+ *
+ * 为什么会有这种情况：更新包只留"基准 → 现在"这一条移动；接收方如果应用过
+ * **中间那一份**包（或者手工搬过），文件现在就躺在某个中间路径上 —— 那个路径在
+ * `header.deleted` 里点着名（累积删除清单），盘上却还在。
+ *
+ * 判据只有一条：**记录完全对得上**（大小 + 修改时间在容差内；文件移动还带 `size/mtime`），
+ * 而且那个路径**不在"这一趟送到的点"上**（`delivered` 里有它的不是"被搬走的旧身份"）。
+ * 候选必须唯一 —— 有两个同样大小的（例如两份一样的附件）就返回 null，让调用方报错走强制回退，
+ * 绝不猜着搬。
+ */
+function aliasSourceForFile(
+	move: { from: string; to: string; size?: number; mtime?: number },
+	plannedFiles: Map<string, FileRecord>,
+	delivered: Record<string, FileRecord>,
+	/** 这个包**点名的删除**：只有它说"这个路径没了"的，才能当"被搬走的旧身份" */
+	deleted: Set<string>,
+): string | null {
+	if (move.size === undefined) return null;
+	const candidates: string[] = [];
+	for (const [file, record] of plannedFiles) {
+		if (file === move.from || file === move.to) continue;
+		// 点上该有的路径（条目 / 删除清单里没被删的）不是"被搬走的旧身份"
+		if (delivered[file]) continue;
+		// 只认包里点名要删的路径 —— 别拿本机随便一个同大小的文件去顶
+		if (!deleted.has(file)) continue;
+		if (record.size !== move.size) continue;
+		if (move.mtime !== undefined && Math.abs(record.mtime - move.mtime) > TOLERANCE) continue;
+		candidates.push(file);
+	}
+	return candidates.length === 1 ? candidates[0] ?? null : null;
+}
+
+/**
+ * **目录移动的源停在某个中间目录上时，认出那一条**（0.17）。
+ *
+ * 与文件那条同理，判据换成整棵子树：起点清单里 `from/` 底下每一条相对路径，
+ * 在候选前缀下都得有一条**记录一致**的文件；候选前缀从"盘上那些不在落点里的路径"里凑出来。
+ * 候选唯一才认 —— 认不出来就返回 null（调用方报错、走强制回退，别猜着搬）。
+ */
+function aliasSourceForDir(
+	move: { from: string; to: string },
+	/** 起点那份完整包的清单（`state.bundle.fullFiles`）：判"这一跳里该有哪些文件" */
+	sourceListing: Record<string, FileRecord>,
+	plannedFiles: Map<string, FileRecord>,
+	delivered: Record<string, FileRecord>,
+	/** 这个包**点名的删除**：只有它说"这些路径没了"的，才能当"被搬走的旧目录" */
+	deleted: Set<string>,
+): string | null {
+	const fromPrefix = `${move.from}/`;
+	const relatives = Object.keys(sourceListing)
+		.filter(file => file.startsWith(fromPrefix))
+		.map(file => file.slice(fromPrefix.length))
+		.filter(rel => rel !== '');
+	if (relatives.length === 0) return null;
+	const byBase = new Map<string, string[]>();
+	for (const rel of relatives) {
+		const base = rel.split('/').pop() as string;
+		const list = byBase.get(base);
+		if (list) list.push(rel);
+		else byBase.set(base, [rel]);
+	}
+	const prefixes = new Set<string>();
+	for (const [file] of plannedFiles) {
+		if (file.startsWith(`${move.to}/`) || delivered[file]) continue;
+		// 候选路径必须是包里点名要删的（累积删除清单里那一跳）
+		if (!deleted.has(file)) continue;
+		const base = file.split('/').pop() as string;
+		for (const rel of byBase.get(base) ?? []) {
+			if (!file.endsWith(`/${rel}`)) continue;
+			const prefix = file.slice(0, file.length - rel.length - 1);
+			if (!prefix || prefix === move.from) continue;
+			let matches = true;
+			for (const other of relatives) {
+				const at = plannedFiles.get(`${prefix}/${other}`);
+				const expected = sourceListing[`${fromPrefix}${other}`];
+				if (!at || !expected || !sameRecord(at, expected, TOLERANCE)) {
+					matches = false;
+					break;
+				}
+				// 整棵中间目录都得在删除清单里，才算"这个包承认它该没了"
+				if (!deleted.has(`${prefix}/${other}`)) {
+					matches = false;
+					break;
+				}
+			}
+			if (matches) prefixes.add(prefix);
+		}
+	}
+	return prefixes.size === 1 ? [...prefixes][0] ?? null : null;
 }
 
 /**
@@ -2902,6 +3039,35 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		}
 		: { fullFiles: null, fullGeneration: null, fullHash: null, fullFile: null };
 	const adopt = wantsBaseline ? null : plan.adoptBaseline;
+	/**
+	 * **幽灵删除也要累积**（0.17，用户报的"`live/implement` 删了又回来"）。
+	 *
+	 * 更新包点名的删除里，有些路径**不在基准清单里**（base 之后才出现的）：它们的删除同样得
+	 * "一直带着"，我下次导出还要点名 —— 否则别的机器直接从我的新包开始应用（自动收包按源头
+	 * 只取最新的那一份），就永远删不掉它。记录跟着基准走：换基准（完整副本 / 差量包 /
+	 * 接上后续基准）就清空 —— 新的完整清单本来就不含它们。
+	 */
+	const ghostBase = new Set(Object.keys(adopt ? adopt.files : (previous?.fullFiles ?? {})));
+	const ghosts: Record<string, { size: number; mtime: number; hash?: string }> =
+		wantsBaseline || adopt ? {} : { ...(previous?.ghosts ?? {}) };
+	if (!wantsBaseline && !adopt) {
+		for (const item of plan.info.header.deleted) {
+			if (ghostBase.has(item.path)) continue;
+			if (item.baseSize === undefined || item.baseMtime === undefined) continue;
+			// 还在盘上的（被保留的本地改动 / 删除失败）：不是幽灵，别点名
+			if (inventory.files.has(item.path)) continue;
+			ghosts[item.path] = {
+				size: item.baseSize,
+				mtime: item.baseMtime,
+				...(item.baseHash ? { hash: item.baseHash } : {}),
+			};
+		}
+		// 这一趟写回来的路径又从"幽灵"变回正常内容
+		for (const entry of plan.info.header.entries) delete ghosts[entry.path];
+		for (const path of Object.keys(ghosts)) {
+			if (inventory.files.has(path)) delete ghosts[path];
+		}
+	}
 	const nextFullFiles: Record<string, FileRecord> = isFull
 		? { ...freshAnchor }
 		: { ...contentBefore, ...freshAnchor };
@@ -2940,6 +3106,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		...baseline,
 		history: isFull ? {} : (previous?.history ?? {}),
 		dirs: sortedDirs,
+		ghosts,
 	};
 	if (wantsBaseline && !landedOnBaseline) {
 		options.log.debug(

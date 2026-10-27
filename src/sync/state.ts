@@ -77,6 +77,30 @@ export interface BundleBaseline {
 	 * 老状态文件里没有这一项：那一轮一个目录都不删，之后补上。
 	 */
 	dirs?: string[];
+	/**
+	 * **自这份基准以来"出现过、后来没了"的路径** —— 累积删除清单（0.17）。
+	 *
+	 * 更新包是**累积**的：`deleted` 也得累积，不能只在"删掉它的那一份包"里点一次名。
+	 * 反例（真机报的 `live/implement` 反反复复被重建）：那是 base 之后新建的路径，
+	 * 按"起点清单 − 现在"永远算不出删除，旧代码靠"上一份状态里还有没有它"临时补一笔；
+	 * 那一份包一导，状态里就没它了 —— **下一份累积包不再点名**，而没应用中间那一份、
+	 * 直接应用最新包的机器（自动收包按源头只取最新的那一份）就永远删不掉它。
+	 *
+	 * 所以记在这里、**每一份更新包都带上**，直到：
+	 * - 换基准（导出 / 应用完整副本、应用差量包、接上后续基准）—— 新清单本来就不含它；
+	 * - 这个路径又出现在仓库里 —— 那时它是正常条目。
+	 *
+	 * 记录的是**接收方最后见过的那一版**（`size` / `mtime` / `hash`），
+	 * 接收方本地改过时 `ghostDeleteAllowed` 会留着它（宁可留着，不删改过的东西）。
+	 */
+	ghosts?: Record<string, BundleGhost>;
+}
+
+/** 一条幽灵删除：路径 + 接收方手里最后那一版的记录 */
+export interface BundleGhost {
+	size: number;
+	mtime: number;
+	hash?: string;
 }
 
 /** 内容指纹缓存的一条 */
@@ -380,6 +404,8 @@ function normalizeState(raw: Partial<PluginState> | null): PluginState {
 				fullFile: raw.bundle.fullFile ?? null,
 				history: raw.bundle.history ?? {},
 				dirs: raw.bundle.dirs ?? [],
+				// 旧状态文件没有这一项：从空开始记，下一次导出把该点名的补上
+				ghosts: raw.bundle.ghosts ?? {},
 			}
 			: null,
 		hashes: raw.hashes ?? {},
