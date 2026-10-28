@@ -2005,8 +2005,23 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		extraDeletes++;
 	}
 	actions.unshift(...moveActions);
+	/**
+	 * **这一趟之后该有哪些目录** ＝ `emptyDirs` ＋ 每个文件的**所有上级目录**（一路往上加）。
+	 *
+	 * 只加直接父目录会漏掉爷爷目录 —— 真机 2026-10-28：`temp/verify-017/new.md` 是这一趟
+	 * 新建的，而 `temp` 在上一份包之后变空了、又在 `state.bundle.dirs` 里，于是被排进
+	 * "该删的空文件夹"；写完新文件之后 `temp` 里已经有 `verify-017`，`rmdir` 当然失败 →
+	 * `effects.ok = false` → 收包层白跑一次**强制回退**（真机日志里那次 `recovered: true`）。
+	 * 目录是**内容**：只要它底下（任意深度）有这一趟送到的文件，它自己就得留着。
+	 */
 	const deliveredDirs = new Set<string>(header.emptyDirs ?? []);
-	for (const file of Object.keys(deliveredFiles)) deliveredDirs.add(dirnameRel(file));
+	for (const file of Object.keys(deliveredFiles)) {
+		let dir = dirnameRel(file);
+		while (dir !== '') {
+			deliveredDirs.add(dir);
+			dir = dirnameRel(dir);
+		}
+	}
 	deliveredDirs.delete('');
 
 	/**
