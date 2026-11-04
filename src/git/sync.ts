@@ -4,13 +4,16 @@ import { gitFailure } from './run';
 import type { GitResult } from './run';
 import { gitRunner, prepareShelf, readShelfLayout } from './shelf';
 import type { GitRunner, ShelfLayout, ShelfOptions } from './shelf';
-import { clearRemovals, readRemovals } from './removals';
+import { clearRemovals, noteBundleRemoved, readRemovals } from './removals';
+import { moveToTrash } from '../sync/disk';
+import { bundleTrashRoot } from '../bundle/manage';
+import { formatStamp } from '../utils/format';
 
 /**
  * 一次"和远程对一遍"：**提交本机的包 → 拉下别人的包 → 推上去**。
  *
  * 只搬包，不搬库。git 在这里是货车：
- * - 谁站在哪一份基准上、这个包能不能收，仍然由包头部说了算（`bundle/` 那套），
+ * - 谁用哪一份基准上、这个包能不能收，仍然由包头部说了算（`bundle/` 那套），
  *   这里一行都不碰那些判断；
  * - 合并永远只发生在"新增一个整文件 / 删掉一个整文件"上 ——
  *   包的文件名带随机位、内容写下就不改，所以两台机器同时操作也不会撞车。
@@ -81,13 +84,15 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	/**
 	 * **本地把包删了 ≠ 我要远程也删掉**（用户报的："包弄乱了我会删，这时候要从远程重新拉最新的，
 	 * 现在删了他就不会拉了"）。两道处理：
-	 * - 插件**主动撤下**的（`bundle/manage.ts` 的挪进回收站 / 彻底删除、被新包取代的老包）记过记号，
+	 * - 插件**主动撤下**的（`bundle/manage.ts` 的移到回收站 / 彻底删除、被新包取代的老包）记过记号，
 	 *   照旧提交并推到对面（"删包要同步"那条没变）；
 	 * - 别的（用户在文件夹里删的）一律当成"我这份副本丢了"：**从 HEAD 恢复回来**，
 	 *   于是这一趟只剩拉取，不会把自己删的东西推到远程、也不会因为多出一笔本地提交卡在"不能快进"。
 	 */
-	const restored = await restoreDroppedBundles(git, dir, layout);
-	if (restored.length > 0) stage(1, `本机少掉的 ${restored.length} 个包已拉回来…`);
+	const salvaged = await salvageDroppedBundles(git, dir, layout);
+	if (salvaged.length > 0) {
+		stage(1, `本机少掉的 ${salvaged.length} 个包已备份进回收站，删除会同步出去…`);
+	}
 	const before = await listBundlePaths(dir, options.trashDir);
 	stage(2, '提交本机的包…');
 	const committed = hosted ? await commitScoped(git, layout) : await commitPending(git);
@@ -163,34 +168,65 @@ export async function pushWithRetry(
 }
 
 /**
- * **本地"丢"了的包，从货架（HEAD）恢复回来**（插件主动撤下的除外，见 `git/removals.ts`）。
+ * **本地少掉的包 ＝ 撤下它**（0.18.2 改的语义，用户拍板：
+ * "正确逻辑应该删掉以后远程和其他终端都不再出现"）。
  *
- * 判据用 `git diff HEAD --diff-filter=D`：只看"工作区/暂存区里没了、HEAD 里还有"的那些，
- * 路径是**仓库根相对**的，所以 `git checkout` 一律带 `:(top)` 前缀 —— 货架是别人仓库的子目录时，
- * cwd 在子目录里、裸路径会被 git 当成"相对当前目录"，恢复错文件（真踩过）。
+ * 以前这里反过来：磁盘上没了、HEAD 里还有的一律 `git checkout` 恢复回来，
+ * 理由是"包弄乱了我会删，这时候要从远程重新拉最新的"。代价是**删不掉的包**：
+ * 在资源管理器里删一份，下一轮 30 秒同步就把它变回来，远程和别的机器上还在，
+ * 用户看到的就是"我删了它又出现了"（真机 2026-11-04，`320 → 650` 那份）。
  *
- * 只认包与对表文件（`.lsave` / `.lsave-peers/*.json`）：货架里本来就只有这两类，
- * 别的路径就算被删了也不该由插件替用户恢复。
+ * 现在分成两件事：
+ * 1. **先把 HEAD 里那份取回来、移到本机回收站**（`bundles-trash/<时间戳>/`）——
+ *    误删也捞得回来，回收站不进仓库、不占货架；
+ * 2. **记一笔"撤下"记号**，这一轮就会把删除提交并推走：远程和别的机器一起没掉。
+ *
+ * 唯一例外：`.lsave-peers/*.json` 是各台机器的对表文件，不是包 —— 少一个只说明
+ * "我这份对表丢了"，照旧从 HEAD 恢复（它没有内容，恢复了也只会被对方的下一次上报盖掉）。
+ *
+ * 想重新拿回远程上的包，走「刷新包（对齐远程）」（`refreshShelf` 的 `reset --hard`）——
+ * 那是用户明确点的动作，不再由每 30 秒的节拍替他决定。
  */
-async function restoreDroppedBundles(git: GitRunner, dir: string, layout: ShelfLayout): Promise<string[]> {
+async function salvageDroppedBundles(git: GitRunner, dir: string, layout: ShelfLayout): Promise<string[]> {
 	const diff = await git(['diff', '--diff-filter=D', '--name-only', '-z', 'HEAD', '--', '.']);
 	if (diff.code !== 0) return [];
 	const marked = readRemovals(dir);
 	const prefix = layout.hosted && layout.rel !== '' ? `${layout.rel}/` : '';
 	const dropped: string[] = [];
+	const peers: string[] = [];
 	for (const repoRel of diff.stdout.split('\0')) {
 		if (repoRel === '') continue;
 		const lower = repoRel.toLowerCase();
 		const shelfRel = prefix !== '' && repoRel.startsWith(prefix) ? repoRel.slice(prefix.length) : repoRel;
-		const managed = lower.endsWith('.lsave') || shelfRel.startsWith('.lsave-peers/');
-		if (!managed) continue;
-		if (marked.has(shelfRel)) continue; // 我自己撤下的：要提交成删除，别恢复
-		dropped.push(repoRel);
+		if (lower.endsWith('.lsave')) {
+			if (marked.has(shelfRel)) continue; // 已经记过：这一轮就是来提交删除的
+			dropped.push(repoRel);
+			continue;
+		}
+		if (shelfRel.startsWith('.lsave-peers/')) peers.push(repoRel);
 	}
+	// 对表文件：照旧从 HEAD 恢复（不是包，没有内容可留）
+	if (peers.length > 0) await git(['checkout', '--', ...peers.map(item => `:(top)${item}`)]);
 	if (dropped.length === 0) return [];
-	const checkout = await git(['checkout', '--', ...dropped.map(item => `:(top)${item}`)]);
-	if (checkout.code !== 0) return [];
-	return dropped;
+
+	const stamp = formatStamp(Date.now());
+	const saved: string[] = [];
+	for (const repoRel of dropped) {
+		const shelfRel = prefix !== '' && repoRel.startsWith(prefix) ? repoRel.slice(prefix.length) : repoRel;
+		const abs = path.join(dir, ...shelfRel.split('/'));
+		try {
+			// 先把 HEAD 那一版放回磁盘（`git show` 走的是文本通道，几百 MB 的包不能用它）
+			const checkout = await git(['checkout', '--', `:(top)${repoRel}`]);
+			if (checkout.code !== 0) continue;
+			await moveToTrash(abs, bundleTrashRoot(dir), path.basename(abs), stamp);
+			noteBundleRemoved(dir, [abs]);
+			saved.push(shelfRel);
+		} catch {
+			// 备份失败就**别删**：宁可这一份留着，也不能悄悄丢掉用户的东西
+			await git(['checkout', '--', `:(top)${repoRel}`]).catch(() => undefined);
+		}
+	}
+	return saved;
 }
 
 export interface ShelfRefreshReport {
@@ -384,7 +420,7 @@ async function fetchRemote(git: GitRunner, branch: string): Promise<FetchOutcome
 }
 
 /**
- * 把 `FETCH_HEAD` 落到本地。
+ * 把 `FETCH_HEAD` 变成本地。
  *
  * 独立货架：能快进就快进 → 不行就 rebase（线性、不留合并提交）→ 再不行 merge。
  *
@@ -403,7 +439,7 @@ async function mergeFetched(git: GitRunner, layout: ShelfLayout | null): Promise
 		const merge = await git(['merge', '--ff-only', 'FETCH_HEAD']);
 		if (merge.code === 0) return;
 		const reset = await git(['reset', '--hard', 'FETCH_HEAD']);
-		if (reset.code !== 0) throw gitFailure('把远程的包落到本地', merge);
+		if (reset.code !== 0) throw gitFailure('把远程的包变成本地', merge);
 		return;
 	}
 

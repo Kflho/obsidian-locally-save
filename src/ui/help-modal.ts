@@ -8,7 +8,7 @@ import { Modal } from 'obsidian';
  * 与其让人去翻 README，不如在设置面板里直接放个按钮。
  *
  * 写作要求（评审与用户都看这一份）：
- * - 这里全是**用户视角**的话：不出现内部字段名、函数名、"通道 / 血脉 / 档位"这类术语；
+ * - 这里全是**用户视角**的话：不出现内部字段名、函数名、"通道 / 分支 / 档位"这类术语；
  * - `createEl` 的 text 是纯文本，**不渲染 markdown** —— 要强调就用句子本身，
  *   别写 `**这样**`（会原样显示成一串星号）；
  * - 长解释放这里，设置面板里那几行保持一句话。
@@ -49,7 +49,7 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '两种包' });
 		const pick = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		pick.createEl('li', {
-			text: '完整副本：整个仓库，放在 full 子目录。第一次给对方、想留还原点、更新包攒大了换基准，都导它。',
+			text: '完整副本：整个仓库，放在 full 子目录。第一次给对方、想留还原点、更新包变大了换基准，都导它。',
 		});
 		pick.createEl('li', {
 			text: '更新包：只装自起点那份完整副本以来变过的文件，放在 changes 子目录。日常来回搬用它，'
@@ -61,7 +61,7 @@ export class BundleHelpModal extends Modal {
 				+ '这时的更新包必然是空的，所以不会生成。只想传一个小改动，就只勾更新包。',
 		});
 		pick.createEl('li', {
-			text: '只有完整副本会改变你站的那一份：导出或应用完整副本之后，你就站在它上面，'
+			text: '只有完整副本会改变你站的那一份：导出或应用完整副本之后，你就以它为准，'
 				+ '之后的更新包从它算起；导出、应用更新包都不动它。',
 		});
 		pick.createEl('li', {
@@ -70,7 +70,21 @@ export class BundleHelpModal extends Modal {
 		});
 		pick.createEl('li', {
 			text: 'changes 里的更新包默认都留着：完整副本会清掉它取代得了的那些；'
-				+ '别的机器发来的那一份留着，那是它那一半改动。',
+				+ '别的机器发来的那一份留着，那是它那一半改动。起点已经没有电脑站着的包会自动移到回收站。',
+		});
+		pick.createEl('li', {
+			text: '换了新基准、别的电脑还停在旧那份上：完整副本不进 git，它拿不到；'
+				+ '这时导一份差量包（命令「导出换基准的差量包…」，或「管理同步包」里同一行按钮），'
+				+ '两端都是完整副本、只装两者之间的差异。它应用完就站到新基准上，手里不需要有新的完整副本。',
+		});
+		pick.createEl('li', {
+			text: '收下差量包、应用完之后，那台机器会自己再留一份完整副本（指纹和你那份相同，世代不涨）：'
+				+ '两边各自拿着同一个基准的包，之后恢复 / 回退都有东西可读。这一步在应用成功之后自动做，'
+				+ '点一次「立即同步」就全做完；算出来的指纹对不上时它不补，只说明一句。',
+		});
+		pick.createEl('li', {
+			text: 'full 里的旧完整副本不会自动清（它是还原点）。「管理同步包」→「清理旧完整副本…」'
+				+ '只列没有任何电脑还停在上面的那些，移到回收站后还能捞回来。',
 		});
 
 		contentEl.createEl('h3', { text: '两台机器来回搬要两趟' });
@@ -86,7 +100,7 @@ export class BundleHelpModal extends Modal {
 			cls: 'locally-save-hint',
 		});
 		contentEl.createEl('p', {
-			text: '如果 B 在收到包之前已经改了自己的东西：应用时那些改动会被严格同步挪进回收目录，'
+			text: '如果 B 在收到包之前已经改了自己的东西：应用时那些改动会被严格同步移到回收目录，'
 				+ '但插件动手前已经先把它们存成了一个更新包（起点是这份包送到的状态，内容只有 B 动过的文件）。'
 				+ 'B 自己应用它，或发给 A 应用，两边的改动就凑齐了。'
 				+ '两台改到同一个文件时不会自动合并：以包的版本为准，另一版在回收目录里。',
@@ -109,7 +123,7 @@ export class BundleHelpModal extends Modal {
 
 		contentEl.createEl('h3', { text: '打开包是只读的' });
 		contentEl.createEl('p', {
-			text: '选中包后先算一遍：同步程度、会新增、覆盖、删除几个、哪些本地文件会被挪走、'
+			text: '选中包后先算一遍：同步程度、会新增、覆盖、删除几个、哪些本地文件会被移走、'
 				+ '包里点名了哪些文件。这一步不碰文件；确认无误，「应用」才可点。'
 				+ '真要动到本地已有的东西时，还会再确认一次。',
 			cls: 'locally-save-hint',
@@ -117,7 +131,7 @@ export class BundleHelpModal extends Modal {
 
 		contentEl.createEl('h3', { text: '应用只有一种方式：严格同步' });
 		contentEl.createEl('p', {
-			text: '包里的版本覆盖本地，包里点名删的照删，本地多出来的文件也挪进回收目录。'
+			text: '包里的版本覆盖本地，包里点名删的照删，本地多出来的文件也移到回收目录。'
 				+ '应用完仓库就是包送到的样子，两边的状态编号当场可比。'
 				+ '没有“应用方式”可选：合并会合出一个既不等于包、又不等于本机的仓库，'
 				+ '下一次的更新包就对不上基准了。',
@@ -133,7 +147,7 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '会不会把东西弄丢' });
 		const safe = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		safe.createEl('li', {
-			text: '被覆盖、被删掉、被挪走的本地版本一律进回收目录（仓库里的 .trash/locally-save），随时能捞回来。',
+			text: '被覆盖、被删掉、被移走的本地版本一律进回收目录（仓库里的 .trash/locally-save），随时能捞回来。',
 		});
 		safe.createEl('li', {
 			text: '动手前，你这边对方没有的改动会先存成一个更新包；存不下就不应用。',
@@ -159,7 +173,7 @@ export class BundleHelpModal extends Modal {
 				+ '对方导出时把「更新包：从哪个状态」选成那一项。',
 		});
 		ways.createEl('li', {
-			text: '让对方把他用的那份完整副本发过来：应用它之后你就站在同一份上了。',
+			text: '让对方把他用的那份完整副本发过来：应用它之后你就停在同一份上了。',
 		});
 		ways.createEl('li', {
 			text: '让对方导一份新的完整副本：完整清单自带基准，随时能接。',
@@ -177,10 +191,10 @@ export class BundleHelpModal extends Modal {
 				+ '鼠标停在行上是完整路径。',
 		});
 		clean.createEl('li', {
-			text: '每行有：应用…、文件夹、复制路径、挪进回收站、彻底删除。',
+			text: '每行有：应用…、文件夹、复制路径、移到回收站、彻底删除。',
 		});
 		clean.createEl('li', {
-			text: '「挪进回收站」落在同步包文件夹里的 .lsave/bundles-trash/时间戳，能捞回来。',
+			text: '「移到回收站」落在同步包文件夹里的 .lsave/bundles-trash/时间戳，能捞回来。',
 		});
 		clean.createEl('li', {
 			text: '「彻底删除」是真删，单独确认一次；只想扔掉某一个没用的包时用它，不必清空整个回收站。',
@@ -190,7 +204,7 @@ export class BundleHelpModal extends Modal {
 		});
 		clean.createEl('li', {
 			text: '以前那些小更新包可以在「管理同步包…」里合并：几份并成一份，少几个文件要搬。'
-				+ '原来那几份挪进回收站，已经站在它们送到的状态上的机器照样收得下合并后的这一份。',
+				+ '原来那几份移到回收站，已经停在它们送到的状态上的机器照样收得下合并后的这一份。',
 		});
 
 		contentEl.createEl('h3', { text: '谁什么时候动手' });
@@ -228,7 +242,7 @@ export class BundleHelpModal extends Modal {
 		contentEl.createEl('h3', { text: '想留一个还原点' });
 		contentEl.createEl('p', {
 			text: '在「导出同步包…」里勾「完整副本」：插件按现在的仓库写一份包，'
-				+ '你也从此站在它上面，仓库文件一个不动。'
+				+ '你也从此以它为准，仓库文件一个不动。'
 				+ '想用别人的完整副本当自己的基准：在「打开同步包并应用…」里选它，先看报告再应用。',
 			cls: 'locally-save-hint',
 		});

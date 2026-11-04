@@ -17,6 +17,7 @@ import { dirExists } from '../sync/disk';
 import { loadState, loadStateSync } from '../sync/state';
 import type { PluginState } from '../sync/state';
 import { formatBytes, formatTime } from '../utils/format';
+import { syncGitNow } from './git';
 import { markDestructive } from './modal-layout';
 import { openFolderInExplorer } from './reveal';
 
@@ -53,12 +54,12 @@ export interface BundleListViewOptions {
 	 */
 	baselineLabel?: string;
 	onBaseline?: (item: ManagedBundle) => void;
-	/** 某个包被挪进回收站之后（导入弹窗要把当前选中的清掉） */
+	/** 某个包被移到回收站之后（导入弹窗要把当前选中的清掉） */
 	onRemove?: (file: string) => void;
 	/** 显示回收站那一行（只有管理弹窗要） */
 	showTrash?: boolean;
 	/**
-	 * 顶上那行「本机现在站在哪儿」（第几代 · 基于哪份完整副本 · 状态编号）。
+	 * 顶部那行「本机现在在哪儿」（第几代 · 基于哪份完整副本 · 状态编号）。
 	 *
 	 * 用户提的：同步包界面（管理 / 导出 / 应用）都得能一眼看到"我这台现在基于第几代、
 	 * 文件状态是什么" —— 光有世代号认不出跟对方是不是同一份东西，得跟状态编号一起看。
@@ -75,12 +76,12 @@ export class BundleListView {
 	private listEl!: HTMLElement;
 	/** 路径不存在 / 没有包之类的说明 */
 	private noteEl!: HTMLElement;
-	/** 顶上那行"本机现在站在哪儿"（可选，见 showPosition） */
+	/** 顶部那行"本机现在在哪儿"（可选，见 showPosition） */
 	private positionEl: HTMLElement | null = null;
 	private trashEl: HTMLElement | null = null;
 	private items: ManagedBundle[] = [];
 	private selected: string | null = null;
-	/** 我这边的状态：行里标出"哪个包就是我现在的基准"，顶上写"第几代 + 状态编号" */
+	/** 我这边的状态：行里标出"哪个包就是我现在的基准"，顶部写"第几代 + 状态编号" */
 	private local: PluginState | null = null;
 	/** 包文件夹在不在：不在跟"里面没有包"要分开说，路径打错时前者更有用 */
 	private baseExists = true;
@@ -94,12 +95,12 @@ export class BundleListView {
 		this.plugin = plugin;
 		this.options = options;
 		this.headEl = parent.createDiv({ cls: 'locally-save-bundles-head' });
-		// 「本机现在站在哪儿」放在最上面：管理和导出时最先要知道的就是"我这边是哪一代、
+		// 「本机现在在哪儿」放在最上面：管理和导出时最先要知道的就是"我这边是哪一代、
 		// 状态编号是什么"，再往下才是"文件夹里都有哪些包"
 		if (options.showPosition) this.positionEl = parent.createDiv({ cls: 'locally-save-position' });
 		this.noteEl = parent.createDiv({ cls: 'locally-save-hint' });
 		// 回收站那一行放在**列表上面**：放下面时会被"最多 40vh 的滚动列表"顶出视野，
-		// 用户翻不到就会问"删掉的包到底去哪了、回收站在哪"（报过）
+		// 用户翻不到就会问"删掉的包到底去哪了、回收用哪"（报过）
 		if (options.showTrash) this.trashEl = parent.createDiv({ cls: 'locally-save-trash' });
 		this.listEl = parent.createDiv({ cls: 'locally-save-list' });
 	}
@@ -223,7 +224,7 @@ export class BundleListView {
 		row.createSpan({ text: this.describeRow(item), cls: 'locally-save-reason' });
 		// 这就是我现在站着的那份完整副本：标出来，用户才知道"我这台基于第几代包"。
 		// **光比文件名不够**：应用完整副本时如果有一批文件没写成，`fullFile` 可能已经指过去、
-		// 内容却没落到（老版本留下的状态就这样），再标"本机现在的基准"就是骗人 ——
+		// 内容却没写成（老版本留下的状态就这样），再标"本机现在的基准"就是骗人 ——
 		// 还要比对基准指纹（那份包自己的清单算出来的）。
 		if (this.local?.bundle?.fullFile === item.name
 			&& item.header
@@ -246,9 +247,9 @@ export class BundleListView {
 			this.plugin.app as unknown as { openWithDefaultApp?: (path: string) => void },
 		));
 		this.addButton(actions, '复制路径', false, () => { void copyPath(item.file); });
-		// 两个删除并排：默认那个是"挪进回收站"（还能捞回来），旁边才是真删 ——
-		// 只有"挪走"的话，想单独扔掉一个没用的包就得清空整个回收站（用户提的）
-		this.addButton(actions, '挪进回收站', false, () => this.confirmTrash(item));
+		// 两个删除并排：默认那个是"移到回收站"（还能捞回来），旁边才是真删 ——
+		// 只有"移走"的话，想单独扔掉一个没用的包就得清空整个回收站（用户提的）
+		this.addButton(actions, '移到回收站', false, () => this.confirmTrash(item));
 		this.addButton(actions, '彻底删除', true, () => this.confirmDelete(item));
 
 		row.addEventListener('click', () => {
@@ -282,7 +283,7 @@ export class BundleListView {
 	/**
 	 * 一个包"是第几代"——**世代与状态编号一起写**。
 	 *
-	 * 只写世代会认错包：世代号说不出"我们站在哪一份完整副本上"；状态编号才是"这一刻文件长什么样"。
+	 * 只写世代会认错包：世代号说不出"我们用哪一份完整副本上"；状态编号才是"这一刻文件长什么样"。
 	 * 完整副本写「第 N 代」；更新包写「第 N → M 代」（M ＝ 应用它之后到达的世代，
 	 * 差量包的 M 就是它送到的那一刻）。
 	 */
@@ -296,7 +297,7 @@ export class BundleListView {
 		return `${generation} · ${stateId}`;
 	}
 
-	/** 顶上那行：本机第几代、基于哪份完整副本、状态编号是什么 */
+	/** 顶部那行：本机第几代、基于哪份完整副本、状态编号是什么 */
 	private renderPosition(): void {
 		const host = this.positionEl;
 		if (!host) return;
@@ -322,29 +323,31 @@ export class BundleListView {
 	}
 
 	/**
-	 * 删除 = **挪进回收站**，不是真删：同步包往往是"改动唯一的备份"，
+	 * 删除 = **移到回收站**，不是真删：同步包往往是"改动唯一的备份"，
 	 * 手滑一下整份改动就没了。真要腾地方：单个包用旁边的「彻底删除」，
 	 * 或者清空整个回收站。
 	 */
 	private confirmTrash(item: ManagedBundle): void {
 		const root = bundleTrashRoot(this.options.baseDir());
 		new ConfirmBundleModal(this.plugin.app, {
-			title: '把同步包挪进回收站？',
+			title: '把同步包移到回收站？',
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）`,
 			],
-			note: `文件会挪到 ${root}/时间戳/，需要时还能捞回来。`
+			note: `文件会移到 ${root}/时间戳/，需要时还能捞回来。`
 				+ '确认没用了，可以用旁边的「彻底删除」，或在回收站那一行点「清空回收站」。',
-			confirmText: '挪进回收站',
+			confirmText: '移到回收站',
 			onConfirm: async () => {
 				const outcome = await trashBundles(this.options.baseDir(), [item.file]);
 				if (outcome.failed.length > 0) {
-					new Notice(`没能挪走 ${outcome.failed[0]?.path}：${outcome.failed[0]?.error}`, 9000);
+					new Notice(`没能移走 ${outcome.failed[0]?.path}：${outcome.failed[0]?.error}`, 9000);
 				} else {
 					// 把落脚点也报出来：用户想反悔时知道去哪儿捞
-					new Notice(`已挪进回收站：${item.name}（${outcome.target}）`, 12000);
+					new Notice(`已移到回收站：${item.name}（${outcome.target}）`, 12000);
 				}
 				this.options.onRemove?.(item.file);
+				// 删完立刻推一次：删除在本地只是一笔没推上去的改动，留个窗口期就容易被「刷新包」撤回来
+				if (this.plugin.settings.gitEnabled) void syncGitNow(this.plugin, { quiet: true });
 				await this.refresh();
 			},
 		}).open();
@@ -353,7 +356,7 @@ export class BundleListView {
 	/**
 	 * **彻底删除**：直接删文件，不进回收站。
 	 *
-	 * 跟"挪进回收站"分成两个按钮是刻意的：默认那条路永远能捞回来，
+	 * 跟"移到回收站"分成两个按钮是刻意的：默认那条路永远能捞回来，
 	 * 只有用户在这一步（标题、按钮文字、说明都写明"捞不回来"）再点一次才真删。
 	 */
 	private confirmDelete(item: ManagedBundle): void {
@@ -362,7 +365,7 @@ export class BundleListView {
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整副本' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被直接删掉，不进回收站`,
 			],
-			note: '删除后捞不回来。只想清出列表的话，用旁边的「挪进回收站」。',
+			note: '删除后捞不回来。只想清出列表的话，用旁边的「移到回收站」。',
 			confirmText: '彻底删除',
 			onConfirm: async () => {
 				const outcome = await deleteBundles([item.file], this.options.baseDir());
@@ -372,6 +375,7 @@ export class BundleListView {
 					new Notice(`已彻底删除：${item.name}`, 6000);
 				}
 				this.options.onRemove?.(item.file);
+				if (this.plugin.settings.gitEnabled) void syncGitNow(this.plugin, { quiet: true });
 				await this.refresh();
 			},
 		}).open();
@@ -387,7 +391,7 @@ export class BundleListView {
 		if (contents.count === 0) {
 			host.createSpan({ text: '回收站：空的' });
 			host.createSpan({
-				text: '（删掉的包会挪到这里，还能捞回来）',
+				text: '（删掉的包会移到这里，还能捞回来）',
 				cls: 'locally-save-hint',
 			});
 			return;

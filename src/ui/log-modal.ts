@@ -9,7 +9,7 @@ import { formatTime } from '../utils/format';
 /**
  * 「同步包更新记录」—— 像 git log 那样把来龙去脉摊开。
  *
- * 为什么不塞进别的窗口：这份记录回答的是"我现在站在哪份完整副本上、中间收发过哪些更新包"，
+ * 为什么不塞进别的窗口：这份记录回答的是"我现在用哪份完整副本上、中间收发过哪些更新包"，
  * 用户想核对/排查时会专门来看它（用户提的："类似 git 的更新记录功能，比较直观"）。
  */
 export class BundleLogModal extends Modal {
@@ -48,7 +48,7 @@ export class BundleLogModal extends Modal {
 		this.listEl.empty();
 		try {
 			const state = await loadState(this.plugin.stateFile());
-			// 顶部：我现在站在哪儿
+			// 顶部：我现在在哪儿
 			const head = this.listEl.createDiv({ cls: 'locally-save-log-head' });
 			for (const line of describeBundlePosition(state)) {
 				head.createDiv({ text: line });

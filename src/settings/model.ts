@@ -86,7 +86,7 @@ export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
 /**
  * 「更新包攒到多大就提醒立新基准」的可选值：**0 ＝ 不提醒**（键是存进 data.json 的 MB 数）。
  *
- * 更新包是"自起点那份完整包累积"的，攒大了就该导一份新的完整副本换基准 ——
+ * 更新包是"自起点那份完整包累积"的，变大了就该导一份新的完整副本换基准 ——
  * 这是新模型里唯一需要用户做的维护动作（0.14 起；0.11 删过这一项，现在它又有前提了）。
  */
 export const SIZE_WARN_OPTIONS: Record<string, string> = {
@@ -162,7 +162,7 @@ export interface PluginSettings {
 	 * 为什么存指纹而不是世代号：世代号说的是"内容走到第几版"，
 	 * 两边的"第 32 代"完全可能是**两份不同的完整副本**。用户实测踩过：按"第 32 代"
 	 * 选起点，对方回「基准对不上」—— 选中的那份根本不是对方手里那份。
-	 * 指纹是内容的直接证据，也是对方「更新记录」顶上那行「基准：… · 指纹 xxxx」里的值。
+	 * 指纹是内容的直接证据，也是对方「更新记录」顶部那行「基准：… · 指纹 xxxx」里的值。
 	 *
 	 * （0.14 起"留空"的含义从"自动接在这条线的最新点后面"变成"我站的那一份完整副本"：
 	 * 点只有完整包了，没有线头可接。日常完全一样 —— 只有在"我落在后面"时才会不同，
@@ -319,13 +319,13 @@ export function anchorFingerprintOf(value: string): string | null {
  *
  * 比 `Object.assign({}, DEFAULT_SETTINGS, data)` 稳：那种写法会把脏值原样留下
  * （`logLevel: "xyz"` 就一直躺在 data.json 里），这里每个字段都过一遍收敛规则，
- * 缺字段补默认值、坏字段回落到默认值。
+ * 缺字段补默认值、坏字段回用默认值。
  */
 export function settingsFrom(data: unknown): PluginSettings {
 	const raw = (data ?? {}) as Record<string, unknown>;
 	/**
 	 * 「保存后同步」的迁移：老 data.json 里是**开关 + 间隔**两项，现在合成一个下拉（0 ＝ 不同步）。
-	 * 关着的时候必须落到 0 —— 不这么写的话，用户原本没开自动同步，升级后会因为
+	 * 关着的时候必须取 0 —— 不这么写的话，用户原本没开自动同步，升级后会因为
 	 * 存着的那个 30 秒而突然开始往磁盘写（这类"静悄悄改了行为"是最不能接受的）。
 	 */
 	const saveDelay = raw.syncAfterSave === false ? 0 : raw.syncAfterSaveDelay;
@@ -390,7 +390,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 
 		gitEnabled: coerceBoolean(raw.gitEnabled, DEFAULT_SETTINGS.gitEnabled),
 		gitRemote: coerceText(raw.gitRemote, DEFAULT_SETTINGS.gitRemote),
-		// 分支名留空没意义：落到 main（真正的合法性检查在引擎里，非法值会明确报错）
+		// 分支名留空没意义：变成 main（真正的合法性检查在引擎里，非法值会明确报错）
 		gitBranch: coerceText(raw.gitBranch, DEFAULT_SETTINGS.gitBranch).trim() || DEFAULT_SETTINGS.gitBranch,
 		syncDirection: coerceDirection(raw.syncDirection),
 		gitPath: coerceText(raw.gitPath, DEFAULT_SETTINGS.gitPath),

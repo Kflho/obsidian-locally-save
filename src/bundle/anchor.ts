@@ -16,7 +16,7 @@ import type { FileRecord } from '../sync/types';
  *
  * - **从**：一份**完整副本** —— 默认是"我站的那一份"（`state.bundle.fullHash`），
  *   也可以指定硬盘上更老的那一份。为什么需要：我立了新基准（第 36 代那份），
- *   对方还站在第 32 代上，按最新基准导出来的更新包对它是"基于一份它没有的完整副本"。
+ *   对方还基准是第 32 代上，按最新基准导出来的更新包对它是"基于一份它没有的完整副本"。
  *   而**第 32 代那份完整包还在硬盘上**（完整副本是还原点，从来不会被清），
  *   指定它当起点，对方收到就是接着自己那份基准的确定性更新。
  * - **到**：默认"最新"（当前仓库，含你刚改的东西）；也可以指定另一份完整副本 ——
@@ -35,7 +35,7 @@ import type { FileRecord } from '../sync/types';
 
 /** 一份可用于当"状态"的完整副本 */
 export interface BundleAnchor {
-	/** 它是第几代导出的（包头部 `targetGeneration`）—— 站在它的接收方手里的世代 */
+	/** 它是第几代导出的（包头部 `targetGeneration`）—— 以它为准的接收方手里的世代 */
 	generation: number;
 	/** 它的基准指纹（见 `baseline.ts`）：应用过它的机器，`fullHash` 就是这个 */
 	hash: string | null;
@@ -51,7 +51,7 @@ export interface BundleAnchor {
 	 * 这份完整包记的**状态编号**（导出方导完那一刻的文件状态，见 `sync/state-id.ts`）。
 	 *
 	 * 存整份而不只是那个 id：导"到某一份完整副本"的差量包时，要把它原样写进新包的头部 ——
-	 * 接收方应用完算一个自己的跟它比，**相同就说明正好落到了那一刻**。
+	 * 接收方应用完算一个自己的跟它比，**相同就说明正好变成了那一刻**。
 	 */
 	stateId: StateIdInfo | null;
 	/** 包文件的修改时间：同一代有好几份时按它挑最新的那份 */
@@ -94,9 +94,9 @@ export function anchorOfHeader(
 }
 
 /**
- * 包里目录下所有**同一条血脉**的完整副本，世代大的排前面（同代按修改时间新的在前）。
+ * 包里目录下所有**同一条分支**的完整副本，世代大的排前面（同代按修改时间新的在前）。
  *
- * 为什么只认同一条血脉：别的机器独立立的基准**跟我这边不是一份东西**
+ * 为什么只认同一条分支：别的机器独立立的基准**跟我这边不是一份东西**
  * （它有它自己的第 1 代、第 2 代），拿它当起点算出来的更新包谁也不认识。
  */
 export async function listFullAnchors(baseDir: string, lineage: string): Promise<BundleAnchor[]> {
@@ -120,7 +120,7 @@ export function listFullAnchorsSync(baseDir: string, lineage: string): BundleAnc
 	if (!baseDir) return [];
 	const out: BundleAnchor[] = [];
 	for (const dir of bundleDirsToScan(baseDir)) {
-		// 更新包目录里不会有完整包，但真放了一份（用户手动挪的）也该列出来 —— 反正读头部很便宜
+		// 更新包目录里不会有完整包，但真放了一份（用户手动移的）也该列出来 —— 反正读头部很便宜
 		for (const item of listFilesSync(dir)) {
 			if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
 			const file = path.join(dir, item.name);
@@ -158,7 +158,7 @@ export function pickAnchor(anchors: BundleAnchor[], hash: string): BundleAnchor 
 
 /**
  * 一个状态在界面上怎么念 —— **写对方报给你的那一项**：
- * - `from`（起点）：`第 32 代 · 基准 7a22d790635332a0` —— 对方「更新记录」顶上写着
+ * - `from`（起点）：`第 32 代 · 基准 7a22d790635332a0` —— 对方「更新记录」顶部写着
  *   「基准：第 32 代 · 指纹 7a22d790635332a0」，照那个指纹选，别只看代；
  * - `to`（终点）：`第 32 代 · 状态 3f9a2c1d4e5f6a7b` —— 对方应用完的结论里写的是「状态 …」。
  *
@@ -210,7 +210,7 @@ export function anchorOptions(
 	const options: Record<string, string> = {};
 	if (end === 'from') {
 		const detail = latest.generation !== null
-			? `我站的是第 ${latest.generation} 代${latest.hash ? ` · ${latest.hash}` : ''}`
+			? `本机基准：第 ${latest.generation} 代${latest.hash ? ` · ${latest.hash}` : ''}`
 			: '还没有完整副本（要先导一份）';
 		options[LATEST_STATE] = `自动：${detail}`;
 	} else {

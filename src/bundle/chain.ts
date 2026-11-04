@@ -18,14 +18,14 @@ import { toNative } from '../utils/paths';
  * 链条模型（0.11 起）：**基准点**是链条上的节点 —— 完整包是一个点，**每份被应用的更新包**
  * 也落出一个新点；点与点之间是严格镜像，所以链条上每个节点的内容都是确定的，不需要人去指。
  * 链本身就是现成的数据：每个包的头部都记着"**我从哪一个基准点往外延伸**"
- * （`baselineHash`）与"**我落到哪一个基准点**"（`targetBaselineHash`，
+ * （`baselineHash`）与"**我变成哪一个基准点**"（`targetBaselineHash`，
  * 见 `bundle/export.ts`），首尾相接就串起来了。
  *
  * 为什么需要它（用户提的）：本机的点与"文件夹里有哪些包"原本是两件互不相干的事，全靠人手动对齐 ——
  * 手上有第 39 代的点、文件夹里是一条 39→46 的链，得手动重导一份完整副本才跟得上。
  *
  * 三条判据：
- * 1. **认链**：本机这一点往后，每一步都找"起点指纹 ＝ 当前落点"的那个包（同血脉）；
+ * 1. **认链**：本机这一点往后，每一步都找"起点指纹 ＝ 当前落点"的那个包（同一分支）；
  * 2. **能不能接**：本机这一点必须**在链上**（是某个包的落点，或是一份完整包）。
  *    接不上**如实说缺哪一份**，绝不猜着合；
  * 3. **接到哪儿**：从本机这一点往后一路走到底（链末）。
@@ -49,12 +49,12 @@ export interface ChainNode {
 	generation: number;
 	/** 这个包**从哪一个基准点**往外延伸（完整包 ＝ 它自己） */
 	baseline: string | null;
-	/** **落到哪一个基准点**（完整包 ＝ 它自己；旧版更新包没记 → null，这一环接不下去） */
+	/** **变成哪一个基准点**（完整包 ＝ 它自己；旧版更新包没记 → null，这一环接不下去） */
 	target: string | null;
 }
 
 export interface ChainPlan {
-	/** 本机现在站在链上的哪一份完整包（`null` ＝ 本机还没基准 / 基准不在链上） */
+	/** 本机现在停在链上的哪一份完整包（`null` ＝ 本机还没基准 / 基准不在链上） */
 	from: ChainNode | null;
 	/** 从本机基准往后要依次应用的包（空数组 ＝ 本机已经在链末） */
 	steps: ChainNode[];
@@ -100,11 +100,11 @@ export async function planChain(
 	const state = await loadState(options.stateFile);
 	const bundles = (await listBundles(baseDir)).filter(item => item.header);
 
-	// 链上的包：同血脉 + 认得出"从哪一点来、落到哪一点"
+	// 链上的包：同一分支 + 认得出"从哪一点来、变成哪一点"
 	const sameLineage = bundles.filter(item => item.header?.lineage === state.lineage);
 	const nodes = sameLineage.map(node);
 
-	/** 指纹 → 节点（同指纹只留最新那一份）：完整包用它自己的指纹认，更新包用它落到的那一点认 */
+	/** 指纹 → 节点（同指纹只留最新那一份）：完整包用它自己的指纹认，更新包用它变成的那一点认 */
 	const byHash = new Map<string, ChainNode>();
 	/** 指纹 → **完整包**：链末正好落在一份完整副本上时，那一点可以当成一份新基准来用 */
 	const fullByHash = new Map<string, ChainNode>();
@@ -123,10 +123,10 @@ export async function planChain(
 		from: null, steps: [], endGeneration: state.generation, endFull: null, problem,
 		edits: [], extraFiles: [],
 	});
-	if (sameLineage.length === 0) return emptyPlan('这个文件夹里没有跟我同血脉的包（先把对方的包拷进来）');
+	if (sameLineage.length === 0) return emptyPlan('这个文件夹里没有跟我同一分支的包（先把对方的包拷进来）');
 	if (mine === null) return emptyPlan('本机还没有基准点（没导过、也没应用过完整副本）：先应用一份完整副本，之后才谈得上接链');
 
-	// 本机站在链上的哪一点：一份完整包（它就是那一点），或者"落到这一点"的那个包
+	// 本机停在链上的哪一点：一份完整包（它就是那一点），或者"变成这一点"的那个包
 	const arrive = nodes.find(item => item.mode === 'changes' && item.target === mine) ?? null;
 	const startNode = byHash.get(mine) ?? null;
 	if (!arrive && !startNode) {
@@ -188,7 +188,7 @@ export async function planChain(
 	};
 }
 
-/** 一个包 → 链上的一个节点：从哪一点来、落到哪一点 */
+/** 一个包 → 链上的一个节点：从哪一点来、变成哪一点 */
 function node(bundle: ManagedBundle): ChainNode {
 	const header = bundle.header;
 	const mode = header?.mode ?? 'changes';

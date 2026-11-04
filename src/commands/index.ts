@@ -10,6 +10,7 @@ import {
 	syncNow,
 } from '../ui/actions';
 import { downloadNow, refreshBundlesAction, syncGitNow, uploadNow } from '../ui/git';
+import { rebaselineDiffAction, baselineCopyAction, baselineHealthAction, defaultBundleDir } from '../ui/rebaseline';
 import { openPeerStatus } from '../ui/status';
 
 /**
@@ -71,6 +72,15 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 		refreshBundlesAction(plugin));
 	register(plugin, 'sync-status', '查看各台电脑同步状态…', () =>
 		openPeerStatus(plugin, () => { void syncGitNow(plugin, { manual: true }); }));
+	// 换基准之后：还停在旧完整副本上的电脑靠这一份差量包一次变成新基准
+	register(plugin, 'export-rebaseline-diff', '导出换基准的差量包…', () =>
+		rebaselineDiffAction(plugin.app, plugin, defaultBundleDir(plugin)));
+	// 应用差量包之后本机没有这个基准的包文件：补一份（自动收包那条路已经自动做，这里手动补漏）
+	register(plugin, 'copy-baseline-bundle', '给现在的基准留一份完整副本…', () =>
+		baselineCopyAction(plugin));
+	// 换过几次基准之后"到底哪份对得上"：本机基准 / 盘上的完整副本 / 各台电脑报的基准
+	register(plugin, 'check-baseline', '检查两边的完整副本…', () =>
+		baselineHealthAction(plugin.app, plugin, defaultBundleDir(plugin)));
 
 	// 这条不受总开关限制 —— 它就是用来把插件重新打开的
 	register(plugin, 'toggle-enabled', '启用 / 停用插件', async () => {

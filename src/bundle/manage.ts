@@ -9,7 +9,7 @@ import { noteBundleRemoved } from '../git/removals';
 import { toNative } from '../utils/paths';
 
 /**
- * 同步包的管理：列出、挪进回收站、清空回收站。
+ * 同步包的管理：列出、移到回收站、清空回收站。
  *
  * 为什么不放在 ui/ 里：这些是**引擎层**的活（碰 fs、读包头部），
  * 界面上三个地方（导出弹窗、导入弹窗、管理弹窗）都要用同一套结果；
@@ -188,15 +188,15 @@ export function groupBundles(items: ManagedBundle[], mine?: string | null): Bund
 }
 
 export interface TrashOutcome {
-	/** 挪走的包（文件名，已排序） */
+	/** 移走的包（文件名，已排序） */
 	moved: string[];
 	failed: { path: string; error: string }[];
-	/** 落到回收站里的目录（一个时间戳一个，界面上告诉用户去哪儿捞） */
+	/** 进回收站里的目录（一个时间戳一个，界面上告诉用户去哪儿捞） */
 	target: string;
 }
 
 /**
- * 删包 = 挪进回收站（同一次操作用同一个时间戳，捞的时候好认）。
+ * 删包 = 移到回收站（同一次操作用同一个时间戳，捞的时候好认）。
  *
  * 为什么不真删：同步包是"改动唯一的备份"，点错一下整份改动就没了。
  * 回收站占地方，所以界面上另给一个"清空回收站"，让用户自己决定什么时候真删。
@@ -249,7 +249,7 @@ export async function readBundleTrash(baseDir: string): Promise<TrashContents> {
 /** 清空回收站：**真删**，删完捞不回来（界面上必须先确认） */
 export async function emptyBundleTrash(baseDir: string): Promise<void> {
 	for (const root of trashRoots(baseDir)) await removeDirRecursive(root);
-	// 老位置的回收站在 `<base>/.lsave/` 底下，清完会剩一个空壳 —— 顺手收掉，
+	// 老位置的回收停在 `<base>/.lsave/` 底下，清完会剩一个空壳 —— 顺手收掉，
 	// 别在 bundles 里面留个空 `.lsave`（那正是这次要修掉的乱）。走 rmdir：
 	// 里面但凡还有别的东西就删不动，不会误伤。
 	const legacy = legacyTrashRoot(baseDir);
@@ -264,18 +264,18 @@ export interface DeleteOutcome {
 /**
  * **彻底删除**这些包（不进回收站）。
  *
- * 为什么除了"挪进回收站"还要有它：同步包往往是"改动唯一的备份"，所以默认那条路是先挪走、
+ * 为什么除了"移到回收站"还要有它：同步包往往是"改动唯一的备份"，所以默认那条路是先移走、
  * 还能捞回来；但某一个包你确认没用了、又不想为它把整个回收站清空时，就该能单独真删
- * （用户提的：只有"挪进回收站"不方便）。
+ * （用户提的：只有"移到回收站"不方便）。
  *
- * 界面上必须**单独确认一次**，措辞也别跟"挪进回收站"混 —— 这一步之后真的捞不回来。
+ * 界面上必须**单独确认一次**，措辞也别跟"移到回收站"混 —— 这一步之后真的捞不回来。
  */
 export async function deleteBundles(files: string[], baseDir?: string): Promise<DeleteOutcome> {
 	const outcome: DeleteOutcome = { deleted: [], failed: [] };
 	const gone: string[] = [];
 	for (const file of files) {
 		try {
-			await removeFile(file); // 文件本来就不在也算成功（可能刚被别的操作挪走）
+			await removeFile(file); // 文件本来就不在也算成功（可能刚被别的操作移走）
 			outcome.deleted.push(path.basename(file));
 			gone.push(file);
 		} catch (error) {

@@ -11,12 +11,13 @@ import { refreshBundlesAction } from './git';
 import { BundleListView } from './bundle-list';
 import { BundleLogModal } from './log-modal';
 import { openFolderInExplorer } from './reveal';
+import { cleanupStaleFullBundlesAction, rebaselineDiffAction, baselineHealthAction } from './rebaseline';
 import { mergeAdjacentBundles } from './shelf-tools';
 
 /**
  * 管理同步包：一个窗口把包文件夹里的东西全摊开 ——
  * 哪个是完整副本、哪个是更新包、多大、什么时候导的，选中就能打开所在文件夹、
- * 复制路径、删掉（挪进回收站），底下还有回收站的计数与「清空」。
+ * 复制路径、删掉（移到回收站），底下还有回收站的计数与「清空」。
  *
  * 为什么单独一个窗口，而不是只在导入弹窗里加按钮：
  * 导入弹窗的主线是"选一个包、看懂它、应用它"，管理是另一件事
@@ -37,7 +38,7 @@ export class BundleManagerModal extends Modal {
 	private dir: string;
 	private defaultDir: string;
 	private list: BundleListView | null = null;
-	/** 顶上那句"本机现在有多少改动还没发出去" */
+	/** 顶部那句"本机现在有多少改动还没发出去" */
 	private positionEl!: HTMLElement;
 	constructor(app: App, plugin: LocallySavePlugin) {
 		super(app);
@@ -80,6 +81,21 @@ export class BundleManagerModal extends Modal {
 		// ------------------------------------------------ 本机现在有多少改动还没发出去
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
+			.setName('换基准之后')
+			.setDesc('完整副本不进 git：还停在旧那台上的电脑要靠差量包才接得上；已经没人站的旧完整副本可以清掉。')
+			.addButton(button => button
+				.setButtonText('导出差量包…')
+				.setTooltip('两端都是完整副本，只装两者之间的差异，收下应用完就变成你现在这份上')
+				.onClick(() => {
+					void rebaselineDiffAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
+				}))
+			.addButton(button => button
+				.setButtonText('清理旧完整副本…')
+				.setTooltip('只列没有任何电脑还停在上面的那些；会移到回收站，能捞回来')
+				.onClick(() => {
+					void cleanupStaleFullBundlesAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
+				}));
+		new Setting(contentEl)
 			.setName('想留一个还原点？')
 			.setDesc('在「导出同步包…」里勾上「完整副本」：整个仓库写成一份包，你也会站到它上面，仓库文件不动。');
 		this.list = new BundleListView(this.plugin, contentEl, {
@@ -105,9 +121,15 @@ export class BundleManagerModal extends Modal {
 				.setTooltip('丢掉本地货架那一段没推的提交，整段对齐远程，把新包拉下来')
 				.onClick(() => { void refreshBundlesAction(this.plugin); }))
 			.addButton(button => button
-				.setButtonText('合并相邻的更新包…')
-				.setTooltip('把连着的一串小更新包并成一份大的，少几个文件要搬')
+				.setButtonText('整理更新包…')
+				.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新那一份（都移到回收站，能捞回来）')
 				.onClick(() => { void this.mergeAdjacent(); }))
+			.addButton(button => button
+				.setButtonText('完整副本体检…')
+				.setTooltip('本机基准 / 盘上的完整副本 / 各台电脑报的基准，对不对得上一眼看清')
+				.onClick(() => {
+					void baselineHealthAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
+				}))
 			.addButton(button => button
 				.setButtonText('更新记录…')
 				.setTooltip('从哪份完整副本开始、中间收发过哪些更新包')
@@ -115,6 +137,15 @@ export class BundleManagerModal extends Modal {
 			.addButton(button => button
 				.setButtonText('关闭')
 				.onClick(() => this.close()));
+	}
+
+	/**
+	 * 列表与顶部那句一起刷新（导完差量包 / 清完旧完整副本之后）。
+	 * 别只刷列表：顶部那句写的是"我现在用哪一份上"，包一移就过时了。
+	 */
+	private async refreshAll(): Promise<void> {
+		await this.list?.refresh();
+		await this.renderPosition();
 	}
 
 	/**
@@ -130,7 +161,7 @@ export class BundleManagerModal extends Modal {
 	}
 
 	/**
-	 * 顶上那句：**本机现在有多少改动是完整副本里没有的**。
+	 * 顶部那句：**本机现在有多少改动是完整副本里没有的**。
 	 *
 	 * 这句话是"下次留包会装多少"的依据 —— 也就是"我现在站的那一份是哪一个"。
 	 * 还没有完整副本时如实说"算不出来"，不硬凑一个数。

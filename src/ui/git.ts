@@ -9,6 +9,7 @@ import { exportBundle } from '../bundle/export';
 import { bundleTrashRoot, listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
 import { readPeers, writePeer, describePeerDetail, needsPeerRefresh } from '../git/peers';
+import { readRemovals } from '../git/removals';
 import { runGit } from '../git/run';
 import { isShelf, prepareShelf } from '../git/shelf';
 import type { ShelfOptions } from '../git/shelf';
@@ -70,7 +71,7 @@ function shelfOptions(plugin: LocallySavePlugin): ShelfOptions | null {
  * 和远程对一遍（提交 → 拉 → 推）。
  *
  * 同一时间只允许一次：留包 / 收包 / 应用进行中也会让路 —— 同步会动包文件夹里的文件，
- * 应用正读着某个包时把它挪走就麻烦了。
+ * 应用正读着某个包时把它移走就麻烦了。
  */
 export async function syncGitNow(
 	plugin: LocallySavePlugin,
@@ -236,9 +237,9 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 }
 
 /**
- * **对方站在别的基准上时，导出前提醒一句**（0.15.9）。
+ * **对方停在别的基准上时，导出前提醒一句**（0.15.9）。
  *
- * 导出默认从"我站的那份完整副本"算起；对方若还站在更老（或另一份）完整副本上，
+ * 导出默认从"我站的那份完整副本"算起；对方若还停在更老（或另一份）完整副本上，
  * 这份包它接不上。这里直接说清"从哪一份开始它才接得上"、以及本机有没有那份副本。
  *
  * 只读 peer 文件；包目录没填 / 状态读不出 / peers 读不出都返回 null ——
@@ -268,9 +269,9 @@ export function peerBaselineHint(plugin: LocallySavePlugin): string | null {
 		const who = peer.host || peer.copyId.slice(0, 8);
 		const short = (peer.baselineHash ?? '').slice(0, 8);
 		if (anchors.some(anchor => anchor.hash === peer.baselineHash)) {
-			return `${who} 站在基准 ${short}：导出前把「更新包：从哪个状态开始」选成它，对方才接得上`;
+			return `${who} 以基准为准 ${short}：导出前把「更新包：从哪个状态开始」选成它，对方才接得上`;
 		}
-		return `${who} 站在基准 ${short}，本机没有它的完整副本：让它发一份完整副本过来，或把本机这份基准发给它`;
+		return `${who} 以基准为准 ${short}，本机没有它的完整副本：让它发一份完整副本过来，或把本机这份基准发给它`;
 	});
 	return lines.join('；');
 }
@@ -558,7 +559,7 @@ export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 /**
  * 「让我和对面一致」：拉下来，然后用对方最新的更新包**严格对齐**到它那一份状态。
  *
- * 对齐全走引擎的严格镜像：本机改过的、多出来的文件先挪进回收目录（备份），
+ * 对齐全走引擎的严格镜像：本机改过的、多出来的文件先移到回收目录（备份），
  * 目标状态 ＝ 我站的基准 ＋ 包里的条目 − 包点名的删除 —— 正好是对方那一点，做完状态编号一致。
  * 会覆盖本机内容，所以先弹一句确认。
  */
@@ -607,7 +608,7 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 		title: '让我和对面一致',
 		lines: [
 			`会用对方的更新包「${target.name}」把本机改成对面那一份状态。`,
-			'本机改过或多出来的文件会先挪进回收目录（.trash/locally-save），能捞回来。',
+			'本机改过或多出来的文件会先移到回收目录（.trash/locally-save），能捞回来。',
 			'做完两边状态编号应当一致；你的新改动之后靠「让对面和我一致」推回去。',
 		],
 		confirmText: '以对面为准',
@@ -640,6 +641,38 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 	if (plugin.gitBusy || plugin.bundleBusy || plugin.incomingBusy || isApplying()) {
 		new Notice('正在同步 / 应用，等这一步做完再刷新', 6000);
 		return;
+	}
+	/**
+	 * **防呆：刷新会把"还没推上去的东西"一起丢掉**（0.18.2，用户报的现场：
+	 * 删掉一份包之后立刻点「刷新包」，那份包又被 `reset --hard origin` 拉回来了）。
+	 *
+	 * 删除在本地是一笔**还没提交/推送的改动**，刷新是"整段对齐远程"——两者一撞，
+	 * 用户看到的就是"删了又回来"。所以先算清楚会丢什么，让他明确点一次。
+	 */
+	{
+		const status = await readShelfStatus(shelf).catch(() => null);
+		const pending = readRemovals(shelf.dir).size;
+		const ahead = status?.ahead ?? 0;
+		if (ahead > 0 || pending > 0) {
+			const lines = [
+				'刷新是「整段对齐远程」：本地还没推上去的东西会被丢掉，远程还留着的包会重新拉下来。',
+			];
+			if (pending > 0) {
+				lines.push(`有 ${pending} 处删除还没推上去 —— 刷完之后那些包会回来。`);
+			}
+			if (ahead > 0) lines.push(`本地还有 ${ahead} 笔提交没推上去（可能含刚导的包 / 刚删的包）。`);
+			lines.push('确定要丢吗？只想把删除推走，先点一次「立即同步」。');
+			const ok = await new Promise<boolean>(resolve => {
+				const modal = new ConfirmModal(plugin.app, {
+					title: '刷新会丢掉本地没推上去的改动',
+					lines,
+					confirmText: '仍然刷新',
+					onResolve: value => { resolve(value); void modal; },
+				});
+				modal.open();
+			});
+			if (!ok) return;
+		}
 	}
 	plugin.gitBusy = true;
 	try {

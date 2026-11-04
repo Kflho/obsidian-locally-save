@@ -75,18 +75,18 @@ export function describeStateId(info: StateIdInfo | null | undefined): string {
 }
 
 /**
- * 同步包界面上那一行「本机现在站在哪儿」——**世代与状态编号必须一起写**。
+ * 同步包界面上那一行「本机现在在哪儿」——**世代与状态编号必须一起写**。
  *
  * 为什么不能只写世代号：它只说"内容走到第几版"，
  * 回答不了"两边文件一样吗"；状态编号才回答得了。用户专门提过要两个一起看。
  *
- * "站在哪一份完整副本上"也要写：0.14 起**只有完整包会改变这个位置**
+ * "用哪一份完整副本上"也要写：0.14 起**只有完整包会改变这个位置**
  * （导出 / 应用更新包都不动它），互发更新包的两台机器认的就是它。
  */
 export function describeLocalState(state: PluginState): string {
 	const bundle = state.bundle;
 	const anchor = bundle?.fullGeneration !== null && bundle?.fullGeneration !== undefined
-		? `站在第 ${bundle.fullGeneration} 代那份完整副本上${bundle.fullFile ? `（${bundle.fullFile}）` : ''}`
+		? `本机基准：第 ${bundle.fullGeneration} 代那份完整副本${bundle.fullFile ? `（${bundle.fullFile}）` : ''}`
 		: '还没有完整副本（没导过、也没应用过）';
 	const id = state.stateId ? `状态 ${state.stateId.id}` : '状态编号还没算过（下次导出 / 应用时会有）';
 	return `本机：第 ${state.generation} 代 · ${anchor} · ${id}`;
@@ -95,10 +95,10 @@ export function describeLocalState(state: PluginState): string {
 /**
  * 一次导出结果里那句"从哪一份到哪一份"（通知与弹窗里用）。
  *
- * 两个号都写出来：**起点从哪一代、这一份落到第几代** —— 用户要的就是这个
+ * 两个号都写出来：**起点从哪一代、这一份变成第几代** —— 用户要的就是这个
  * （"54 → 55"）；回退之后再导出时，落点号从高水位往后发，这里一看就知道没撞号。
  * 差量包要点明**内容到那一刻为止**（它不代表你现在的仓库）；起点一律带上**基准指纹**——
- * 对方「更新记录」顶上写的就是它，对不上就是"基准对不上"（世代号说不出是哪一份完整副本，光看代认不出来）。
+ * 对方「更新记录」顶部写的就是它，对不上就是"基准对不上"（世代号说不出是哪一份完整副本，光看代认不出来）。
  */
 export function describeExportRange(outcome: ExportOutcome): string {
 	const anchor = outcome.anchor;
@@ -124,11 +124,11 @@ export function describeExportStart(
 ): string {
 	// 起点那两个号就在同一行的 `describeExportRange` 里，这里只补一句"从哪儿算起"
 	if (!start || start.picked !== 'self') return '';
-	return '从你站的那份完整副本算起';
+	return '从本机现在的基准算起';
 }
 
 /**
- * 顶部那句"我现在站在哪儿"：
+ * 顶部那句"我现在在哪儿"：
  * - 你站的是哪一份完整副本（文件名 + 世代 + 指纹）
  * - 之后应用过几个更新包、导出过几个，最近一次是什么时候
  */
@@ -136,12 +136,12 @@ export function describeBundlePosition(state: PluginState): string[] {
 	const lines: string[] = [];
 	const bundle = state.bundle;
 	if (!bundle) {
-		lines.push('还没有站上过完整副本：先导出一份完整副本，或者应用对方发来的完整副本。');
+		lines.push('本机还没有基准：先导出一份完整副本，或者应用对方发来的完整副本。');
 		return lines;
 	}
 	const name = bundle.fullFile ?? '（磁盘上没有它的包文件：清单记在状态里）';
 	lines.push(
-		`你站的那份完整副本：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}`,
+		`本机基准：第 ${bundle.fullGeneration ?? '?'} 代 · 指纹 ${bundle.fullHash ?? '未知'} · ${name}`,
 	);
 	/**
 	 * 「我现在长什么样」—— 用**状态编号**说，不用世代号。

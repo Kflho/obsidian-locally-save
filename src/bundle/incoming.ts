@@ -260,7 +260,24 @@ export async function handleIncoming(
 			};
 		}
 
-		const applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
+		let applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
+		/**
+		 * **差量包一律按严格镜像应用**（0.18，硬边界，不是提示）。
+		 *
+		 * 差量包（头部 `targetFullBundle`）送到的是**另一份完整副本**，应用完我就该站到那份上。
+		 * 跟着 `normal` 合并走会坏在这件事上：合并档把"我这一半"留下，而 `apply.ts` 算新基准
+		 * 用的是"应用前的清单 ＋ **真的写成了一致**的条目 − 点名删除" —— 冲突里赢下本机那一版
+		 * 的路径因此不在清单里，新基准令牌就记成**祖先那一版**：既不等于旧基准，也不等于包里报的
+		 * `targetBaselineHash`（实测：`test/rebaseline.test.ts` 第 5 组末尾那条对照）。
+		 * 之后对面按新基准导出的更新包一律"基准对不上"，这台机器就永远卡住了。
+		 *
+		 * 镜像档下结果是确定的 ＝ 包里那一点，写入指纹正好等于头部报的那个。
+		 * 代价：本机被覆盖 / 多出来的文件进回收目录（严格档必然备份），捞得回来；
+		 * 「双向」方向仍会先问一句（`policy.confirm`），只有开了无人值守那条路才直接落。
+		 */
+		if (candidate.bundle.header?.targetFullBundle === true && applyOptions.strictness !== 'mirror') {
+			applyOptions = { ...applyOptions, strictness: 'mirror' };
+		}
 
 		/**
 		 * **同一代只吃最新的那一份**（用户 2026-10-26 拍板："更新包只留最新的就行了"）。
@@ -396,7 +413,7 @@ export async function handleIncoming(
 		let result = await executeBundlePlan(plan, applyOptions);
 		/**
 		 * **「仅拉」做完了要核对**：这个方向的承诺是"跟对面严格相等"。
-		 * 有动作没落地、或者编号对不上（本机被改乱过）→ 强制回退到基准再应用一遍。
+		 * 有动作没写入、或者编号对不上（本机被改乱过）→ 强制回退到基准再应用一遍。
 		 * 这是"不管本机怎么改过都能成功"的最后一道闸（`recoverToBaselineAndApply`）。
 		 */
 		let recovered = false;
@@ -621,9 +638,9 @@ export async function sweepIncoming(
 	 * **起点不是我站的那一份、但落点算出来对得上的包**：也要能自动接。
 	 *
 	 * 用户报的现场：只拉那台误改了一行，对方（只推）导了一份"从旧完整副本到最新"的恢复包；
-	 * 只拉那台的起点已经被它自己导出的完整副本挪走了 —— 按上面的"起点严格相等"永远挑不到它，
+	 * 只拉那台的起点已经被它自己导出的完整副本移走了 —— 按上面的"起点严格相等"永远挑不到它，
 	 * 只能手动应用。可这份包的内容是确定的：**我现在的清单 ＋ 条目 − 删除**正好等于它头部报的
-	 * 落点指纹（`landsOnTarget`），应用完一定落到那道状态，不会"猜着合"。
+	 * 落点指纹（`landsOnTarget`），应用完一定变成那道状态，不会"猜着合"。
 	 *
 	 * 只处理落点对得上的，最多 16 份（防御坏目录）；同一轮里按目标世代从大到小挑，
 	 * 应用一份后状态变了，其余候选下一轮再算 —— 不拿旧计划硬套新状态。

@@ -6,7 +6,7 @@ import { STATE_FILE_NAME, loadStateSync } from './sync/state';
 import type { PluginState } from './sync/state';
 import { bundleBaseDir } from './bundle/paths';
 import { needsPeerRefresh, readPeers } from './git/peers';
-import { applyBundleAction, checkIncomingBundles, exportBundleAction, exportBundlesNow, isReceiveOnly, syncNow } from './ui/actions';
+import { applyBundleAction, checkBundleGc, checkIncomingBundles, exportBundleAction, exportBundlesNow, isReceiveOnly, syncNow } from './ui/actions';
 import { maybeGitSync, syncGitNow } from './ui/git';
 import { registerBundleDropTarget } from './ui/drop-watch';
 import { registerProtocolHandler } from './ui/protocol';
@@ -321,9 +321,15 @@ export default class LocallySavePlugin extends Plugin {
 		await syncGitNow(this, { quiet: true, background: true });
 	}
 
-	/** 一拍的实际内容（异步）：**先和远程对一遍**，再收包，最后才考虑留包 */
+	/** 一拍的实际内容（异步）：**先整理包、再和远程对一遍**，然后收包，最后才考虑留包 */
 	private async runTick(): Promise<void> {
-		// 先 git：拉下来的包，紧接着的收包就能看见（不用等下一拍）
+		/**
+		 * **先整理更新包，再推拉**（0.18.2）：把"起点已经没人用 / 同组里还有更新的一份"移到回收站。
+		 * 放在推拉**之前**，这一拍就会把删除提交并推走 —— 别的终端下一次拉取跟着没掉。
+		 * 它只看包目录里那几个头部（不扫仓库），失败了也不影响同步本身。
+		 */
+		await checkBundleGc(this);
+		// 再 git：拉下来的包，紧接着的收包就能看见（不用等下一拍）
 		await maybeGitSync(this);
 		/**
 		 * **正在打字就别动仓库**（用户报的："刚才我打字被强制同步了"）。
@@ -347,7 +353,7 @@ export default class LocallySavePlugin extends Plugin {
 		const acted = await checkIncomingBundles(this);
 		if (acted) {
 			/**
-			 * 刚应用完：**立刻把"我已经落到这一代"写进货架并推上去**。
+			 * 刚应用完：**立刻把"我已经变成这一代"写进货架并推上去**。
 			 * 不推的话要等下一拍（30 秒）才有人写 peer 文件 —— 这半分钟里对面拉到的
 			 * 还是应用前的状态，状态栏会写"对方：不同步"（用户报的就是应用完之后仍报不同步）。
 			 * 这一拍仍然**不留包**：刚应用完就留包等于马上回礼，两边容易来回搬运。

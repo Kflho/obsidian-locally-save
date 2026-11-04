@@ -16,7 +16,7 @@ import type { FieldSection } from './types';
  * 「高级」一页：**日常用不到的东西全收在这儿**。
  *
  * 用户提过"包设置太繁琐"：主页面只留同步 / 文件夹 / 导出管理，
- * 进包规则、更新包起点终点、校验、拖放、自动应用、git 细节都挪到这。
+ * 进包规则、更新包起点终点、校验、拖放、自动应用、git 细节都移到这。
  * 这些设置本身都还有用（不是删掉），只是不该挡在第一次用的人面前。
  */
 export const ADVANCED_SECTION: FieldSection = {
@@ -47,7 +47,7 @@ export const ADVANCED_SECTION: FieldSection = {
 				{
 					key: 'changesFromState',
 					name: '从哪个状态开始',
-					desc: '默认是你站的那份完整副本。只有对方还停在更老的一份上时才需要改。',
+					desc: '默认是本机现在的基准。只有对方还停在更老的一份上时才需要改。',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
@@ -60,7 +60,7 @@ export const ADVANCED_SECTION: FieldSection = {
 				},
 				{
 					key: 'bundleSizeWarnLimit',
-					name: '攒大了提醒立新基准',
+					name: '变大了提醒立新基准',
 					desc: '更新包超过这个大小时，提醒你导一份新的完整副本换基准。',
 					control: { type: 'dropdown', options: SIZE_WARN_OPTIONS },
 					coerce: value => coerceNumberChoice(
@@ -132,7 +132,7 @@ export const ADVANCED_SECTION: FieldSection = {
  */
 function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
 	const fallback = end === 'from'
-		? { [LATEST_STATE]: '自动：我站的那份完整副本' }
+		? { [LATEST_STATE]: '自动：本机现在的基准' }
 		: { [LATEST_STATE]: '最新（当前仓库）' };
 	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
 	try {

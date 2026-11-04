@@ -33,7 +33,7 @@ import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../syn
  *
  * **界面上的手动应用只有一种语义：严格同步**（`strictness: 'mirror'`，见 `APPLY_CHOICES`）——
  * 包里点名的文件一律用包里的版本（本地那份先进回收目录）、`header.deleted` 点名的照删、
- * 本地多出来的文件也挪进回收目录。应用完**仓库 == 包送到的状态**，两边的状态编号当场可比
+ * 本地多出来的文件也移到回收目录。应用完**仓库 == 包送到的状态**，两边的状态编号当场可比
  * （见 `sync/state-id.ts`）。这是「基准点链条」能成立的前提：链条上的每个点内容都是确定的，
  * 谁也不必猜着合，文件也就不会冲突。
  *
@@ -88,15 +88,15 @@ export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 	full: [
 		{
 			key: 'mirror',
-			label: '完全镜像（完整副本只有这一种）：包里没有的本地文件全挪进回收目录，仓库 = 包',
+			label: '完全镜像（完整副本只有这一种）：包里没有的本地文件全移到回收目录，仓库 = 包',
 			strictness: 'mirror',
 		},
 	],
 	changes: [
 		{
 			key: 'strict',
-			label: '严格同步（更新包只有这一种）：包里点名的文件一律用包里的版本（本地那份先挪进回收目录），'
-				+ '点名的删除照删，包里送到的状态里没有的本地文件也挪走 —— 应用完这个仓库就是包里的样子',
+			label: '严格同步（更新包只有这一种）：包里点名的文件一律用包里的版本（本地那份先移到回收目录），'
+				+ '点名的删除照删，包里送到的状态里没有的本地文件也移走 —— 应用完这个仓库就是包里的样子',
 			strictness: 'mirror',
 		},
 	],
@@ -144,7 +144,7 @@ export interface ApplyOptions {
 	 *
 	 * - `mirror`（界面上的手动应用一律用它）：**应用完仓库 == 包送到的状态** ——
 	 *   包里点名的用包里的版本（本地那份进回收目录）、`header.deleted` 点名的照删、
-	 *   本地多出来的也挪进回收目录。完整副本与更新包走的是同一套语义；
+	 *   本地多出来的也移到回收目录。完整副本与更新包走的是同一套语义；
 	 * - `normal`（不填时的默认）：走 `planSync` 三方比对 —— 本地改过的保留、分歧留两份、
 	 *   我独有的文件不动。**只有自动收包（`incoming.ts`）与接链（`chain.ts`）在用**：
 	 *   那条路的边界是"只应用不会动到本地已有东西的包"，合并语义正好对上；
@@ -168,7 +168,7 @@ export interface ApplyOptions {
 	 * 为什么不能只靠 `alignToPeer`：完整副本走的是完全镜像，那条路本来就**不**开 `alignToPeer`
 	 * （它用不到"从基准恢复误改"），可「仅拉」的方向对完整副本同样成立 ——
 	 * 报告里的 `pendingChanges` / `pendingDeletes` 要记 0，界面才不会说
-	 * "你这边还有 N 个改动没发出去"、`state.pendingReturn` 也不会挂一笔永远发不出去的账。
+	 * "你这边还有 N 个改动没发出去"、`state.pendingReturn` 也不会记一笔永远发不出去的账。
 	 * 应用前"把我这一半存成包"那一步同理（`shouldParkLocalChanges`）。
 	 */
 	receiveOnly?: boolean;
@@ -187,7 +187,7 @@ export interface ApplyOptions {
 	/**
 	 * 被删掉 / 被覆盖的本地版本先进回收目录。
 	 *
-	 * **严格档（`mirror` / `bundle-wins`）忽略这一项、必然备份**：那几个档会覆盖 / 挪走
+	 * **严格档（`mirror` / `bundle-wins`）忽略这一项、必然备份**：那几个档会覆盖 / 移走
 	 * 本地已有的东西，"关掉回收 + 严格档" = 不可恢复的批量删除，这个组合不给走。
 	 */
 	keepBackup?: boolean;
@@ -196,7 +196,7 @@ export interface ApplyOptions {
 
 /** 应用前的体检报告：接收方靠它判断"这次能同步到什么程度、会动哪些东西" */
 export interface ApplyReport {
-	/** 走的哪条通道：快速（血脉世代一致）还是逐文件合并 */
+	/** 走的哪条通道：快速（分支世代一致）还是逐文件合并 */
 	mode: 'fast' | 'merge';
 	sameLineage: boolean;
 	sameGeneration: boolean;
@@ -257,7 +257,7 @@ export interface ApplyReport {
 	 *
 	 * 用来认出这种情况：这个包的目的地**正好就是我这边的基准** ——
 	 * 那它点名要送的东西我全都有，应用它不会改动任何文件（用户实测遇到过：
-	 * 把"第 32 → 36 代"的包发给一台**已经站在第 36 代**上的机器，
+	 * 把"第 32 → 36 代"的包发给一台**已经基准是第 36 代**上的机器，
 	 * 那边只看到一句"基准对不上"，看不出这其实是白跑一趟）。
 	 */
 	targetBaseline: string | null;
@@ -265,8 +265,8 @@ export interface ApplyReport {
 	targetIsMine: boolean;
 	/**
 	 * **本机站的这一点在这个包的路线上**（头部的 `viaHashes` 里有它）——
-	 * 合并相邻更新包之后常见：链条上只剩两端的点，而我站在被吞掉的某一个点上。
-	 * 应用它照样直接落到落点（中间那几环不必补），界面上要说清这一点，别只报"基准对不上"。
+	 * 合并相邻更新包之后常见：链条上只剩两端的点，而我停在被吞掉的某一个点上。
+	 * 应用它照样直接变成落点（中间那几环不必补），界面上要说清这一点，别只报"基准对不上"。
 	 */
 	viaMine: boolean;
 	/**
@@ -283,7 +283,7 @@ export interface ApplyReport {
 	/** 其中"本地有、包里没有、且基准里也有"的（＝对方删过的） */
 	extraDeletes: number;
 	/**
-	 * 严格档（「严格同步」）下"本地多出来、要挪进回收目录"的文件数。
+	 * 严格档（「严格同步」）下"本地多出来、要移到回收目录"的文件数。
 	 *
 	 * 它也算在 `deletes` 里（通知里报的总数要对得上），单独拎出来是为了让界面说清楚：
 	 * "删 3 个"里有 2 个其实是我自己新建的、包里送到的状态里没有它们。
@@ -294,7 +294,7 @@ export interface ApplyReport {
 	 *
 	 * 只拉不推的机器规则是"跟对面严格相等"：对方包里只装变过的文件，本机在没被点名的
 	 * 文件上误改了，正常镜像会把它当成"我这一半"留着 —— 状态编号就永远差一点。
-	 * 这一档会从起点那份完整副本里读回原版、把误改挪进回收目录，应用完编号才对得上。
+	 * 这一档会从起点那份完整副本里读回原版、把误改移到回收目录，应用完编号才对得上。
 	 */
 	restored: number;
 	/** 本地与包已经完全一致的条目数 */
@@ -314,10 +314,10 @@ export interface ApplyReport {
 	pendingDeletes: number | null;
 	/** 同步程度：已一致 / 总条目（0–100） */
 	syncPercent: number;
-	/** 会认出来的移动（改名/挪目录） */
+	/** 会认出来的移动（改名/移目录） */
 	moves: number;
 	/**
-	 * 其中"目标位置已经有东西"的移动（严格档会先把那份挪进回收目录的「冲突」再搬）。
+	 * 其中"目标位置已经有东西"的移动（严格档会先把那份移到回收目录的「冲突」再搬）。
 	 *
 	 * 为什么会发生：更新包是**累积**的，同一条移动会一直带在包里；接收方上次已经搬过、
 	 * 后来旧路径又被重新建了出来（改名时旧文件夹留成空壳、用户手建、`emptyDirs` 补建都算）。
@@ -331,8 +331,8 @@ export interface ApplyReport {
 	/** 想删却删不掉的本地文件夹：清单里看不到东西、磁盘上还有（被排除规则挡住的文件） */
 	foldersKept: number;
 	/**
-	 * **应用完我站的基准会跟着落到这儿**（见 `ApplyPlan.adoptBaseline`）—— `null` ＝ 基准不动。
-	 * 界面上说一句：用户盯着"我站在第几代"这个数，它动了就得让他知道。
+	 * **应用完我站的基准会跟着变成这儿**（见 `ApplyPlan.adoptBaseline`）—— `null` ＝ 基准不动。
+	 * 界面上说一句：用户盯着"我基准是第几代"这个数，它动了就得让他知道。
 	 */
 	baselineAdopted: { generation: number; hash: string } | null;
 	/** 包里一共有多少个文件夹（含空文件夹，以及"有文件的"那些目录） */
@@ -351,7 +351,7 @@ export interface ApplyReport {
 /** 一条要落盘的动作（由比对结果翻译而来） */
 export type ApplyAction =
 	/**
-	 * 用包里的内容写进这个路径（新增或覆盖）；backup ＝ 先把本地那份挪进回收目录。
+	 * 用包里的内容写进这个路径（新增或覆盖）；backup ＝ 先把本地那份移到回收目录。
 	 *
 	 * `sourceFile` / `sourceInfo` 不填 ＝ 内容取自**当前这份包**。
 	 * 只有「接上后续基准」（`baselineAnchor`）那条路会填：那时"对方那一点"＝
@@ -364,10 +364,10 @@ export type ApplyAction =
 	/** 两边都改过：留两份，新的占原名 */
 	| { kind: 'conflict'; path: string; entry: BundleEntry; winner: 'local' | 'remote' }
 	/**
-	 * 对方改名/挪了位置：本地跟着改名，不重传内容。
+	 * 对方改名/移了位置：本地跟着改名，不重传内容。
 	 *
 	 * `replace` ＝ 目标位置已经有东西（多半是**同一份累积包里这条移动早就做过**、
-	 * 旧路径又被重新建了出来）。严格档下以包为准：先把目标那份挪进回收目录的「冲突」，
+	 * 旧路径又被重新建了出来）。严格档下以包为准：先把目标那份移到回收目录的「冲突」，
 	 * 再把源搬过去 —— 这是"目标已存在"唯一会被自动执行的那条路（见 `moveSpecs` 那段）。
 	 */
 	| { kind: 'rename'; path: string; from: string; dir?: boolean; replace?: boolean }
@@ -412,7 +412,7 @@ export interface ApplyPlan {
 	 *
 	 * 为什么执行阶段还要它：这类移动**没有动作**（不需要再搬），可状态里的记录还停在旧路径。
 	 * 不把记录跟着搬过去，下一份累积包还会按旧路径算"点上该有什么"，于是刚搬过去的东西
-	 * 又被当成"本地多出来的"挪进回收目录（用户报的「application 里只剩 1111」就是这个）。
+	 * 又被当成"本地多出来的"移到回收目录（用户报的「application 里只剩 1111」就是这个）。
 	 */
 	relocated: { from: string; to: string }[];
 	/**
@@ -426,7 +426,7 @@ export interface ApplyPlan {
 	 * **两道闸**（少一道就会记上一个假点）：
 	 * - 头部得写着 `baseFullBundle`：起点**真是一份完整副本**。合成出来的那种不算 ——
 	 *   "应用前先把本机改动存成包"那一份的起点是"对方那份包送到的那一点"（一个状态），
-	 *   谁手里都没有它的包文件，接上去两边就再也说不清站在哪一份上了；
+	 *   谁手里都没有它的包文件，接上去两边就再也说不清用哪一份上了；
 	 * - 清单是**倒推**出来的（落点里包点名的路径换回它带的 `base` 版本），
 	 *   并且要用头部那个 `baselineHash` **验一遍**；验不过（旧包没带 base、有条目没写成）
 	 *   就是 `null`，宁可不动。
@@ -488,7 +488,7 @@ export function isDestructivePlan(plan: ApplyPlan): boolean {
  * 这次应用之前要不要"先把本机改动存成包"（`parkLocalChangesFor`）。
  *
  * 三个条件缺一不可：
- * - **严格档**：只有它会覆盖 / 挪走本机的东西，存一份才有意义；
+ * - **严格档**：只有它会覆盖 / 移走本机的东西，存一份才有意义；
  * - **不是对齐到对面**：目标就是对方那一点，本机误改会从基准恢复（`restore`），
  *   不是要回传的那一半；
  * - **不是「仅拉」**：只收不发的机器一个包都不写。完整副本走完全镜像、`alignToPeer`
@@ -575,7 +575,7 @@ function matchesHistory(local: FileRecord, entry: BundleEntry): boolean {
 
 /** 共同祖先检查的结论 */
 type AncestorCheck =
-	/** 放行。`first` ＝ 本机第一份（还没有基准）／`full` ＝ 同一条血脉的新完整副本／`update` ＝ 接在同一份基准上的更新包 */
+	/** 放行。`first` ＝ 本机第一份（还没有基准）／`full` ＝ 同一条分支的新完整副本／`update` ＝ 接在同一份基准上的更新包 */
 	| { ok: true; kind: 'first' | 'full' | 'update'; viaLanding?: boolean }
 	/**
 	 * 拒绝。`missingBaseline` ＝ **这个包自己声明了起点**、而那份完整副本跟我记的基准不是同一份：
@@ -613,7 +613,7 @@ interface BaselineAnchor {
  *
  * 为什么要有它：`planBundleApply` 抛错时界面只能显示一句话。这里需要的不是"再说一遍错"，
  * 而是**"那份包在本机，要不要按它对齐"** —— 界面据此出按钮，`recoverToBaselineAndApply`
- * 拿着 `file` 就能落地。
+ * 拿着 `file` 就能写入。
  */
 export interface BaselineResetHint {
 	/** 包声明的起点完整副本（本机上的绝对路径） */
@@ -645,7 +645,7 @@ function listingOfFullHeader(header: BundleHeader): Record<string, FileRecord> {
 /**
  * **包的起点是本机** → 按它「接上后续基准」；否则给一条"只能镜像"的指路。
  *
- * 怎么判"接得上"：同一血脉里，包的起点（那份完整包的世代）**比我站的基准更靠后**。
+ * 怎么判"接得上"：同一分支里，包的起点（那份完整包的世代）**比我站的基准更靠后**。
  * 这时正确做法不是拒收，也不是先镜像 500MB，而是**三方合并**：
  *
  * - 祖先 ＝ **我记的基准的清单**（`state.bundle.fullFiles`，我最清楚"我相对它改了什么"）；
@@ -684,9 +684,9 @@ function resolveAnchor(
 		&& theirs !== null
 		&& theirs > mine
 		// 差量包是"完整包 → 完整包"的搬运体：它的终点就是一份完整副本，
-		// 站在更老的基准上时别拿它当中转（让对方直接发那份完整副本更直白）。
+		// 停在更老的基准上时别拿它当中转（让对方直接发那份完整副本更直白）。
 		&& header.targetFullBundle !== true
-		// 同一条血脉才算"后续基准"：别的血脉的代数是它自己数的，拿它当"更靠后"没意义
+		// 同一条分支才算"后续基准"：别的分支的代数是它自己数的，拿它当"更靠后"没意义
 		&& header.lineage === state.lineage
 		&& options.alignToPeer !== true;
 	if (canCatchUp && baseListing !== null && mine !== null) {
@@ -714,7 +714,7 @@ function resolveAnchor(
 		? '「仅拉」要求应用完与对面严格相等，本机这一半不能留'
 		: baseListing === null || mine === null
 			? '本机记录里没有可比对的基准清单（老状态文件），说不清"我相对起点改了什么"'
-			: `包的起点是第 ${theirs ?? '?'} 代，并不比本机站的基准（第 ${mine} 代）靠后 —— 接上去等于往回走`;
+			: `包的起点是第 ${theirs ?? '?'} 代，并不比本机的基准（第 ${mine} 代）靠后 —— 接上去等于往回走`;
 	return {
 		hint: {
 			file: source.file,
@@ -745,7 +745,7 @@ function resolveAnchor(
  */
 /**
  * **"算一遍落点"对不对**：我现在的清单 ＋ 这个包的条目 − 点名的删除，
- * 算出来的指纹等于包头部报的 `targetBaselineHash` → 应用完正好落到对方那一点。
+ * 算出来的指纹等于包头部报的 `targetBaselineHash` → 应用完正好变成对方那一点。
  *
  * 同一个判据两处用：`checkAncestor`（应用前放行）与 `incoming.ts`（自动收包时，
  * 起点不是我站的那一份、但落点对得上的恢复包也要能接）。**只读、只看头部与状态记录**，
@@ -796,10 +796,10 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		 * **包覆盖了本机站的这一点 → 放行**（用户拍板的规则："覆盖对方基准点的任意更新包都是可加载的"）。
 		 *
 		 * 什么时候会出现：合并相邻更新包之后（`bundle/merge.ts`），链条上只剩两端的点，
-		 * 而对方还站在被吞掉的某一个点上（他上次收到的就是那一环）。那个点在**这个包的路线上**
+		 * 而对方还停在被吞掉的某一个点上（他上次收到的就是那一环）。那个点在**这个包的路线上**
 		 * 时（头部 `viaHashes`），包里装的就是"从他这一点往后所有变过的文件"：
 		 * - 路线上相邻两点之间"没变过"的文件，在他的点上与他手里的版本一致，不在包里（也不用动）；
-		 * - "变过"的都在包里，而且装的是**落点那一版** —— 写完就正好落到落点。
+		 * - "变过"的都在包里，而且装的是**落点那一版** —— 写完就正好变成落点。
 		 * 所以这种情况下严格镜像照样成立，不必让他先补中间那几环。
 		 *
 		 * **兄弟不算覆盖**：同一个起点导出的两份不同落点的包，谁也不在谁的路线上（`viaHashes`
@@ -809,11 +809,11 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 			return { ok: true, kind: 'update' };
 		}
 		/**
-		 * **算一遍"应用完我会落到哪一点"，跟包里报的落点比一比。**
+		 * **算一遍"应用完我会变成哪一点"，跟包里报的落点比一比。**
 		 *
-		 * 怎么算：我这边现在的样子 ＋ 包里的条目 − 包里点名的删除 —— 这就是接收方应用完真正会落到的
+		 * 怎么算：我这边现在的样子 ＋ 包里的条目 − 包里点名的删除 —— 这就是接收方应用完真正会变成的
 		 * 那一份清单（严格镜像就是这么算的，见执行阶段那个 `nextFullFiles`）。它等于包头部报的
-		 * `targetBaselineHash`，就说明**应用完正好落到对方那一点**：跟落点不一样的那些路径全在包里，
+		 * `targetBaselineHash`，就说明**应用完正好变成对方那一点**：跟落点不一样的那些路径全在包里，
 		 * 一样的一条没动。那跟"起点严格相等"是一回事，收下它是确定的。
 		 *
 		 * 用 `files`（我这边现在的样子）而不是 `fullFiles`（我站的那份完整包）：0.14 起两者会不一样 ——
@@ -822,7 +822,7 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 		 *
 		 * 为什么光有 `viaHashes` 还不够（用户实测）：**中间隔了一份完整副本**之后，
 		 * 旧的那些环会被那份完整副本清掉（`removeSupersededChanges`：完整清单取代老环），
-		 * 于是"沿来路认点"就认不出对方站在哪 —— 而内容上他确实在路线上，算一遍就能证明。
+		 * 于是"沿来路认点"就认不出对方用哪 —— 而内容上他确实在路线上，算一遍就能证明。
 		 * （0.14 起新包不再写 `viaHashes` 了，这一条判据是主力。）
 		 */
 		if (landsOnTarget(state, header)) {
@@ -840,7 +840,7 @@ function checkAncestor(state: PluginState, header: BundleHeader): AncestorCheck 
 			: '';
 		return {
 			ok: false,
-			message: `接不上，不合并：这个更新包是从「${theirs}」这份完整副本往外算的，本机站在「${mine}」上${at}。`
+			message: `接不上，不合并：这个更新包是从「${theirs}」这份完整副本往外算的，本机的基准是「${mine}」${at}。`
 				+ '不是同一份基准，插件不猜着合（基准不是同一份时，本机一批文件会被当成“对方删过它们”）。\n'
 				+ '二选一：\n'
 				+ `① 让对方按本机这份基准重导一份更新包：导出时把「更新包：从哪个状态开始」选成`
@@ -866,7 +866,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	/**
-	 * **先扫一遍库**（挪到基准检查前面）：下面「按包的起点对齐」那一步要拿本机清单
+	 * **先扫一遍库**（移到基准检查前面）：下面「按包的起点对齐」那一步要拿本机清单
 	 * 跟**包声明的那份起点完整包**的清单逐条比 —— 得先有 `local` 才能判"本机在不在那条线上"。
 	 * 一次扫描，后面三方比对、镜像都复用它，没有多花时间。
 	 */
@@ -885,13 +885,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * `base` 就对不上，两台机器开始互相报"基准对不上"（用户报过这类乱七八糟的错误）。
 	 *
 	 * 改成镜像之后语义只有一句：**应用完，这个仓库就是那个包**。
-	 * - 本机独有的文件**挪进回收目录**（不是删掉，随时捞得回来）；
+	 * - 本机独有的文件**移到回收目录**（不是删掉，随时捞得回来）；
 	 * - 本机改过的文件被包的版本覆盖（旧的同样进回收目录）；
 	 * - 包里没提到的目录也跟着清掉。
 	 *
 	 * 更新包也是同一套：它的起点必须与本机站的基准点**完全相等**（`checkAncestor`），
 	 * 所以"包送到的状态"同样确定 ＝ 我站的那一点 ＋ 条目 − 点名删除；
-	 * 不在其中的本地文件（自己新建的、对方删过的）一样挪进回收目录。那边**没有共同祖先就直接拒收**，
+	 * 不在其中的本地文件（自己新建的、对方删过的）一样移到回收目录。那边**没有共同祖先就直接拒收**，
 	 * 所以也不存在"合出一个乱七八糟的状态"。
 	 */
 	const mirrorFull = header.mode === 'full';
@@ -940,7 +940,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		);
 	}
 	const sameLineage = header.lineage === state.lineage;
-	// 更新包是从**某一份完整副本**往外算的：接收方只要站在那份上（基准指纹相等）就能收
+	// 更新包是从**某一份完整副本**往外算的：接收方只要停在那份上（基准指纹相等）就能收
 	const sameGeneration = header.baseGeneration === null
 		|| (sameLineage && state.generation >= header.baseGeneration);
 	const fastPath = sameGeneration;
@@ -1005,7 +1005,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		: 'remote-wins';
 	// 删除传播与备份只在"合并"那条路上听调用方/设置；严格档必然传播、必然先备份
 	const propagateDeletions = strictness === 'normal' ? (anchor ? true : (options.propagateDeletions ?? true)) : true;
-	// **应用必然先备份**：严格档会覆盖/挪走本地东西，强制档更可能一次删很多 ——
+	// **应用必然先备份**：严格档会覆盖/移走本地东西，强制档更可能一次删很多 ——
 	// "关掉回收目录 + 严格档" = 不可恢复的批量删除，这个组合不给走
 	const keepBackup = strictness !== 'normal' || (options.keepBackup ?? true);
 
@@ -1017,7 +1017,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// **对齐到对面（只拉）也用这一份**，不能用"我站的那份完整副本"（`fullFiles`）：
 	// 更新包是累积的 —— 我可能已经应用过同一份基准上的上一份更新包，内容早就往前走了，
 	// 而 `fullFiles` 停在那份完整副本上。拿它当底，上几份包带来的东西（尤其是**移动过去的**
-	// 那些文件：包里只有一条 `move`，不带内容）会被当成"我这边多出来的"挪进回收目录，
+	// 那些文件：包里只有一条 `move`，不带内容）会被当成"我这边多出来的"移到回收目录，
 	// 下一次再报"跟对方还差一点"。`fullFiles` 只在"恢复本机误改"那一步当**原版参考**用。
 	/**
 	 * **这一趟的"我这边记录的样子"**：
@@ -1099,7 +1099,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		// （三方比对在"只有本地改了"时会判成"上传"、在这个方向上被过滤掉 —— 那就不叫以包为准了）
 		: { actions: [], unchanged: 0, summary: { add: 0, modify: 0, delete: 0, move: 0, conflict: 0 }, moves: 0, folders: [], removedFolders: [] };
 
-	// ------------------------------------------------- 比对结果 → 落地动作
+	// ------------------------------------------------- 比对结果 → 写入动作
 	const actions: ApplyAction[] = [];
 	let adds = 0;
 	let overwrites = 0;
@@ -1108,11 +1108,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	let historyMatches = 0;
 	let deletes = 0;
 	let moves = 0;
-	/** 目标位置已经有东西的移动：严格档先把它挪进回收目录的「冲突」再搬 */
+	/** 目标位置已经有东西的移动：严格档先把它移到回收目录的「冲突」再搬 */
 	let moveReplacements = 0;
 	/** 本地多出来、这次要删的（对方删过的，或镜像档下我独有的） */
 	let extraDeletes = 0;
-	/** 严格档下"本地多出来、要挪走"的文件数（见报告里的 `localExtras`） */
+	/** 严格档下"本地多出来、要移走"的文件数（见报告里的 `localExtras`） */
 	let localExtras = 0;
 	/** 包里点名的删除：路径 → 那条记录（幽灵删除要拿它判"本地是不是还是那一版"） */
 	const deletedItems = new Map(header.deleted.map(item => [item.path, item]));
@@ -1216,9 +1216,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	//     下一次导出的更新包 `base` 就对不上，两台机器开始互相报"基准对不上"。
 	//
 	// **严格镜像（更新包的「严格同步」档）**：应用完**仓库 == 包送到的状态** ——
-	//   - 包里点名的文件：一律用包里的版本（本地动过的那份先挪进回收目录）；
+	//   - 包里点名的文件：一律用包里的版本（本地动过的那份先移到回收目录）；
 	//   - `header.deleted` 点名的照删；
-	//   - **本地多出来的文件全挪进回收目录**（不在"包送到的状态"里的，一个不留）——
+	//   - **本地多出来的文件全移到回收目录**（不在"包送到的状态"里的，一个不留）——
 	//     更新包的"送到的状态" ＝ 我站的那一点 ＋ 条目 − 点名删除（起点相等由 checkAncestor 保证）。
 	//
 	// **`listed-wins`（界面「以包为准」，只给更新包）**：只动**包里点名**的文件 ——
@@ -1229,7 +1229,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// 两条都不能走三方比对：因为"只有本地改了、包里没改"时三方比分会判成"上传"（本地说了算），
 	// 在包的方向上被过滤掉 —— 那就不叫"以包为准"了。
 	if (mirrorFull || strict || strictness === 'listed-wins') {
-		// ① 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先挪进回收目录）
+		// ① 包里点名的文件：本地缺 → 新增；不一致 → 覆盖（本地那份动过的先移到回收目录）
 		for (const entry of header.entries) {
 			const here = local.files.get(entry.path);
 			if (!here) {
@@ -1242,7 +1242,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			const base = baseline[entry.path];
 			/**
 			 * "本地动过没有"：跟**我站的那份完整包**比。停在我自己发过的某一版上**不算**本地改动 ——
-			 * 新模型下这是常态（对方站在同一份完整包上，我多半刚应用过他上一份更新包，
+			 * 新模型下这是常态（对方以同一份完整包为基准，我多半刚应用过他上一份更新包，
 			 * 那些文件相对这份完整包当然"变过"）。判据就是条目带的 `history`（见 `export.ts`），
 			 * 不认它的话每应用一份累积包都会把对方自己发来的东西当成本地改动备份一遍。
 			 */
@@ -1288,7 +1288,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		}
 		// 严格镜像那一批**推迟到移动算完之后**再删：判据是"**送到的点上**有没有它"，
 		// 而移动会把路径换掉 —— 先删就会把刚搬过去 / 早就手工搬好的东西当成
-		// "本地多出来的"挪进回收目录（用户报的「application 里只剩 1111」，见下面那段）。
+		// "本地多出来的"移到回收目录（用户报的「application 里只剩 1111」，见下面那段）。
 	}
 
 	/**
@@ -1339,7 +1339,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					path: action.path,
 					entry: source.entry,
 					...from,
-					// 本地动过的先挪进回收目录
+					// 本地动过的先移到回收目录
 					backup: (mirrorFull || localChanged) && keepBackup,
 				});
 				break;
@@ -1485,7 +1485,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 *
 	 * **「仅拉」的完整副本也一样**（它走完全镜像，`alignToPeer` 是 false）：那个方向
 	 * 本来就不写包，报告里再写"你这边还有 N 个改动没发出去"只会让人以为漏发了，
-	 * `state.pendingReturn` 也会挂一笔永远发不出去的账（用户报的：回退某份完整副本之后
+	 * `state.pendingReturn` 也会记一笔永远发不出去的账（用户报的：回退某份完整副本之后
 	 * 只同步了一下，却冒出一个要上传的包）。
 	 */
 	if (alignToPeer || options.receiveOnly === true) {
@@ -1544,11 +1544,11 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * 自动收包那条路会把它当成"要人看"，不会动手。
 	 */
 	const moveActions: ApplyAction[] = [];
-	/** 这一趟被 replace 的移动目标（那份旧的被挪进回收目录了）：它们底下的条目必须重写一遍 */
+	/** 这一趟被 replace 的移动目标（那份旧的被移到回收目录了）：它们底下的条目必须重写一遍 */
 	const replacedTargets: { path: string; dir: boolean }[] = [];
 	/**
 	 * 这一趟**已经在磁盘上做完**的移动（源没了 / 目标里已经有同一份）：执行阶段照它把
-	 * 状态里的记录从旧路径挪到新路径。不这么做，下一份累积包仍按旧路径算"点上有什么"，
+	 * 状态里的记录从旧路径移到新路径。不这么做，下一份累积包仍按旧路径算"点上有什么"，
 	 * 刚搬过去的东西又会被当成"本地多出来的"删掉。
 	 */
 	const relocations: { from: string; to: string }[] = [];
@@ -1558,9 +1558,9 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * **把这一趟的移动先"演"一遍**（只改这份影子清单，不碰磁盘）。
 	 *
 	 * 为什么不能只看扫描快照：累积更新包里，链式移动是**两条**操作（旧 → 中间、中间 → 新）。
-	 * 接收方可能还站在**基准**上（手里只有"旧"）—— 第一条把它搬到"中间"之后，第二条的源
+	 * 接收方可能还停在**基准**上（手里只有"旧"）—— 第一条把它搬到"中间"之后，第二条的源
 	 * 在扫描快照里根本不存在，会被判成"两个路径都不在"而整包拒绝。
-	 * 用户报的现场：对面站在 100 代基准上，打不开「…/electronic/… 改名成 …/theory/electronic/…」那个包。
+	 * 用户报的现场：对面停在 100 代基准上，打不开「…/electronic/… 改名成 …/theory/electronic/…」那个包。
 	 * 影子清单让"前面那条移动搬过去的东西"能被后面的移动看见（执行阶段本来就按顺序做）。
 	 */
 	const plannedFiles = new Map(local.files);
@@ -1627,7 +1627,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					throw new Error(
 						`包里要把 ${move.from} 改名成 ${move.to}，但本地两个路径都不在。`
 						+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个路径去哪了'
-						+ '（被删掉或挪走了？回收目录里找找），或者把'
+						+ '（被删掉或移走了？回收目录里找找），或者把'
 						+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
 						+ '重新应用一遍，让本机回到基准，再应用这个包；'
 						+ '再不行就让对方导一份完整副本（或一份带这个文件内容的包）',
@@ -1672,19 +1672,19 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			}
 			// 这一趟**别的**移动刚送到的目标（同一个目标两条移动）：包里自相矛盾，拒绝
 			if (movedTo.has(move.to) && !local.files.has(move.to)) {
-				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它挪走`);
+				throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它移走`);
 			}
 			/**
 			 * **源和目标同时在，不一定是冲突**：累积更新包里同一条移动会一直带着，
 			 * 接收方上一份包里已经搬过、旧路径后来又新建了（用户报的
 			 * 「改名之后又在旧名字下写了一篇新笔记」）。上面的"源不是记录里那一份"
 			 * 已经跳过了新建的源；走到这里说明源就是要搬的那一份，目标真占着 →
-			 * 严格档以包为准：把目标那份挪进回收目录的「冲突」再搬；合并档拒绝。
+			 * 严格档以包为准：把目标那份移到回收目录的「冲突」再搬；合并档拒绝。
 			 */
 			let replace = false;
 			if (targetTaken) {
 				if (!strict) {
-					throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它挪走`);
+					throw new Error(`包里要把 ${move.from} 改名成 ${move.to}，但本地目标已经存在：先把它移走`);
 				}
 				replace = true;
 				moveReplacements++;
@@ -1750,7 +1750,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				/**
 				 * **中间的旧路径在删除清单里点过名时，`deliveredFiles` 里已经没有它了**
 				 * （幽灵删除 / 别名那一跳）：这时用"我这边记录里那一版"把记录接到新路径上 ——
-				 * 不接的话严格镜像把刚搬过去的东西当成"本地多出来的"全挪进回收目录。
+				 * 不接的话严格镜像把刚搬过去的东西当成"本地多出来的"全移到回收目录。
 				 */
 				const record = deliveredFiles[file] ?? contentBefore[file];
 				if (record) {
@@ -1834,7 +1834,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					throw new Error(
 						`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地两个路径都不在。`
 						+ '更新包只带改名、不带内容，补不了缺的文件。先确认这个文件夹去哪了'
-						+ '（被删掉或挪走了？回收目录里找找），或者把'
+						+ '（被删掉或移走了？回收目录里找找），或者把'
 						+ `「第 ${header.baseGeneration ?? '?'} 代」那份完整副本`
 						+ '重新应用一遍，让本机回到基准，再应用这个包；'
 						+ '再不行就让对方导一份完整副本（或一份带这些文件内容的包）',
@@ -1890,7 +1890,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		/** 目标是同名文件：整棵搬过去、把那一个文件替换掉（只有严格档会走到这儿） */
 		if (targetIsFile) {
 			if (!strict) {
-				throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它挪走`);
+				throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它移走`);
 			}
 			for (const file of sourceUnder) {
 				const disk = plannedFiles.get(file);
@@ -1912,14 +1912,14 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		/**
 		 * **目标目录已经存在：按文件并进去，不整棵替换。**
 		 *
-		 * 整棵替换（先把目标挪进回收目录、再把源 rename 过来）会连带扔掉目标里**已经在该在**
+		 * 整棵替换（先把目标移到回收目录、再把源 rename 过来）会连带扔掉目标里**已经在该在**
 		 * 的东西：累积包里这条移动会一直带着，目标那边多半装着上几份包搬过去的文件，
 		 * 而源这边可能只剩一个空壳 —— 一次替换就把它们全扫进回收目录，用户看到的就是
 		 * 「application 里只剩新写的那一个 1111」。按文件并：目标上没有的搬过去、
 		 * 目标上已有的（同一份）不动、目标上占着别的版本的按严格档进回收目录的「冲突」。
 		 */
 		if (!strict) {
-			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它挪走`);
+			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它移走`);
 		}
 		relocatePoint();
 		for (const file of sourceUnder) {
@@ -1959,7 +1959,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	/**
 	 * **被 replace 掉的目标，底下的条目要重写一遍。**
 	 *
-	 * 计划阶段算条目的时候，目标还站在"上一趟搬过去的那一版"上，跟条目一比一样就跳过了写入；
+	 * 计划阶段算条目的时候，目标还停在"上一趟搬过去的那一版"上，跟条目一比一样就跳过了写入；
 	 * 可 `replace` 的 rename 会把目标换成**源**那一份（源里可能是基准版本 / 旧版本）。
 	 * 不补写的话，应用完目标那里是旧内容 → 状态编号对不上（真机复现：恢复完最后差一个文件）。
 	 * 内容一样时多写一次也无害（这个操作本来就要求幂等）。
@@ -1983,7 +1983,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * `deliveredFiles` 已经算进移动（旧前缀 → 新前缀）、也吸收了"这条移动早做过了"的情况，
 	 * 所以它是"这一点上到底该有哪些文件"的答案：
 	 * - 它在点上 → 留着（本机改过的也留着，那是"我这一半"）；
-	 * - 它不在点上 → 挪进回收目录（本机新建的、对方删过的、旧路径留下的）。
+	 * - 它不在点上 → 移到回收目录（本机新建的、对方删过的、旧路径留下的）。
 	 *
 	 * **判据必须用磁盘快照 + 移动影子清单（`plannedFiles`），不能用 `baseline`**：
 	 * `baseline` 只是我上次记下的样子，本机手工改过名 / 旧版本改名失败时它就过时了；
@@ -2041,7 +2041,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 * **移动过的路径整棵子树都不恢复**：目录移动只点了一条 `move`，
 		 * 它底下的文件（`旧/一.md` 那些）不在 `touched` 里 —— 只按精确路径排除的话，
 		 * 已经搬到新位置的文件会被判成"本机误改"，从基准完整副本恢复回**旧路径**，
-		 * 新路径那份又被当成"本地多出来的"挪走。第二步（再来一份累积包）就会
+		 * 新路径那份又被当成"本地多出来的"移走。第二步（再来一份累积包）就会
 		 * 旧路径、新路径同时在 → 报"本地目标已经存在"（真机复现的 bug）。
 		 */
 		const underMove = (file: string): boolean => (header.moves ?? []).some(move =>
@@ -2143,7 +2143,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	}
 
 	/**
-	 * 文件移动把文件从旧目录挪走之后，旧目录可能空了，而计划阶段它里面还有文件
+	 * 文件移动把文件从旧目录移走之后，旧目录可能空了，而计划阶段它里面还有文件
 	 * （`filled` 把它排除了）—— 这里补进删除清单，执行收尾时再 rmdir；
 	 * 非空删不动，所以多列了也安全。目录移动本身会把整棵旧树 rename 走，不用补。
 	 */
@@ -2252,7 +2252,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
  *
  * **必须用头部那个 `baselineHash` 验一遍**才对得上号：差一条都不认。
  * 验不过（旧包没带 base / 有些条目没写成 / 落点里混进了起点上没有的东西）就返回 `null` ——
- * 宁可不动基准，也不能把一个假点记上去（那会让两边的"站在同一份完整副本上"变成谎话）。
+ * 宁可不动基准，也不能把一个假点记上去（那会让两边的"以同一份完整副本为基准"变成谎话）。
  */
 function startPointOf(
 	header: BundleHeader,
@@ -2408,7 +2408,7 @@ function baselineSearchDirs(options: ApplyOptions): string[] {
  * 按**基准指纹**在包目录里找一份完整包。
  *
  * 认指纹不认文件名（重算 `baselineOfFullBundle(entries)`，见 `bundle/baseline.ts`）：
- * 用户可能把包改过名、挪过目录，按名字找必然找不到；而指纹是包里清单算出来的，
+ * 用户可能把包改过名、移过目录，按名字找必然找不到；而指纹是包里清单算出来的，
  * 换个名字也还是它。找不到返回 null（调用方决定是报错还是走别的路）。
  *
  * 两处用它：`findBaselineBundle`（"我站的这一份"）、`resolveAnchor`（"**包声明的**那一份"）。
@@ -2459,7 +2459,7 @@ function findBaselineBundle(
 		);
 	}
 	const wanted = state.bundle?.fullFile ?? null;
-	// 先试记着的那个文件名（包被挪到别的目录也能找到），再按指纹扫一遍
+	// 先试记着的那个文件名（包被移到别的目录也能找到），再按指纹扫一遍
 	if (wanted) {
 		for (const dir of baselineSearchDirs(options)) {
 			const file = path.join(dir, wanted);
@@ -2525,7 +2525,7 @@ let applying = false;
 /**
  * 现在有没有一次"应用"正在进行。
  *
- * git 同步要避开：`pull`/`rebase` 可能在应用正读某个包的时候把它挪走（或者把文件换掉）。
+ * git 同步要避开：`pull`/`rebase` 可能在应用正读某个包的时候把它移走（或者把文件换掉）。
  * 界面那条路没有插件级的 busy 标记，所以只能问这里。
  */
 export function isApplying(): boolean {
@@ -2578,14 +2578,14 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			switch (action.kind) {
 				case 'write': {
 					// 本地这里是个**文件夹**、包里是个文件（或反过来）：默认档不去动别人的目录，
-					// 报成明确失败；强制两档才把目录挪进回收目录腾位置
+					// 报成明确失败；强制两档才把目录移到回收目录腾位置
 					if (await dirExists(target)) {
 						if (!plan.report.forced) {
-							throw new Error('本地这里是同名的文件夹，包里是一个文件：换个位置或先把文件夹挪走');
+							throw new Error('本地这里是同名的文件夹，包里是一个文件：换个位置或先把文件夹移走');
 						}
 						await moveToTrash(target, toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`), action.path, stamp);
 					}
-					// 强制模式下覆盖本地改动前，先把本地那份挪进回收目录
+					// 强制模式下覆盖本地改动前，先把本地那份移到回收目录
 					if (action.backup) {
 						await moveToTrash(
 							target,
@@ -2631,8 +2631,8 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 				}
 				case 'delete': {
 					/**
-					 * 它可能**已经被这次应用里的前一个动作挪走了**：完整副本镜像时，
-					 * "本地这里是个同名文件夹、包里是个文件"会让 write 动作把整个文件夹挪进回收目录，
+					 * 它可能**已经被这次应用里的前一个动作移走了**：完整副本镜像时，
+					 * "本地这里是个同名文件夹、包里是个文件"会让 write 动作把整个文件夹移到回收目录，
 					 * 而计划里同时还有"删掉那个文件夹里的文件"这条（两者说的是同一批东西）。
 					 * 源文件已经不在就别再当成失败 —— 它是被**同一个操作**收拾掉的，
 					 * 东西在回收目录里好好的（以前这里会多报一条 ENOENT，看着像出错）。
@@ -2648,7 +2648,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					const from = toNative(options.vaultRoot, action.from);
 					await ensureDir(path.dirname(target));
 					/**
-					 * 目标位置已经有东西（严格档的"以包为准"）：先把它挪进回收目录的「冲突」，
+					 * 目标位置已经有东西（严格档的"以包为准"）：先把它移到回收目录的「冲突」，
 					 * 再把源搬过去。两份都在，捞得回来；不这么做，`rename` 在 Windows 上会
 					 * 直接失败（"目标已存在"），整包停在那儿、每轮重试都过不去。
 					 */
@@ -2682,7 +2682,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					break;
 				}
 				case 'conflict': {
-					// 留两份：新的那份占原名，**输的那份挪进回收目录的「冲突」文件夹**。
+					// 留两份：新的那份占原名，**输的那份移到回收目录的「冲突」文件夹**。
 					// 不留在原地是因为：留在仓库里的冲突副本会跟着同步传到对面去，两边各滚一份
 					const conflictDir = `.trash/locally-save/${CONFLICT_TRASH_DIR}`;
 					if (action.winner === 'remote') {
@@ -2719,7 +2719,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	for (const dir of plan.info.header.emptyDirs ?? []) {
 		try {
 			const abs = toNative(options.vaultRoot, dir);
-			// 同名文件挡路：不删不挪（目录 / 文件冲突要不要强推是 normal 与强制档的区别，不是"建目录"这一步说了算）
+			// 同名文件挡路：不删不移（目录 / 文件冲突要不要强推是 normal 与强制档的区别，不是"建目录"这一步说了算）
 			if (await statFile(abs)) {
 				result.failed.push({ path: dir, error: '要建文件夹的位置是一个同名文件，没有动它' });
 				continue;
@@ -2757,13 +2757,13 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	const state = await loadState(options.stateFile);
 	state.lineage = plan.info.header.lineage;
 	/**
-	 * **世代 ＝ 内容在这个血脉里的版本号**（不是"我操作过几次"，也不是"我见过哪一段"）。
+	 * **世代 ＝ 内容在这个分支里的版本号**（不是"我操作过几次"，也不是"我见过哪一段"）。
 	 *
 	 * 所以：**应用任何包之后，直接采纳包说的那一代**。应用完我的内容就等于那份包，
 	 * 状态相同 → 世代必须相同 —— 两边一台一台对下去，同一个内容永远是同一个号，
 	 * 这样"两边都报第 46 代"才说明它们确实一样。
 	 *
-	 * 以前这里是 `Math.max`（"只增不减"），按的是"这份副本见过这条血脉的哪一段"：
+	 * 以前这里是 `Math.max`（"只增不减"），按的是"这份副本见过这条分支的哪一段"：
 	 * 于是同一份内容在两台机器上会报出不同的世代号（一台 46、另一台 50），
 	 * 用户看到的就是"状态明明相同、代数却对不上"—— 那个定义已经废掉了，别再请回来。
 	 *
@@ -2815,7 +2815,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	state.stateId = result.stateId;
 
 	/**
-	 * **世代 ＝ 内容在这个血脉里的版本号**。
+	 * **世代 ＝ 内容在这个分支里的版本号**。
 	 *
 	 * - 应用完的内容正好等于包的目标（`match`）→ 采纳包说的那一代；
 	 * - 内容里还留着**本机独有的改动**（合并了，编号对不上）→ 取"本机与包"较大的那个，
@@ -2840,7 +2840,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// 于是"回退之后再导出"不会去撞历史上用过的号，见 sync/state.ts 的 maxGeneration）
 	raiseGeneration(state, plan.info.header.targetGeneration, plan.info.header.baseGeneration);
 	/**
-	 * **该落到的没落到**（完整副本镜像 / 严格镜像出现失败或删不掉的目录）→ 记一笔"内容与那一代不一致"。
+	 * **该变成的没写成**（完整副本镜像 / 严格镜像出现失败或删不掉的目录）→ 记一笔"内容与那一代不一致"。
 	 *
 	 * 不这样记的话，状态里那个号、对表文件、更新记录全是"我就在那一代"的口径，
 	 * 排查的人只能靠肉眼发现对不上（本次 112/392 就是这么来的）。合并档与本机改动保留的那种
@@ -2900,7 +2900,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *
 	 * **只在新路径真的有了那一条时才划掉旧记录**：改名可能失败（目标被占 / 文件被锁 /
 	 * 跨盘目录 rename 报错）。失败时源还老老实实躺在旧路径上，把记录划掉等于告诉下一轮
-	 * "这个文件我这边没有"—— 下一份累积包就会按"点上没有它"把它挪进回收目录
+	 * "这个文件我这边没有"—— 下一份累积包就会按"点上没有它"把它移到回收目录
 	 * （用户报的「改名失败之后，再同步一次 application 里只剩 1111」就是这么来的）。
 	 */
 	for (const action of plan.actions) {
@@ -2929,13 +2929,13 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 			if (!current) continue;
 			freshAnchor[action.path] = current;
 			delete contentBefore[action.from];
-			// 链式文件移动：上一跳刚记下的中间路径也要跟着往前挪，别留成假记录
+			// 链式文件移动：上一跳刚记下的中间路径也要跟着往前移，别留成假记录
 			delete freshAnchor[action.from];
 		}
 	}
 	/**
 	 * **计划阶段认定"磁盘上已经搬完"的移动**（源没了 / 目标已经有同一份）：
-	 * 没有动作，但记录得从旧路径挪到新路径 —— 否则下一份累积包还会按旧路径判"点上有什么"。
+	 * 没有动作，但记录得从旧路径移到新路径 —— 否则下一份累积包还会按旧路径判"点上有什么"。
 	 */
 	for (const item of plan.relocated ?? []) {
 		const current = await statFile(toNative(options.vaultRoot, item.to));
@@ -3017,7 +3017,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	}
 	const sortedDirs = [...keepDirs].sort();
 	/**
-	 * **只有落到一份真基准点上时，"我站的那一份完整包"才往前走**（0.14，用户拍板，
+	 * **只有变成一份真基准点上时，"我站的那一份完整包"才往前走**（0.14，用户拍板，
 	 * 见 `docs/只有完整包才算基准点-实施计划.md`）：
 	 *
 	 * - **完整副本**：它自己就是一份新基准（`freshAnchor` ＝ 真的写成了一致的那些条目）；
@@ -3032,9 +3032,9 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *   再把我留在一个它没有的旧点上，两边就永远对不上（下一次还要靠"算一遍落点"兜着），
 	 *   我一导出更新包又变成"从我那个旧点算起的整库回声"。
 	 *
-	 * ⚠ **"落到基准上"＝包里点名的都写成 / 删成了**（`failed` 与 `foldersKept` 都为空），
-	 * 不是"此刻内容编号与包一致"：站在一个点上的机器**允许有本地改动**（检查点走合并档、
-	 * 或只拉那台还没恢复完，都可能有），那些改动在"点之上"，不算没落到。
+	 * ⚠ **"换到基准上"＝包里点名的都写成 / 删成了**（`failed` 与 `foldersKept` 都为空），
+	 * 不是"此刻内容编号与包一致"：停在一个点上的机器**允许有本地改动**（检查点走合并档、
+	 * 或只拉那台还没恢复完，都可能有），那些改动在"点之上"，不算没写成。
 	 * 但文件没写成 / 文件夹删不掉时，这一趟只是"改了大部分"；这时把点换过去就是谎报基准 ——
 	 * 用户报的现场：应用 100 代完整副本之后列表标着「← 本机现在的基准」、世代却还是 108、
 	 * 状态编号也对不上，之后导出的包全接不上。旧包没记状态编号时没法对账，照老规矩认。
@@ -3044,7 +3044,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	const landedCleanly = result.failed.length === 0 && plan.foldersKept.length === 0;
 	const landedOnBaseline = wantsBaseline && landedCleanly;
 	const previous = state.bundle;
-	/** 没落到基准时退回"上一次确认过的那个点"；一个真点都没有就如实留空（别拿半份清单冒充基准） */
+	/** 没换到基准时退回"上一次确认过的那个点"；一个真点都没有就如实留空（别拿半份清单冒充基准） */
 	const fallback = previous?.fullHash
 		? {
 			fullFiles: previous.fullFiles ?? null,
@@ -3091,7 +3091,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		? {
 			fullFiles: nextFullFiles,
 			fullGeneration: plan.info.header.targetGeneration,
-			// 令牌：站在哪一份完整包上，对方下一个包一比就知道
+			// 令牌：用哪一份完整包上，对方下一个包一比就知道
 			fullHash: landedHash,
 			/**
 			 * 只有**真完整包**才能记成"我站的那份包文件"。
@@ -3131,7 +3131,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	}
 	if (adopt) {
 		options.log.debug(
-			`基准跟着这个包落到第 ${adopt.generation} 代（${adopt.hash}）：这个包的起点不是我原来站的那一份，`
+			`基准跟着这个包变成第 ${adopt.generation} 代（${adopt.hash}）：这个包的起点不是我原来站的那一份，`
 			+ '而我的内容就是它 ＋ 这个包 —— 接上它，两边才回到同一份完整副本上',
 		);
 	}
@@ -3338,7 +3338,7 @@ async function collectApplyProblems(
  * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
  * 所以不再逐条猜"本机这一处改动该怎么合"：
  *
- * 1. 找到**我站在的那一份完整副本**（`findBaselineBundle`：重算指纹，不认文件名）；
+ * 1. 找到**我停在的那一份完整副本**（`findBaselineBundle`：重算指纹，不认文件名）；
  * 2. 把它按**完全镜像**应用一遍 —— 仓库回到那个基准点，本机多出来 / 改过的进回收目录；
  * 3. 再把这份更新包重新算、重新应用 —— 起点严格相等，包送到的状态是确定的；
  * 4. 结果里带上 `recovered`，界面据此说清"做了强制回退"。
@@ -3374,7 +3374,7 @@ export async function recoverToBaselineAndApply(options: ApplyOptions): Promise<
 	const fullResult = await executeBundlePlan(fullPlan, fullOptions);
 	if (fullResult.failed.length > 0) {
 		options.log.debug(
-			`强制回退：完整副本有 ${fullResult.failed.length} 个路径没落地（${fullResult.failed[0]?.path ?? ''}），`
+			`强制回退：完整副本有 ${fullResult.failed.length} 个路径没写入（${fullResult.failed[0]?.path ?? ''}），`
 			+ '继续尝试应用更新包',
 		);
 	}

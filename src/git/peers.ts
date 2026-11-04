@@ -9,11 +9,11 @@ import type { PluginState } from '../sync/state';
  *
  * 为什么要有：包是单向广播 —— 对方不应用，我这边永远不知道它到了哪一步。
  * git 货架既然是共享的，每台机器往 `.lsave-peers/<copyId>.json` 写一小份自己的状态
- * （状态编号、站在哪份完整副本上、最后导出 / 应用了哪个包），同步时跟着提交；
+ * （状态编号、用哪份完整副本上、最后导出 / 应用了哪个包），同步时跟着提交；
  * 拉一下就能回答三个问题：
  * - **两边内容一样了吗**（`stateId` 相同就是一样）；
  * - **我的包对方应用了没有**（它应用完会把 `lastApply` 写上去、`stateId` 变成我的目标）；
- * - **谁还没重导**（站在哪一份完整副本上）。
+ * - **谁还没重导**（用哪一份完整副本上）。
  *
  * 它只是**状态**，不是第二条通道：不参与基准 / 冲突 / 删除那一套，
  * 也不带任何文件内容（`stateId` 已经能说明内容一不一样）。
@@ -38,7 +38,7 @@ export interface PeerState {
 	/** 这台机器现在的内容指纹（`sync/state-id.ts`）；还没算过就是 null */
 	stateId: string | null;
 	generation: number;
-	/** 它站在哪一份完整副本上 */
+	/** 它用哪一份完整副本上 */
 	baselineHash: string | null;
 	baselineGeneration: number | null;
 	/** 最后一次导出 / 应用（状态栏与"对方应用了没"靠它） */

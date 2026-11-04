@@ -25,7 +25,7 @@ export interface ScanOptions {
  * 回收目录里专门放"冲突输的那一份"的子文件夹。
  *
  * 为什么不留在原地：留在仓库里的冲突副本会**跟着同步传到对面去**，两边各滚一份、越滚越多。
- * 挪进回收目录之后它天然不参与同步（`.trash` / `.lsave` 本来就被排除），
+ * 移到回收目录之后它天然不参与同步（`.trash` / `.lsave` 本来就被排除），
  * 而且照样能捞回来。
  */
 export const CONFLICT_TRASH_DIR = '冲突';
@@ -112,7 +112,7 @@ export async function removeEmptyDir(absPath: string): Promise<boolean> {
 /**
  * 把一批路径**删空之后剩下的空目录**收拾掉。
  *
- * 传进来的是刚被删掉 / 挪走的路径：顺着它们的父目录往上走，能删就删
+ * 传进来的是刚被删掉 / 移走的路径：顺着它们的父目录往上走，能删就删
  * （`rmdir` 对非空目录会失败，所以只会删真空的，绝不会碰有内容的目录），
  * 到根为止。返回**真的删掉了哪些目录**（相对路径）。
  *
@@ -246,7 +246,7 @@ export async function removeFile(absPath: string): Promise<void> {
 }
 
 /**
- * 把文件挪进回收目录（而不是直接删）。
+ * 把文件移到回收目录（而不是直接删）。
  * 同盘用 rename（瞬间完成）；跨盘会失败，退回「复制 + 删除」。
  */
 export async function moveToTrash(absPath: string, trashRoot: string, relPath: string, stamp: string): Promise<void> {
@@ -287,7 +287,7 @@ export async function readJsonFile<T>(absPath: string): Promise<T | null> {
  *
  * 设置面板（Obsidian 1.13 的声明式定义）是同步渲染的，等不了 `await`；
  * 而"更新包从哪个状态到哪个状态"的选项要列出本地那几份完整包 —— 得先知道
- * 状态文件里的血脉与基准世代，只能同步读一次。读的还是同一个文件、同样容错。
+ * 状态文件里的分支与基准世代，只能同步读一次。读的还是同一个文件、同样容错。
  */
 export function readJsonFileSync<T>(absPath: string): T | null {
 	try {

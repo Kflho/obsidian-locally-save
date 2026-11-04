@@ -1,10 +1,11 @@
 import { Notice } from 'obsidian';
 import { debugEvent } from '../debugLog';
-import { exportBundle, exportRebaselineDiff, planBundleExport, plannedExportModes } from '../bundle/export';
+import { exportBundle, planBundleExport, plannedExportModes } from '../bundle/export';
 import type { BundleExportPreview, ExportOptions, ExportOutcome } from '../bundle/export';
 import { pickIncoming, sweepIncoming, unappliedIncoming } from '../bundle/incoming';
 import type { IncomingCandidate, IncomingPolicy, IncomingSweep } from '../bundle/incoming';
 import { describeExportRange } from '../bundle/log';
+import { describeGcRun, planBundleGc, runBundleGc } from '../bundle/gc';
 import { listBundles } from '../bundle/manage';
 import { bundleBaseDir } from '../bundle/paths';
 import type { BundleMode } from '../bundle/paths';
@@ -26,6 +27,7 @@ import { ExportPreviewModal } from './export-preview-modal';
 import { BundleManagerModal } from './manage-modal';
 import { BundleLogModal } from './log-modal';
 import { syncGitNow, peerBaselineHint } from './git';
+import { runRebaselineDiffs, ensureLocalBaselineBundle } from './rebaseline';
 import { peerStatusText, refreshStatusBar } from './status';
 import { ConfirmModal } from './confirm-modal';
 
@@ -457,8 +459,6 @@ async function writePlannedBundles(
 	/** 这一轮留过完整包：紧随其后的更新包必然是空的 */
 	let fullWritten = false;
 	let wrote = false;
-	/** 换基准之前我站的那份完整副本（导完完整包要拿它算「旧基准 → 新完整包」的差量包） */
-	const beforeFullHash = state.bundle?.fullHash ?? null;
 	/** 「该立新完整包了」（引擎按这份包自起点以来要搬的字节数算好，没到阈值时是 null） */
 	let advice: string | null = null;
 
@@ -468,20 +468,15 @@ async function writePlannedBundles(
 			wrote = true;
 			if (mode === 'full') {
 				fullWritten = true;
-				// 完整包太大、不推远程：顺手导一份「旧基准 → 新完整包」的差量包，对方收下就能跟上新基准
-				// （不开 git 时不做 —— 那种情况本来就把完整包整个拎给对方）
-				if (plugin.settings.gitEnabled) {
-					const diff = await exportRebaselineDiff(
-						{ ...exportOptions(plugin, base, 'changes', inventory), keepPaths: [...written], generationFloor },
-						beforeFullHash,
-					);
-					if (diff.outcome?.file) {
-						written.push(diff.outcome.file);
-						notes.push(`同时导了一份「旧基准 → 新完整包」的差量包（${diff.outcome.entryCount} 个文件）：对方收下就能跟上新基准`);
-					} else if (diff.error) {
-						notes.push(`没能同时导差量包（${diff.error}）：对方还站在旧基准上时，得手动把新的完整副本发过去`);
-					}
-				}
+				/**
+				 * 完整副本不进 git —— 导完顺手给**还停在旧完整副本上**的那几台各导一份差量包
+				 * （谁的起点在本机、谁和我同一分支都算在计划里）。
+				 *
+				 * 阈值别放宽：**一台都没上报过就什么都不做**（那种情况本来就把完整副本整份拷过去），
+				 * 一份谁都用不上的包只会白占货架。
+				 */
+				const detail = await runRebaselineDiffs(plugin, base);
+				if (detail) notes.push(detail);
 			}
 			if (result.outcome.advice) advice = result.outcome.advice;
 			notes.push(mode === 'full'
@@ -490,6 +485,9 @@ async function writePlannedBundles(
 					+ `${result.outcome.deletedCount > 0 ? `、删除 ${result.outcome.deletedCount}` : ''}`
 					+ `${result.outcome.moveCount > 0 ? `、移动 ${result.outcome.moveCount} 处` : ''}）`
 					+ describeExportRange(result.outcome));
+			if (result.outcome.retired.length > 0) {
+				notes.push(`${result.outcome.retired.length} 个包的起点已经没人站了，移到了回收站`);
+			}
 			continue;
 		}
 		// 空的更新包：完整包刚留过时它必然空，别写；其余情况如实说一句"没有变化"
@@ -621,7 +619,7 @@ function applyOptionsFor(plugin: LocallySavePlugin, file: string): ApplyOptions 
 		file,
 		configDir: plugin.configDir(),
 		bundleDir: bundleBaseDir(plugin.settings),
-		// 「仅拉」没有要回传的那一半：报告里记 0，别挂一笔永远发不出去的欠账
+		// 「仅拉」没有要回传的那一半：报告里记 0，别记一笔永远发不出去的欠账
 		receiveOnly: isReceiveOnly(plugin.settings),
 		// 自动收包也要有进度（不然大包应用时界面像卡住）
 		onProgress: (done, total, path) => plugin.reportProgress({ done, total, path, label: '应用中' }),
@@ -678,7 +676,7 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 			 * **无人值守的「双向」：三方合并 + 两边都改时"留两份"**（0.16.13，场景 3 实测后改的）。
 			 *
 			 * 0.16.12 用的是 `local-wins`，本机这一半保住了，但**对方那一半会静默消失**：
-			 * 场景 3 里对方加了行、我们这边应用时被判成"已经一致（already）"，他们的行根本没落地，
+			 * 场景 3 里对方加了行、我们这边应用时被判成"已经一致（already）"，他们的行根本没写入，
 			 * 而他们的包也已经发过了 —— 谁都没报错，两边却各只有自己那一行。
 			 *
 			 * 现在改成 `keep-both`：mtime 新的占原名、旧的那份存成**冲突副本**。
@@ -696,6 +694,40 @@ function incomingPolicy(plugin: LocallySavePlugin, direction: SyncDirection): In
 		return { confirm: (candidate, plan) => confirmIncomingApply(plugin, candidate, plan) };
 	}
 	return {};
+}
+
+/**
+ * **整理更新包**：每一拍（30 秒）在 git 推拉之前看一眼 `changes/`，把
+ * "起点已经没人用"和"同组里还有更新的一份"移到回收站（0.18.2）。
+ *
+ * 为什么放在自动节拍上而不是只在导出时清：**最后一台机器跟上来的时候，没有任何人导出**。
+ * 那种情况下老包会永远躺在货架上（用户看到的"仓库越攒越乱"）。放在推拉**之前**，
+ * 清出来的删除就在同一拍被提交、推走，别的终端拉一次也跟着没掉。
+ *
+ * 边界：没开 git / 没有别的电脑上报 / 正忙 —— 一律不跑（`planBundleGc` 里那三道闸）。
+ * 例行清理不弹通知（规矩见 `约定-传输与界面.md` 第 0 节）：状态栏一句 + 日志。
+ */
+export async function checkBundleGc(plugin: LocallySavePlugin): Promise<boolean> {
+	if (!plugin.settings.enabled || !plugin.settings.gitEnabled) return false;
+	if (plugin.bundleBusy || plugin.incomingBusy || plugin.gitBusy) return false;
+	const base = bundleBaseDir(plugin.settings);
+	if (!base) return false;
+	try {
+		const state = await loadState(plugin.stateFile());
+		const plan = await planBundleGc(base, state, readPeers(base, state.copyId));
+		if (plan.drop.length === 0) return false;
+		const outcome = await runBundleGc(base, plan);
+		const sentence = describeGcRun(plan, outcome.moved);
+		if (sentence !== '') {
+			plugin.log.debug(sentence);
+			plugin.statusBar.flash(sentence);
+		}
+		return outcome.moved.length > 0;
+	} catch (error) {
+		// 整理失败不该影响同步本身
+		plugin.log.debug('整理更新包时出错（不影响这一拍）', error);
+		return false;
+	}
 }
 
 /**
@@ -806,7 +838,7 @@ export async function checkIncomingBundles(
 		 * **回礼**：刚把对方的改动合进来，我这边多出来的那一半得发回去，对面才能一致。
 		 *
 		 * **只在 `both` 方向做**：`upload` 只推、`download` 只拉（不写包），都不该自动发；
-		 * 导出的是"从基准到我现在的状态"的累积更新包，对面站在同一份基准上就能收。
+		 * 导出的是"从基准到我现在的状态"的累积更新包，对面以同一份基准为准就能收。
 		 * 不能等"自上次留包以来有变化"那条判据 —— 应用已经把状态记录更新成合并后的样子了，
 		 * 那条判据会判成"没变化"，于是永远不回礼（这正是"单向传输"的老毛病）。
 		 */
@@ -817,6 +849,18 @@ export async function checkIncomingBundles(
 			&& sweep.applied.some(item => item.stateIdCompare !== 'match')
 		) {
 			await exportMergedState(plugin, base);
+		}
+		/**
+		 * **应用完之后本机还没有这个基准的包文件**（应用差量包就是这种）→ 立刻留一份完整副本
+		 * （0.18.1，用户拍板："接受后也要导出一个完整包，保证两边完整包相同，然后才继续更新"）。
+		 *
+		 * 放在这条路上，是因为它同时覆盖**点一次「立即同步」**和**每 30 秒的自动节拍** ——
+		 * 用户不用再记一步。补之前会核对指纹（`planBaselineCopy`），对不上就不补、只如实说。
+		 * 完整副本不进 git，但它占了本机几百 MB，所以照规矩说一句。
+		 */
+		if (sweep.applied.length > 0) {
+			const baseline = await ensureLocalBaselineBundle(plugin, base);
+			if (baseline) new Notice(baseline, 15000);
 		}
 		return sweep.applied.length > 0;
 	} catch (error) {
@@ -940,7 +984,7 @@ export function applyBundleAction(plugin: LocallySavePlugin): void {
 	new ApplyBundleModal(plugin.app, plugin).open();
 }
 
-/** 管理同步包：列出、打开所在文件夹、复制路径、删除（挪进回收站）、清空回收站 */
+/** 管理同步包：列出、打开所在文件夹、复制路径、删除（移到回收站）、清空回收站 */
 export function manageBundlesAction(plugin: LocallySavePlugin): void {
 	if (!plugin.isActive()) return;
 	new BundleManagerModal(plugin.app, plugin).open();

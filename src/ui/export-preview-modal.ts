@@ -43,7 +43,7 @@ export class ExportPreviewModal extends Modal {
 			text: '只预览，不会写入。下面是按当前设置导出时会装进包里的内容。',
 			cls: 'locally-save-hint',
 		});
-		// 对方站在别的基准上：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
+		// 对方停在别的基准上：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
 		if (this.hint) {
 			contentEl.createEl('p', { text: this.hint, cls: 'locally-save-warn' });
 		}
