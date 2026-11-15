@@ -72,7 +72,7 @@ export async function mergeAdjacentBundles(
 		if (trimCount > 0) {
 			try {
 				const trimmed = await trimSupersededSiblings(dir, trims);
-				done.push(`同一份起点的旧包清掉 ${trimmed.moved.length} 份，只留最新那一份`);
+				done.push(`同一份起点的旧包清掉 ${trimmed.moved.length} 份，只留最新的一份`);
 				if (trimmed.failed.length > 0) failed.push(`${trimmed.failed.length} 份未能移入回收站`);
 			} catch (error) {
 				failed.push(describeError(error));
@@ -107,7 +107,7 @@ export function renderShelfTools(
 			}))
 		.addButton(button => button
 			.setButtonText('整理更新包…')
-			.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新那一份（都移到回收站，能恢复）')
+			.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新的一份（都移到回收站，能恢复）')
 			.onClick(() => { void mergeAdjacentBundles(app, plugin, dir(), onChanged); }));
 }
 
@@ -133,7 +133,7 @@ class ConfirmMergeModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '整理更新包' });
 		contentEl.createEl('p', {
-			text: '两件事：首尾相接的几份并成一份；同一份起点的旧包只留最新那一份。内容一份不少。',
+			text: '两件事：首尾相接的几份并成一份；同一份起点的旧包只留最新的一份。内容一份不少。',
 			cls: 'locally-save-hint',
 		});
 

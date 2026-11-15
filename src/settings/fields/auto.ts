@@ -19,14 +19,14 @@ export const AUTO_SECTION: FieldSection = {
 				{
 					key: 'syncOnStartup',
 					name: '启动后导出一次',
-					desc: 'Obsidian 启动并加载工作区后自动留一次包',
+					desc: 'Obsidian 启动并加载工作区后自动导出一份同步包。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.syncOnStartup),
 				},
 				{
 					key: 'autoSyncInterval',
 					name: '定时同步（导出 + git）',
-					desc: '每隔一段时间留一次包（若已开启自动导出），并与 Git 远程推送、拉取一次；0 表示只手动触发。',
+					desc: '每隔一段时间导出一份同步包（若已开启自动导出），并与 Git 远程推送、拉取一次；0 表示只手动触发。',
 					control: { type: 'dropdown', options: SYNC_INTERVAL_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,

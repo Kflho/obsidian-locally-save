@@ -76,7 +76,7 @@ interface RingRef {
  *
  * 从前这一步由 `bundle/points.ts` 提供（它还会把"链条上的点"物化出来）。
  * 0.14 起点只有完整备份了，合并要的只是**包与包之间的首尾关系**（谁的目标版本 ＝ 谁的起点），
- * 就地扫一遍就够 —— 同一个校验值只留一份（两台机器可能各导过一份一模一样的目标版本）：留最近写的那份。
+ * 就地扫一遍就够 —— 同一个校验值只保留一份（两台机器可能各导过一份一模一样的目标版本）：留最近写的那份。
  */
 async function listRings(baseDir: string, lineage: string): Promise<RingRef[]> {
 	const byHash = new Map<string, RingRef>();

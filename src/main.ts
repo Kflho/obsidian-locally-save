@@ -377,7 +377,7 @@ export default class LocallySavePlugin extends Plugin {
 			return;
 		}
 
-		// 保存后导出：0 ＝ 不留（一个下拉管这件事，不再有单独的开关）
+		// 保存后导出：0 ＝ 不导出（一个下拉管这件事，不再有单独的开关）
 		const saveDelay = this.settings.syncAfterSaveDelay;
 		if (
 			this.pendingSave

@@ -108,7 +108,7 @@ export interface SyncPlan {
 	unchanged: number;
 	/** 各类变更的数量 */
 	summary: Record<ChangeKind, number>;
-	/** 认出来的移动数量（含在 summary.move 里，单独留一份便于说明） */
+	/** 认出来的移动数量（含在 summary.move 里，单独保留一份便于说明） */
 	moves: number;
 	/**
 	 * 要新建的目录。**空文件夹也要跟着走** —— 只同步文件的话，

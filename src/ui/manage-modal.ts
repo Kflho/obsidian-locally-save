@@ -97,7 +97,7 @@ export class BundleManagerModal extends Modal {
 				}));
 		new Setting(contentEl)
 			.setName('想留一个还原点？')
-			.setDesc('在「导出同步包…」里勾上「完整备份」：整个仓库写成一份包，你也会以它为基准，仓库文件不动。');
+			.setDesc('在「导出同步包…」里勾上「完整备份」：整个仓库写成一份包，你也会以它为基准，仓库里的文件不会被改动。');
 		this.list = new BundleListView(this.plugin, contentEl, {
 			baseDir: () => this.effectiveDir(),
 			actionLabel: '应用…',

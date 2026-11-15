@@ -1250,7 +1250,7 @@ export class ApplyBundleModal extends Modal {
 			if (sentence) new Notice(sentence, 15000);
 		} catch (error) {
 			this.plugin.log.error('给基准留一份完整备份失败', error);
-			new Notice(`没能给这个基准留一份完整备份（看日志）：${describe(error)}`, 10000);
+			new Notice(`没能为这个基准导出一份完整备份（看日志）：${describe(error)}`, 10000);
 		}
 	}
 

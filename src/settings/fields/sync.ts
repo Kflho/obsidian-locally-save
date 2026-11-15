@@ -82,7 +82,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '应用一个包',
-					desc: '先看报告，确认了才改动文件。',
+					desc: '先出报告，确认后才改动文件。',
 					button: '打开同步包并应用…',
 					run: plugin => { new ApplyBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),

@@ -48,7 +48,7 @@ export const GENERAL_SECTION: FieldSection = {
 				{
 					key: 'ribbonSyncIcon',
 					name: '立即导出',
-					desc: '在左侧栏显示图标，点击后立即留一次包。',
+					desc: '在左侧栏显示图标，点击后立即导出一份同步包。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.ribbonSyncIcon),
 				},

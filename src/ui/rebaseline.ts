@@ -362,7 +362,7 @@ export async function ensureLocalBaselineBundle(
 		configDir: plugin.configDir(),
 	});
 	if (!outcome.file) {
-		return `无法为第 ${generation} 版基准留一份完整备份。原因：${outcome.reason ?? '没有生成'}。`;
+		return `无法为第 ${generation} 版基准导出一份完整备份。原因：${outcome.reason ?? '没有生成'}。`;
 	}
 	return `已给第 ${generation} 版这个基准留了一份完整备份（${formatBytes(outcome.fileBytes)}）：`
 		+ '两边各自都有这一份，接着按同一份基准更新';

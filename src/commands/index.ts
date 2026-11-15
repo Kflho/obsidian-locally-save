@@ -76,7 +76,7 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 	register(plugin, 'export-rebaseline-diff', '导出换基准的差分更新包…', () =>
 		rebaselineDiffAction(plugin.app, plugin, defaultBundleDir(plugin)));
 	// 应用差分更新包之后本机没有这个基准的包文件：补一份（自动接收那条路已经自动做，这里手动补漏）
-	register(plugin, 'copy-baseline-bundle', '给现在的基准留一份完整备份…', () =>
+	register(plugin, 'copy-baseline-bundle', '给现在的基准导出一份完整备份…', () =>
 		baselineCopyAction(plugin));
 	// 换过几次基准之后"到底哪份对得上"：本机基准 / 盘上的完整备份 / 各台电脑报的基准
 	register(plugin, 'check-baseline', '检查两边的完整备份…', () =>

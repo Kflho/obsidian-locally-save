@@ -364,7 +364,7 @@ export async function writeBundle(
  * 实现放在同步版里（`readBundleInfoSync`），这里只是等价的异步外壳：
  * 读的只有**开头几十字节 + 末尾几十字节**，同步读一次的开销可以忽略，
  * 而设置面板那条路（同步渲染，要列出本地有几份完整备份）需要同步版本 ——
- * 两个版本各写一遍解析最容易走偏（尾部布局的读写顺序错一次就是读不出来），所以只留一份实现。
+ * 两个版本各写一遍解析最容易走偏（尾部布局的读写顺序错一次就是读不出来），所以只保留一份实现。
  */
 export async function readBundleInfo(file: string): Promise<BundleInfo> {
 	return readBundleInfoSync(file);
