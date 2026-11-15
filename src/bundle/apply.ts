@@ -134,7 +134,7 @@ export interface ApplyOptions {
 	 *
 	 * 平时不传 —— 只用"本机当前使用的这一份完整备份"（`state.bundle.fullHash`）。
 	 * 传它是因为**包声明的起点**跟我记的基准不一样、而那份完整备份就在本机：
-	 * 用户点了「按第 N 代镜像对齐」时把它带进来（见 `recoverToBaselineAndApply`）。
+	 * 用户点了「按第 N 版镜像对齐」时把它带进来（见 `recoverToBaselineAndApply`）。
 	 */
 	baselineOverride?: { file: string };
 	/** 本次临时覆盖冲突裁决；只有合并那条路（`strictness: 'normal'`）会用到 */
@@ -437,7 +437,7 @@ export interface ApplyPlan {
 	 *
 	 * `null` ＝ 没走这条路。非空时：`contentBefore` 用的是这份祖先清单、`strictness` 是
 	 * `bundle-wins`（本机相对起点的那一半保留），应用完**基准接到它上面**（见 `adoptBaseline`）。
-	 * 界面据此说一句"按第 N 代对齐（保留本机改动）"，用户才知道刚才那一步动了什么。
+	 * 界面据此说一句"按第 N 版对齐（保留本机改动）"，用户才知道刚才那一步动了什么。
 	 */
 	baselineAnchor: {
 		file: string;
@@ -538,7 +538,7 @@ export interface ApplyResult {
 	/**
 	 * **应用完不一致 → 强制回退到基准再应用**那一步的结论（没走这条保底就是 undefined）。
 	 *
-	 * 用户要的保底：有基准包 + 更新包，信息就是全的，"不管怎么样都能成功"。
+	 * 用户要的保底：有完整备份 + 更新包，信息就是全的，"不管怎么样都能成功"。
 	 * `matched` 为 false 说明连保底都没对上（那种情况要看 `problems` / `failed`）。
 	 */
 	recovered?: {
@@ -708,7 +708,7 @@ function resolveAnchor(
 	/**
 	 * 无法应用、只能镜像：把"那份包在哪、为什么"交回去 —— 调用方会把这份提示挂到
 	 * `checkAncestor` 原来那句拒收消息上（**消息不换**：那两句出路本来就说得很清楚），
-	 * 界面再据此多出一个「按第 N 代镜像对齐」的按钮。
+	 * 界面再据此多出一个「按第 N 版镜像对齐」的按钮。
 	 */
 	const reason = options.alignToPeer === true
 		? '「仅拉」要求应用完与对面严格相等，本机这一半不能留'
@@ -3335,7 +3335,7 @@ async function collectApplyProblems(
 /**
  * **保底：强制回退到基准，再把这一份重新应用一遍。**
  *
- * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
+ * 用户的原话："有完整备份和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
  * 所以不再逐条猜"本机这一处改动该怎么合"：
  *
  * 1. 找到**我停在的那一份完整备份**（`findBaselineBundle`：重算校验值，不认文件名）；
@@ -3343,7 +3343,7 @@ async function collectApplyProblems(
  * 3. 再把这份更新包重新算、重新应用 —— 起点严格相等，包送到的状态是确定的；
  * 4. 结果里带上 `recovered`，界面据此说清"做了强制回退"。
  *
- * 基准包不在本机时 `findBaselineBundle` 会**报错并指路**（把它放回包目录 / 让对方发一份），
+ * 完整备份不在本机时 `findBaselineBundle` 会**报错并指路**（把它放回包目录 / 让对方发一份），
  * 绝不悄悄换一份、也绝不硬合 —— 那两种都会落一个说不清的状态。
  */
 export async function recoverToBaselineAndApply(options: ApplyOptions): Promise<{

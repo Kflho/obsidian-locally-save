@@ -703,7 +703,7 @@ export class ApplyBundleModal extends Modal {
 			/**
 			 * **保底**：算不出计划（本机被改乱 / 移动的源缺了 / 目标被占…）时不要只剩一句报错。
 			 * 有基准完整备份 + 这份包，信息就是全的：强制回退到基准、再应用一遍一定能落
-			 * （`recoverToBaselineAndApply`）。基准包不在本机时它自己会报错并指路。
+			 * （`recoverToBaselineAndApply`）。完整备份不在本机时它自己会报错并指路。
 			 *
 			 * **"包的起点在本机、但无法应用"**（0.16.1）走另一个按钮：那份完整备份就在包目录里，
 			 * 按它镜像对齐再应用（`baselineOverride`）—— 现场是"我记的基准是老遗留，
@@ -728,16 +728,16 @@ export class ApplyBundleModal extends Modal {
 	/**
 	 * 打不开 / 不一致时的保底入口：强制回退到基准完整备份，再把这一份应用一遍。
 	 *
-	 * 这是用户拍板的路线："有基准包和对应更新包，信息就是全的，不管本机怎么改过都要能成功。"
+	 * 这是用户拍板的路线："有完整备份和对应更新包，信息就是全的，不管本机怎么改过都要能成功。"
 	 *
-	 * `baselineFile` 传了就是**按包声明的那份起点**对齐（界面上那个「按第 N 代镜像对齐」按钮），
+	 * `baselineFile` 传了就是**按包声明的那份起点**对齐（界面上那个「按第 N 版镜像对齐」按钮），
 	 * 不传就是"我记的那一份"（老行为）。
 	 */
 	private async forceRecover(file: string, baselineFile?: string): Promise<void> {
 		this.reportEl.empty();
 		this.reportEl.setText(baselineFile
 			? '正在按包里声明的那份起点镜像对齐，再把这一份应用一遍…'
-			: '正在强制回退到基准包，再把这一份应用一遍…');
+			: '正在强制回退到完整备份，再把这一份应用一遍…');
 		this.plugin.reportProgress({ done: 0, total: 0, path: '', label: '应用中' });
 		try {
 			const again = await recoverToBaselineAndApply({
@@ -1073,7 +1073,7 @@ export class ApplyBundleModal extends Modal {
 			/**
 			 * **保底：应用完没对上，就强制回退到基准再应用一遍。**
 			 *
-			 * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
+			 * 用户的原话："有完整备份和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
 			 * 所以不再把"编号还差一点"当成终态：
 			 * - 计划里说会到位的路径没到位（`effects`）/ 有动作失败 → 回退；
 			 * - 「仅拉」时严格相等是承诺，编号不一致 → 也回退。

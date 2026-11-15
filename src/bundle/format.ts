@@ -49,9 +49,9 @@ export interface CopyRef {
 /**
  * 包里的一个文件。
  *
- * `base*` 是**导出方认为接收方在应用前应该有的样子**（增量包才有）：
+ * `base*` 是**导出方认为接收方在应用前应该有的样子**（更新包才有）：
  * 接收方拿它做三方合并 —— 本地文件等于 base 才敢直接覆盖，
- * 否则说明本地也改过，得走冲突处理。这是"增量包必须同一副本"这条规矩的写入方式：
+ * 否则说明本地也改过，得走冲突处理。这是"更新包必须同一副本"这条规矩的写入方式：
  * 不是拒绝服务，而是逐文件判断。
  */
 export interface BundleEntry {
@@ -74,7 +74,7 @@ export interface BundleEntry {
 	history?: { size: number; mtime: number }[];
 }
 
-/** 增量包里的删除项：同样带 base，本地改过就不删 */
+/** 更新包里的删除项：同样带 base，本地改过就不删 */
 export interface BundleDeletedEntry {
 	path: string;
 	baseSize?: number;
@@ -123,7 +123,7 @@ export interface BundleHeader {
 	/** 导出方的身份（排查问题用：这个包是哪台机器、第几代导出的） */
 	source: CopyRef;
 	/**
-	 * 增量包的基准版本：导出方以为接收方现在停在第几代。
+	 * 更新包的基准版本：导出方以为接收方现在停在第几代。
 	 * **完整备份为 null ＝ 免校验**。
 	 */
 	baseGeneration: number | null;

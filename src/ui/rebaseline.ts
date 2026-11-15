@@ -303,7 +303,7 @@ export function defaultBundleDir(plugin: LocallySavePlugin): string {
  * "对面接收后也要导出一个完整备份，保证两边完整备份相同，然后才继续更新，这样最稳"）。
  *
  * 什么时候需要：应用了一份**差分更新包**之后 —— 基准前进到了另一份完整备份，可手里只有那份更新包，
- * `state.bundle.fullFile` 只能是空的（`apply.ts` 里那段：拿更新包的文件名冒充基准包会让
+ * `state.bundle.fullFile` 只能是空的（`apply.ts` 里那段：拿更新包的文件名冒充完整备份会让
  * "恢复本机误改"去找错东西）。不补会怎样：`findBaselineBundle` 按名字找不到它 →
  * 「恢复本机误改」/「强制回退到基准再应用」只能报"把那份包放回来"；给第三台机器导差分更新包时，
  * 终点那份完整备份不在本机也做不出来。补一份之后，两台机器**各持一份同一份基准**，
@@ -337,7 +337,7 @@ export async function ensureLocalBaselineBundle(
 			fresh.bundle.fullFile = existing.name;
 			await saveState(plugin.stateFile(), fresh);
 		}
-		return `本机已经有第 ${existing.generation} 版那份完整备份，已记成本机的基准包`;
+		return `本机已经有第 ${existing.generation} 版那份完整备份，已记成本机的完整备份`;
 	}
 
 	const inventory = await scanTree(plugin.vaultRoot(), {

@@ -158,7 +158,7 @@ cd <kf-development-project>/obsidian-locally-save-test
 npm test          # 全量用例（31 个文件）；改比对算法必跑（test/diff.test.ts 是完整矩阵）
 ```
 
-`test/auto-export.test.ts` 与 `test/auto-apply.test.ts` 是两条链路的端到端（插件装配 +
+`test/auto-export.test.ts` 与 `test/auto-apply.test.ts` 是两条流程的端到端（插件装配 +
 真实临时目录）：前者管"导出"，后者管"接收 → 安全边界 → 自动应用"，
 改动自动导出 / 自动应用 / 状态栏 / 通知文案时要一起看它们。
 

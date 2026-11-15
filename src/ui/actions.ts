@@ -121,7 +121,7 @@ export async function exportBundlesNow(
 /**
  * 这次发号的**下限**：远程仓库上已经能看到的最高代。
  *
- * 两台机器各自导出时，如果都只看自己的 `maxGeneration`，就会各发一个第 N 代
+ * 两台机器各自导出时，如果都只看自己的 `maxGeneration`，就会各发一个第 N 版
  * （内容还不一样）—— 用 git 交换过 peer 状态 / 包之后，重新发号时取"已知最大 + 1"，
  * 后导的那一份就排到下一个号上。
  *
@@ -286,7 +286,7 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 			&& await isShelf(base, gitPath !== '' ? { gitPath } : {});
 
 		/**
-		 * **先交换一次，再发号**：对方可能刚推了一个第 N 代包，我这边如果只看自己的高水位，
+		 * **先交换一次，再发号**：对方可能刚推了一个第 N 版包，我这边如果只看自己的高水位，
 		 * 就会再发一个同版本包。先 git 同步（只拉/推，不应用），`generationFloor` 才看得到对方的号。
 		 * 这次失败不挡导出：离线时照常导出，后面那次同步再试。
 		 */

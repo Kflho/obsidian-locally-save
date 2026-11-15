@@ -246,7 +246,7 @@ export interface PluginState {
 	 * **内容与"我以为的那个状态"不一致**（应用完核对出来的）。
 	 *
 	 * 什么时候记：完整备份镜像 / 严格镜像本该变成包那一版，结果有写失败的、有删不掉的目录
-	 * （`stateIdCompare !== 'match'`）。**不记的话对外只剩一句"我在第 N 代"** ——
+	 * （`stateIdCompare !== 'match'`）。**不记的话对外只剩一句"我在第 N 版"** ——
 	 * 用户那台机器就报过"第 392 版"，而内容是第 112 版的，连对表文件都这么写，
 	 * 对面的人与 agent 全被带偏（本次 112/392 排查就是这么绕远的）。
 	 *
@@ -257,7 +257,7 @@ export interface PluginState {
 		expected: string;
 		/** 实际算出来的内容校验值 */
 		actual: string;
-		/** 包的目标版本（界面文案里写"第 N 代"） */
+		/** 包的目标版本（界面文案里写"第 N 版"） */
 		generation?: number | null;
 		at: number;
 	} | null;

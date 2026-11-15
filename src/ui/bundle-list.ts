@@ -284,7 +284,7 @@ export class BundleListView {
 	 * 一个包"是第几代"——**版本与内容校验值一起写**。
 	 *
 	 * 只写版本会认错包：版本号说不出"我们用哪一份完整备份上"；内容校验值才是"这一刻文件长什么样"。
-	 * 完整备份写「第 N 代」；更新包写「第 N → M 代」（M ＝ 应用它之后到达的版本，
+	 * 完整备份写「第 N 版」；更新包写「第 N → M 代」（M ＝ 应用它之后到达的版本，
 	 * 差分更新包的 M 就是它送到的那一刻）。
 	 */
 	private describeGeneration(item: ManagedBundle): string {
