@@ -887,44 +887,50 @@ async function reportIncomingSweep(
 	sweep: IncomingSweep,
 	options: { manual?: boolean } = {},
 ): Promise<void> {
+	let written = 0;
+	let deleted = 0;
+	let restored = 0;
+	let recovered = 0;
+	let pending = 0;
+	let mismatch = false;
 	for (const item of sweep.applied) {
-		const parts = [`写入 ${item.written}`];
-		if (item.deleted > 0) parts.push(`删除 ${item.deleted}`);
-		if (item.restored > 0) parts.push(`恢复误改 ${item.restored}`);
-		// 保底走过一趟：本机被改乱时先回退到基准再应用，用户要知道仓库被整体对齐过
-		if (item.recovered) parts.push('（首次校验未通过，已回退到基准后重新应用）');
-		const tail = item.stateIdCompare === 'match'
-			? ''
-			: item.pending > 0
-				? ` · 你还有 ${item.pending} 个待发`
-				: ' · 两边内容尚未完全一致';
-		plugin.log.debug(`已自动应用对方更新 · ${parts.join('、')}${tail}`);
-		/**
-		 * **自动接收不弹通知，只在状态栏顶一句**（0.16.14）：写进来几个新文件是同步的本分，
-		 * 每收一份包弹一条"已自动应用对方更新"就是用户说的"右上角不断显示信息"。
-		 * 状态栏那句几秒后自己回到"已推送 · 对方：一致"，不打扰。
-		 * 真正要弹通知的是"动了你已有的东西"：**删了本机文件**、**从基准恢复了本机误改**、
-		 * **走过强制回退**（仓库被整体对齐过）。
-		 */
-		plugin.statusBar.flash(`已应用对方更新 · ${parts.join('、')}${tail}`);
-		if (item.deleted > 0 || item.restored > 0 || item.recovered === true) {
-			new Notice(`已自动应用对方更新 · ${parts.join('、')}${tail}`, 7000);
-		}
-	}
-	if (sweep.applied.length > 0) await refreshStatusBar(plugin);
-
-	for (const item of sweep.review) {
-		if (item.kind === 'failed') {
-			new Notice(`自动应用失败。原因：${brief(item.why)}。`, 8000);
-			continue;
-		}
-		// 不自动动手，但也别沉默：说清"没自动应用"和最短的原因，细节在日志
-		new Notice(
-			item.full
-				? `收到完整备份，需要手动应用。原因：${brief(item.why)}。`
-				: `收到更新包，但未自动应用。原因：${brief(item.why)}。`,
-			9000,
+		written += item.written;
+		deleted += item.deleted;
+		restored += item.restored;
+		if (item.recovered) recovered += 1;
+		if (item.stateIdCompare !== 'match') mismatch = true;
+		pending = Math.max(pending, item.pending);
+		plugin.log.debug(
+			`已自动应用对方更新：写入 ${item.written} 个文件，删除 ${item.deleted} 个，恢复误改 ${item.restored} 个`,
 		);
+	}
+	if (sweep.applied.length > 0) {
+		const parts = [`写入 ${written} 个文件`];
+		if (deleted > 0) parts.push(`删除 ${deleted} 个`);
+		if (restored > 0) parts.push(`恢复误改 ${restored} 个`);
+		if (recovered > 0) parts.push(`${recovered} 份先回退到基准`);
+		const tail = mismatch ? (pending > 0 ? `。本机还有 ${pending} 个待发` : '。两边内容尚未完全一致') : '';
+		/**
+		 * 自动接收不弹通知，只在状态栏顶一句；只有动了用户已有的东西才弹出。
+		 * 一次扫到多份包时合并成一条，不按包刷屏。
+		 */
+		plugin.statusBar.flash(`已应用对方更新：${parts.join('，')}${tail}。`);
+		if (deleted > 0 || restored > 0 || recovered > 0) {
+			new Notice(`已自动应用对方更新：${parts.join('，')}${tail}。`, 7000);
+		}
+		await refreshStatusBar(plugin);
+	}
+
+	if (sweep.review.length > 0) {
+		const failed = sweep.review.filter(item => item.kind === 'failed').length;
+		const fulls = sweep.review.filter(item => item.kind !== 'failed' && item.full).length;
+		const updates = sweep.review.length - failed - fulls;
+		const segments: string[] = [];
+		if (fulls > 0) segments.push(`收到完整备份（${fulls} 份），需要手动应用`);
+		if (updates > 0) segments.push(`收到更新包（${updates} 个），但未自动应用`);
+		if (failed > 0) segments.push(`自动应用失败（${failed} 份）`);
+		const first = brief(sweep.review[0]?.why ?? '未知原因');
+		new Notice(`${segments.join('；')}。首个原因：${first}。详见日志。`, 9000);
 	}
 
 	// 手动的「立即同步」**不按"只说一次"压着**：用户就是来问"到底还差什么"的，
