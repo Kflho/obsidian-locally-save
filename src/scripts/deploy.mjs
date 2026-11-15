@@ -6,6 +6,8 @@
  * `npm run dev`（watch）与 `npm run build` 都会在打包完成后自动调用这里；
  * 改了 manifest.json 版本号又不想重新打包时，直接 `npm run deploy`。
  *
+ * 脚本在 `src/scripts/` 下，项目根是上两级（manifest、交付包都在根上）。
+ *
  * 目标目录的取法（先到先用）：
  *   1. 环境变量 OBSIDIAN_PLUGIN_DIR
  *   2. 仓库根目录下的 deploy.local.json：{ "pluginDir": "…/plugins/locally-save" }
@@ -19,13 +21,18 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+/** 项目根（本脚本在 `src/scripts/` 下）：交付包、manifest、本机配置都在根上 */
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** 本机的插件目录配置；不进版本库。 */
 const LOCAL_CONFIG = path.join(projectRoot, "deploy.local.json");
 
-/** 需要同步过去的运行用文件；main.js 由 esbuild 产出，另两个是仓库里的源文件。 */
-const ARTIFACTS = ["main.js", "manifest.json", "styles.css"];
+/** 需要同步过去的运行用文件：main.js 来自交付包，manifest 来自仓库根，styles 来自 src。 */
+const ARTIFACTS = [
+	{ name: "main.js", from: "bin/exports/main.js" },
+	{ name: "manifest.json", from: "manifest.json" },
+	{ name: "styles.css", from: "src/styles.css" },
+];
 
 /** 读本机配置里的插件目录；没配、读不出来或不是字符串时返回空串。 */
 function readLocalPluginDir() {
@@ -62,17 +69,17 @@ export function deployArtifacts({ quiet = false } = {}) {
 	}
 
 	const copied = [];
-	for (const name of ARTIFACTS) {
-		const from = path.join(projectRoot, name);
+	for (const artifact of ARTIFACTS) {
+		const from = path.join(projectRoot, artifact.from);
 		if (!fs.existsSync(from)) {
-			console.warn(`[deploy] 缺少 ${name}，跳过`);
+			console.warn(`[deploy] 缺少 ${artifact.name}，跳过`);
 			continue;
 		}
 		try {
-			fs.copyFileSync(from, path.join(target, name));
-			copied.push(name);
+			fs.copyFileSync(from, path.join(target, artifact.name));
+			copied.push(artifact.name);
 		} catch (error) {
-			console.warn(`[deploy] 复制 ${name} 失败：${error.message}`);
+			console.warn(`[deploy] 复制 ${artifact.name} 失败：${error.message}`);
 		}
 	}
 
@@ -82,7 +89,7 @@ export function deployArtifacts({ quiet = false } = {}) {
 	return copied;
 }
 
-// 直接 `node deploy.mjs` 时执行一次；被 esbuild.config.mjs import 时不执行。
+// 直接 `node src/scripts/deploy.mjs` 时执行一次；被 esbuild.config.mjs import 时不执行。
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const copied = deployArtifacts();
 	if (copied.length === 0) process.exitCode = 1;

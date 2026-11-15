@@ -1,7 +1,35 @@
 import esbuild from "esbuild";
 import process from "process";
+import fs from "node:fs";
+import path from "node:path";
 import { builtinModules } from 'node:module';
+import { fileURLToPath } from "node:url";
 import { deployArtifacts } from "./deploy.mjs";
+
+/** 项目根（本脚本在 `src/scripts/` 下）：入口 src/main.ts、manifest 与交付包都相对它定位 */
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+/** 交付包目录：main.js 产出到这里，manifest / styles 由构建时复制过来 */
+const exportDir = path.join(projectRoot, "bin", "exports");
+
+// 构建完成后把**源文件**复制进交付包：
+// manifest.json 在仓库根（Obsidian 校验固定读根路径）、styles.css 在 src/；
+// 两者都不是构建产物；但 bin/exports 要能整包拿去安装 / 上传 release，所以复制一份。
+const copyExportAssets = {
+	name: "copy-export-assets",
+	setup(build) {
+		build.onEnd((result) => {
+			if (result.errors.length > 0) return;
+			fs.mkdirSync(exportDir, { recursive: true });
+			for (const [from, to] of [
+				["manifest.json", "manifest.json"],
+				["src/styles.css", "styles.css"],
+			]) {
+				const source = path.join(projectRoot, from);
+				if (fs.existsSync(source)) fs.copyFileSync(source, path.join(exportDir, to));
+			}
+		});
+	},
+};
 
 // 打包完成后把运行用文件同步到 vault 里的插件目录（源码只在本仓库）。
 // 目标目录不存在时静默跳过 —— CI 上跑 build 不该因此失败。
@@ -28,7 +56,7 @@ const context = await esbuild.context({
 	banner: {
 		js: banner,
 	},
-	entryPoints: ["src/main.ts"],
+	entryPoints: [path.join(projectRoot, "src/main.ts")],
 	bundle: true,
 	external: [
 		"obsidian",
@@ -53,9 +81,9 @@ const context = await esbuild.context({
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
-	outfile: "main.js",
+	outfile: path.join(exportDir, "main.js"),
 	minify: prod,
-	plugins: [deployToPluginDir],
+	plugins: [copyExportAssets, deployToPluginDir],
 });
 
 if (prod) {

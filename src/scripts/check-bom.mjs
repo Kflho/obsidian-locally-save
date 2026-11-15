@@ -5,16 +5,19 @@
  * 于是 manifest.json 开头多了 \uFEFF —— Obsidian 用 JSON.parse 读 manifest，
  * 直接解析失败，插件**静默地**不出现在列表里（tsc / node 都容忍 BOM，所以测不出来）。
  *
- * 用法：
- *   node tools/check-bom.mjs          只报告
- *   node tools/check-bom.mjs --fix    顺手把 BOM 去掉、旧名改掉
+ * 用法（在 `src/` 下跑）：
+ *   npm run check-bom            只报告
+ *   npm run check-bom -- --fix   顺手把 BOM 去掉、旧名改掉
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const FIX = process.argv.includes('--fix');
-const SKIP = /(node_modules|[\\/]\.git|[\\/]\.build)/;
-const SELF = path.resolve('tools/check-bom.mjs');
+const SKIP = /(node_modules|[\\/]\.git|[\\/]\.build|[\\/]bin[\\/]exports[\\/]main\.js)/;
+/** 项目根（本脚本在 `src/scripts/` 下）；扫的是整个仓库，不只是 src */
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const SELF = fileURLToPath(import.meta.url);
 const EXTENSIONS = /\.(ts|mjs|json|css|md|yml|yaml|txt|editorconfig|npmrc|gitignore)$/;
 
 /** 旧名字的残留（改名时漏掉的） */
@@ -52,7 +55,7 @@ function walk(dir) {
 	}
 }
 
-walk('.');
+walk(projectRoot);
 
 console.log(withBom.length ? `带 BOM 的文件（${withBom.length}）：` : '带 BOM 的文件：无 ✓');
 for (const file of withBom) console.log('  ' + file);
@@ -68,7 +71,7 @@ const jsonFiles = [];
 		if (entry.isDirectory()) collect(full);
 		else if (entry.name.endsWith('.json')) jsonFiles.push(full);
 	}
-})('.');
+})(projectRoot);
 
 const broken = [];
 for (const file of jsonFiles) {

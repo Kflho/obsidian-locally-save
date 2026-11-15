@@ -6,13 +6,14 @@
     "author": "KahoTAT",
     "type": "module",
     "scripts": {
-        "dev": "node esbuild.config.mjs",
-        "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-        "deploy": "node deploy.mjs",
+        "dev": "node scripts/esbuild.config.mjs",
+        "build": "tsc -noEmit -skipLibCheck -p tsconfig.json && node scripts/esbuild.config.mjs production",
+        "deploy": "node scripts/deploy.mjs",
+        "check-bom": "node scripts/check-bom.mjs",
         "test": "echo \"tests moved to kf-development-project/obsidian-locally-save-test\"",
-        "version": "node version-bump.mjs && git add manifest.json versions.json",
+        "version": "node scripts/version-bump.mjs && git add ../manifest.json ../versions.json",
         "postversion": "npm run build",
-        "lint": "eslint ."
+        "lint": "eslint --config scripts/eslint.config.mts ."
     },
     "keywords": [],
     "license": "0-BSD",

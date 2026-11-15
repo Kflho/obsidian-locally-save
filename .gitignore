@@ -1,16 +1,19 @@
 # vscode
-.vscode 
+.vscode
 
 # Intellij
 *.iml
 .idea
 
-# npm
-node_modules
+# npm（工程根在 src/）
+node_modules/
 
-# Don't include the compiled main.js file in the repo.
-# They should be uploaded to GitHub releases instead.
+# 构建产物：bin/exports/ 里除 README.md 外都能重新生成
+# （main.js 上传到 GitHub releases，不进版本库）
 main.js
+bin/exports/main.js
+bin/exports/manifest.json
+bin/exports/styles.css
 
 # Exclude sourcemaps
 *.map
@@ -21,10 +24,7 @@ main.js
 dist/
 build/
 
-# Test build output
-test/.build/
-
-# obsidian
+# obsidian 自己写的插件设置
 data.json
 
 # 本地 AI 工具配置
@@ -33,10 +33,24 @@ data.json
 # 本机的部署目标（写着自个儿的 vault 路径，不进版本库；模板是 deploy.local.example.json）
 deploy.local.json
 
-# 内部开发文档（本机的记录，不对外）
-docs/
+# 中间产物（README 说明用途，保留）
+data/*
+!data/README.md
+
+# 本机草稿 / 临时产物（kf-personal-development：dev/ 不进 git）
 dev/
-AGENTS.md
+temp/
+logs/
+*.log
+
+# 本机配置 / 密钥
+local.json
+local.*.json
+!.env.example
+.env
+.env.*
+*.pem
+*.key
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store

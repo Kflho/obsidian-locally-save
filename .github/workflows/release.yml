@@ -3,8 +3,8 @@ name: Release
 # 打 tag 即发版：构建 → 生成来源证明（artifact attestation）→ 建 release。
 # tag 必须与 manifest.json 的 version 一致，且不带前缀 v。
 #
-# 这一份继承自 js_02（note-tidy）：比官方模板多了"跑测试"与"tag 与版本号一致性校验"
-# 两步 —— 版本号忘了改就打 tag 是最容易犯的错。
+# 这一份继承自 js_02（note-tidy）：比官方模板多了"tag 与版本号一致性校验"这一步
+# —— 版本号忘了改就打 tag 是最容易犯的错。测试在私有测试仓跑，不在这里跑。
 on:
     push:
         tags: ["*"]
@@ -35,10 +35,11 @@ jobs:
               with:
                   node-version: 24
                   cache: "npm"
+                  cache-dependency-path: src/package-lock.json
 
-            - run: npm ci
-            - run: npm test
-            - run: npm run build
+            # npm 工程根在 src/；交付包产出到 bin/exports/
+            - run: npm ci --prefix src
+            - run: npm run build --prefix src
 
             - name: Check tag matches manifest version
               run: |
@@ -52,9 +53,9 @@ jobs:
               uses: actions/attest-build-provenance@v2
               with:
                   subject-path: |
-                      main.js
+                      bin/exports/main.js
                       manifest.json
-                      styles.css
+                      bin/exports/styles.css
 
             - name: Create release
               env:
@@ -63,4 +64,4 @@ jobs:
                   gh release create "$TAG" \
                     --title "$TAG" \
                     --generate-notes \
-                    main.js manifest.json styles.css
+                    bin/exports/main.js manifest.json bin/exports/styles.css

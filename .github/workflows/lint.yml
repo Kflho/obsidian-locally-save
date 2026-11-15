@@ -22,7 +22,9 @@ jobs:
               with:
                   node-version: ${{ matrix.node-version }}
                   cache: 'npm'
-            - run: npm ci
-            - run: npm run build --if-present
-            - run: npm test
-            - run: npm run lint
+                  cache-dependency-path: src/package-lock.json
+            # npm 工程根在 src/（package.json / 锁 / tsconfig / 构建脚本都在那儿）
+            - run: npm ci --prefix src
+            - run: npm run build --prefix src
+            - run: npm run lint --prefix src
+            # 测试在私有测试仓 kf-development-project/obsidian-locally-save-test，不在本仓 CI
