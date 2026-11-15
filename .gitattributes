@@ -1,6 +1,10 @@
-# 发布资产按 LF 构建：Windows 的 core.autocrlf=true 会把 checkout 变成 CRLF，
-# 导致同一 tag 在两台机器 build 出的 manifest/styles 字节不同。
-# 参考 https://git-scm.com/docs/gitattributes#_eol
+# 全仓文本按 LF 存盘：Windows 的 core.autocrlf=true 会把 checkout 变成 CRLF，
+# 同一 tag 在两台机器 build 出的字节不同，check_files 也会报 CRLF 警告。
+# 参考 kf-personal-development/references/files.md 与
+# https://git-scm.com/docs/gitattributes#_eol
+* text=auto eol=lf
+
+# 发布资产（显式再写一遍，方便一眼看到哪些是"打包字节"）
 manifest.json text eol=lf
 src/styles.css text eol=lf
 versions.json text eol=lf
