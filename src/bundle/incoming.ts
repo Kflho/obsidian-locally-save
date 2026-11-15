@@ -381,7 +381,7 @@ export async function handleIncoming(
 		if (policy.confirm) {
 			const answer = await policy.confirm(candidate, plan);
 			if (answer === 'defer') {
-				// 窗口不在前台：确认框没人能点。**不能挂在这里**（syncNow 的锁会一直占着，
+				// 窗口不在前台：确认框没人能点。**不能一直等着**（syncNow 的锁会一直占着，
 				// 后面每次同步都只写一笔 sync.start 就没了，用户看到的就是"命令 204、没反应"）。
 				// 记成 needs-review：手动「立即同步」会再挑它、再问一次。
 				await rememberDecision(options.stateFile, candidate.bundleId, 'needs-review', name);

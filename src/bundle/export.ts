@@ -702,7 +702,7 @@ function detectMovesByRecords(
 		for (const newPath of newUnder) removedTo.add(newPath);
 	}
 
-	// 目录移动没吃掉的配对，就是文件级移动
+	// 目录移动没有匹配掉的配对，就是文件级移动
 	for (const pair of pairs) {
 		if (consumed.has(pair)) continue;
 		moves.push({

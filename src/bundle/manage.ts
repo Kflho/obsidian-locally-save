@@ -25,7 +25,7 @@ export const BUNDLE_TRASH_DIR = 'bundles-trash';
 /**
  * 回收站根目录（绝对路径）＝**离包最近的那个 `.lsave` 里**的 `bundles-trash`。
  *
- * 关键一条：**不要塞进 `bundles` 里面**。包目录的上一级或它本身就是 `.lsave` 时，
+ * 关键一条：**不要放进 `bundles` 目录里**。包目录的上一级或它本身就是 `.lsave` 时，
  * 再往里放会把 `.lsave` 套两层（`.lsave/bundles/.lsave/bundles-trash`），
  * 翻起来又乱又难找（用户报过）。所以：
  * - `<x>/.lsave/bundles`（0.8.0 之前副本通道的默认布局）→ `<x>/.lsave/bundles-trash`，跟 `bundles` 平级；

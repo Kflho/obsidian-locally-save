@@ -80,7 +80,7 @@ export interface ApplyChoice {
  * 所以"包送到的状态"是确定的 ＝ 本机当前的那个版本 ＋ 条目 − 点名删除。
  * 旧版本担心的"没提到的文件会被当成该删、一次清空仓库"在链条模型下不成立。
  *
- * 表留着是为了让"引擎支持哪几档"有个单一出处（`test/bundle.test.ts` 守着它）；
+ * 表留着是为了让"引擎支持哪几档"有个单一出处（由 `test/bundle.test.ts` 验证）；
  * 界面（`ui/bundle-modal.ts`）**不读它**：手动应用一律严格档。
  * 合并那条路（`strictness: 'normal'`）只剩自动接收（`incoming.ts`）与串联（`chain.ts`）在用。
  */
@@ -148,7 +148,7 @@ export interface ApplyOptions {
 	 * - `normal`（不填时的默认）：走 `planSync` 三方比对 —— 本地改过的保留、分歧留两份、
 	 *   我独有的文件不动。**只有自动接收（`incoming.ts`）与串联（`chain.ts`）在用**：
 	 *   那条路的边界是"只应用不会动到本地已有东西的包"，合并语义正好对上；
-	 * - `listed-wins` / `bundle-wins`：引擎里还留着（测试守着），界面上已经不给选。
+	 * - `listed-wins` / `bundle-wins`：引擎里还留着（测试覆盖），界面上已经不给选。
 	 *
 	 * 排除规则命中的东西（配置目录等）都不动。
 	 */
@@ -609,7 +609,7 @@ interface BaselineAnchor {
 }
 
 /**
- * **"按包的起点对齐"这条路走不通时**抛给界面的载荷（挂在 error 的 `baselineReset` 上）。
+ * **"按包的起点对齐"这条路走不通时**抛给界面的载荷（记在 error 的 `baselineReset` 里）。
  *
  * 为什么要有它：`planBundleApply` 抛错时界面只能显示一句话。这里需要的不是"再说一遍错"，
  * 而是**"那份包在本机，要不要按它对齐"** —— 界面据此出按钮，`recoverToBaselineAndApply`

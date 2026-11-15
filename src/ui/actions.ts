@@ -405,7 +405,7 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
  * - 自上次导出以来没有任何变化时**一个包都不写** —— 完整备份一写就是整库重写；
  * - 完整备份刚留过的话，更新包按它算必然是空的，那就不写空包，只说明一句。
  *
- * `advice` 单独拎出来（不塞进 `notes`）：调用方要按"手动 / 自动触发"决定它去哪儿 ——
+ * `advice` 单独拎出来（不放进 `notes`）：调用方要按"手动 / 自动触发"决定它去哪儿 ——
  * 自动触发只写状态栏与日志，不弹通知（见 `runExport`）。
  */
 async function writePlannedBundles(
@@ -737,7 +737,7 @@ export async function checkBundleGc(plugin: LocallySavePlugin): Promise<boolean>
  * 想反悔还能从「打开同步包并应用…」手动来。
  *
  * **窗口不在前台时不弹、直接 `defer`**（0.15.9）：REST / 后台节拍触发时没人能点确认框，
- * 弹出来只会把一个 Promise 挂在那里 —— `syncNow` 的锁一直占着，后面的同步就"204 没反应"。
+ * 弹出来只会让一个 Promise 一直等待 —— `syncNow` 的锁一直占着，后面的同步就"204 没反应"。
  * 记 `needs-review`，用户回 Obsidian 手动同步时再问。
  */
 function confirmIncomingApply(

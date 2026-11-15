@@ -79,7 +79,7 @@ export async function generateSshKey(): Promise<{ key: SshKey | null; error: str
  *
  * **不能看退出码**：GitHub 不提供 shell，`ssh -T` 认证成功也返回 1
  * （`Hi xxx! You've successfully authenticated, but GitHub does not provide shell access.`）。
- * 所以只认文本 —— 这条规则单独抽出来，`test/ssh.test.ts` 守着。
+ * 所以只认文本 —— 这条规则单独抽出来，由 `test/ssh.test.ts` 验证。
  */
 export function sshAuthSucceeded(text: string): boolean {
 	return !/Permission denied/i.test(text)

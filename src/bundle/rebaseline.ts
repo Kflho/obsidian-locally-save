@@ -34,7 +34,7 @@ import type { ExportOptions } from './export';
 /**
  * 一份差分更新包**最大**做多大就不做了（字节）。
  *
- * 依据：GitHub 对单个文件卡 100 MB，超了 push 直接失败；而包一旦落进 `changes/` 就会被
+ * 依据：GitHub 对单个文件卡 100 MB，超了 push 直接失败；而包一旦放进 `changes/` 就会被
  * `git add` 收进去，**之后每一轮同步都会带着它失败** —— 那等于把整条远程仓库搞停。
  * 所以宁可先算一下要搬多少，超了就不写包、如实告诉用户改走"完整备份整个复制过去"。
  */
@@ -162,7 +162,7 @@ export function peerLabel(peer: RebaselinePeer): string {
 /**
  * 算清楚「每台电脑还差哪一份差分更新包」（**只读**：扫包目录 + 读状态，不写一个字节）。
  *
- * `maxBytes` 默认 `REBASELINE_MAX_BYTES`（测试会传一个小值来守住"太大就不生成"这条）。
+ * `maxBytes` 默认 `REBASELINE_MAX_BYTES`（测试会传一个小值来验证"太大就不生成"这条）。
  */
 export function planRebaselineDiffs(
 	baseDir: string,

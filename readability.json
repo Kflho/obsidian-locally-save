@@ -1,5 +1,9 @@
 {
   "glossary": "bin/reference_docs/术语表.md",
+  "skip": [
+    "bin/reference_docs/technical_solution_docs",
+    "bin/reference_docs/research"
+  ],
   "allow": [
     "同步包",
     "更新包",

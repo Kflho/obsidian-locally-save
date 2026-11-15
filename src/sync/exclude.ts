@@ -47,7 +47,7 @@ function globToRegExp(pattern: string): RegExp {
 		if (char === '*') {
 			if (pattern[i + 1] === '*') {
 				i++;
-				// `**/` 把斜杠一起吃进去：这样 `**/*.md` 也能匹配仓库根目录下的 c.md
+				// `**/` 连斜杠一起匹配：这样 `**/*.md` 也能匹配仓库根目录下的 c.md
 				if (pattern[i + 1] === '/') {
 					source += '(?:.*/)?';
 					i++;

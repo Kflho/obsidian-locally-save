@@ -101,7 +101,7 @@ export class ExportBundleModal extends Modal {
 			// 状态文件读不到 / 目录不存在：剩下「最新」那一项，导出时再说
 		}
 		const fill = (dropdown: DropdownComponent | null, end: 'from' | 'to', value: string): void => {
-			// 测试替身里没有真的 select（只需要不炸）
+			// 测试替身里没有真的 select（只需要能运行）
 			if (!dropdown?.selectEl) return;
 			const options = anchorOptions(anchors, end, latest);
 			dropdown.selectEl.empty();
