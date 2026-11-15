@@ -29,7 +29,7 @@ export const GENERAL_SECTION: FieldSection = {
 				{
 					key: 'logLevel',
 					name: '日志级别',
-					desc: '控制台输出量。排查问题时选择「全部输出」，日常使用「只记错误」。',
+					desc: '开发者控制台的输出量。排查问题时选「全部输出」，日常使用「只记错误」。',
 					control: { type: 'dropdown', options: LOG_LEVEL_OPTIONS },
 					coerce: value => coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel),
 				},
