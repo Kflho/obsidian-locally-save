@@ -13,34 +13,34 @@ import { exportBundle } from './export';
 import type { ExportOptions } from './export';
 
 /**
- * **换基准的差量包**：把「别的电脑站的旧完整副本 → 我现在站的这份完整副本」写成一份小包。
+ * **换基准的差分更新包**：把「别的电脑使用的旧完整备份 → 我现在当前使用的这份完整备份」写成一份小包。
  *
- * 为什么需要：完整副本按决定**不进 git**（几百 MB），而更新包是"自某一份完整副本算起的累积差量"。
- * 我一换基准（导了一份新的完整副本），别的电脑下一次收到的更新包就是"从一份它没有的完整副本算起"，
- * `checkAncestor` 判它基准对不上 → 两边卡死。补法是导一份**差量包**（端点是两份完整副本，
+ * 为什么需要：完整备份按决定**不进 git**（几百 MB），而更新包是"自某一份完整备份算起的累积差量"。
+ * 我一换基准（导了一份新的完整备份），别的电脑下一次收到的更新包就是"从一份它没有的完整备份算起"，
+ * `checkAncestor` 判它基准不一致 → 两边卡死。补法是导一份**差分更新包**（端点是两份完整备份，
  * 只装两者之间的差异，通常几 MB）：它收下、应用完就换到新基准上（`apply.ts` 的
- * `landedOnBaseline` 只认清单与指纹，**它手里不需要有新的完整副本**）。
+ * `landedOnBaseline` 只认清单与校验值，**它手里不需要有新的完整备份**）。
  *
  * 这一份专门回答三个问题（**只读**，先算后做）：
- * 1. 我现在站的是哪一份（`state.bundle.fullHash`）；
- * 2. 每台电脑用哪一份（货架 `.lsave-peers/*.json` 里它自己报的 `baselineHash`）；
- * 3. 这两点之间做不做得出差量包 —— 它的起点那份完整副本得**还在本机**（差量包的负载取自终点那份，
+ * 1. 我现在使用的是哪一份（`state.bundle.fullHash`）；
+ * 2. 每台电脑用哪一份（远程仓库 `.lsave-peers/*.json` 里它自己报的 `baselineHash`）；
+ * 3. 这两点之间做不做得出差分更新包 —— 它的起点那份完整备份得**还在本机**（差分更新包的负载取自终点那份，
  *    起点的清单要靠它算）。
  *
- * 与 `exportRebaselineDiff` 的关系：那个是"导出完整副本时顺手导一份"（只知道"导出前我站的旧基准"），
- * 这里是"按每台电脑各自报的基准逐个导"（多台机器停在不同旧基准上时各要一份）。
+ * 与 `exportRebaselineDiff` 的关系：那个是"导出完整备份时顺手导一份"（只知道"导出前本机当前使用的旧基准"），
+ * 这里是"按每台电脑各自报的基准逐个导"（多台机器仍使用不同旧基准时各要一份）。
  */
 
 /**
- * 一份差量包**最大**做多大就不做了（字节）。
+ * 一份差分更新包**最大**做多大就不做了（字节）。
  *
  * 依据：GitHub 对单个文件卡 100 MB，超了 push 直接失败；而包一旦落进 `changes/` 就会被
- * `git add` 收进去，**之后每一轮同步都会带着它失败** —— 那等于把整条货架搞停。
- * 所以宁可先算一下要搬多少，超了就不写包、如实告诉用户改走"完整副本整个拷过去"。
+ * `git add` 收进去，**之后每一轮同步都会带着它失败** —— 那等于把整条远程仓库搞停。
+ * 所以宁可先算一下要搬多少，超了就不写包、如实告诉用户改走"完整备份整个复制过去"。
  */
 export const REBASELINE_MAX_BYTES = 80 * 1024 * 1024;
 
-/** 货架里一台电脑的基准情况（`readPeers` 出来的那几项，界面直接用） */
+/** 远程仓库里一台电脑的基准情况（`readPeers` 出来的那几项，界面直接用） */
 export interface RebaselinePeer {
 	copyId: string;
 	host: string;
@@ -48,7 +48,7 @@ export interface RebaselinePeer {
 	generation: number;
 	baselineHash: string | null;
 	baselineGeneration: number | null;
-	/** 它还有几个改动没发出来（`pendingReturn`）：停在旧基准上又有改动时更要紧 */
+	/** 它还有几个改动没发出来（`pendingReturn`）：仍使用旧基准又有改动时更要紧 */
 	pending: number;
 	at: number;
 }
@@ -68,16 +68,16 @@ export function peerOfState(peer: PeerState): RebaselinePeer {
 
 /**
  * 一台电脑当前处在哪一档：
- * - `ready`：能导 —— 它站的旧完整副本在本机，终点是我站的这份；
- * - `exists`：`changes/` 里已经有一份同样的差量包了（不会重复生成）；
- * - `same`：它已经站到我这份上了（不用做什么）；
- * - `ahead`：它站的比我这份新（该收它的差量包，不是发）；
- * - `diverged`：同一代、但不是同一份（两条线各立过基准，差量包不能拿它当起点）；
- * - `missing`：本机没有它站的那份完整副本（做不出来，只能把整份拷过去）；
- * - `no-baseline`：它还没站上任何完整副本（第一次用，先应用一份完整副本）；
+ * - `ready`：能导 —— 那台电脑使用的旧完整备份在本机，终点是本机当前使用的这份；
+ * - `exists`：`changes/` 里已经有一份同样的差分更新包了（不会重复生成）；
+ * - `same`：它已经以我这份为基准了（不用做什么）；
+ * - `ahead`：那台电脑使用的比我这份新（该收它的差分更新包，不是发）；
+ * - `diverged`：同一代、但不是同一份（两条线各立过基准，差分更新包不能拿它当起点）；
+ * - `missing`：本机没有那台电脑使用的那份完整备份（做不出来，只能把整份复制过去）；
+ * - `no-baseline`：它还没站上任何完整备份（第一次用，先应用一份完整备份）；
  * - `foreign`：不同一分支（另一条独立的线）；
- * - `too-big`：做出来的差量包太大，推不进货架；
- * - `no-target`：我站的这份完整副本不在本机磁盘上（应用差量包之后就是这样），做不出到它的包。
+ * - `too-big`：做出来的差分更新包太大，推不进远程仓库；
+ * - `no-target`：本机当前使用的这份完整备份不在本机磁盘上（应用差分更新包之后就是这样），做不出到它的包。
  */
 export type RebaselineStatus =
 	| 'ready'
@@ -94,16 +94,16 @@ export type RebaselineStatus =
 export interface RebaselineDiffTask {
 	peer: RebaselinePeer;
 	status: RebaselineStatus;
-	/** 它站的那份完整副本（在本机找得到时才有） */
+	/** 那台电脑使用的那份完整备份（在本机找得到时才有） */
 	source: BundleAnchor | null;
-	/** 已经存在的那一份差量包的文件名 */
+	/** 已经存在的那一份差分更新包的文件名 */
 	existing: string | null;
 	/** 这一份大概要搬多少字节（只装两边不一样的那些文件） */
 	estimateBytes: number;
 }
 
 export interface RebaselineDiffPlan {
-	/** 我现在站的完整副本；null ＝ 还没站上任何一份 */
+	/** 我现在使用的完整备份；null ＝ 还没站上任何一份 */
 	mine: { generation: number; hash: string; name: string | null } | null;
 	tasks: RebaselineDiffTask[];
 	/** 有几个任务真能导 */
@@ -112,7 +112,7 @@ export interface RebaselineDiffPlan {
 	problem: string | null;
 }
 
-/** 差量包已经有的那几份（认「起点代 + 终点代 + 终点状态编号」，与 `findExistingCheckpoint` 同口径） */
+/** 差分更新包已经有的那几份（认「起点代 + 终点代 + 终点内容校验值」，与 `findExistingCheckpoint` 同口径） */
 interface CheckpointRef {
 	name: string;
 	base: number | null;
@@ -142,7 +142,7 @@ function listCheckpointRefs(baseDir: string): CheckpointRef[] {
 	return out;
 }
 
-/** 两份完整副本的清单差多少字节（差量包的负载取自终点那份，所以按终点的文件大小估） */
+/** 两份完整备份的清单差多少字节（差分更新包的负载取自终点那份，所以按终点的文件大小估） */
 function estimateDiffBytes(from: Record<string, FileRecord>, to: Record<string, FileRecord>): number {
 	let bytes = 0;
 	for (const [file, record] of Object.entries(to)) {
@@ -160,7 +160,7 @@ export function peerLabel(peer: RebaselinePeer): string {
 }
 
 /**
- * 算清楚「每台电脑还差哪一份差量包」（**只读**：扫包目录 + 读状态，不写一个字节）。
+ * 算清楚「每台电脑还差哪一份差分更新包」（**只读**：扫包目录 + 读状态，不写一个字节）。
  *
  * `maxBytes` 默认 `REBASELINE_MAX_BYTES`（测试会传一个小值来守住"太大就不生成"这条）。
  */
@@ -178,7 +178,7 @@ export function planRebaselineDiffs(
 			mine: null,
 			tasks: [],
 			ready: 0,
-			problem: '本机还没有基准：先导一份完整副本（或应用对方发来的那份），差量包才有终点',
+			problem: '本机还没有基准：先导一份完整备份（或应用对方发来的那份），差分更新包才有终点',
 		};
 	}
 
@@ -205,12 +205,12 @@ export function planRebaselineDiffs(
 		if (peer.baselineHash === mineHash) return make('same');
 		const source = pickAnchor(anchors, peer.baselineHash);
 		if (!source) return make('missing');
-		// 它站的比我这份新：该收它的差量包，方向反了
+		// 那台电脑使用的比我这份新：该收它的差分更新包，方向反了
 		if (source.generation > mineGeneration) return make('ahead', { source });
-		// 同一代、两份不同的完整副本：差量包会把它整片换成我这份，等于拿一条线覆盖另一条
+		// 同一代、两份不同的完整备份：差分更新包会把它整片换成我这份，等于拿一条线覆盖另一条
 		if (source.generation === mineGeneration) return make('diverged', { source });
 		if (!mineAnchor) {
-			// 终点那份完整包不在本机（应用差量包变成某个基准之后就是这样：`fullFile` 留空）
+			// 终点那份完整备份不在本机（应用差分更新包变成某个基准之后就是这样：`fullFile` 留空）
 			return make('no-target', { source });
 		}
 		const existing = checkpoints.find(item =>
@@ -244,11 +244,11 @@ export interface RebaselineDiffRun {
 }
 
 /**
- * 按计划把差量包导出来（**只导 `ready` 的那几条**）。
+ * 按计划把差分更新包导出来（**只导 `ready` 的那几条**）。
  *
  * 一条失败不影响其余：每台电脑的起点可能不同（有的在本机、有的不在），各自独立。
- * **本机什么都不推进**（`exportBundle` 的差量包那一趟是 `frozen`）：世代、基准、状态编号都不动 ——
- * 差量包代表的是"终点那一刻"，不是我的仓库。
+ * **本机什么都不推进**（`exportBundle` 的差分更新包那一趟是 `frozen`）：版本、基准、内容校验值都不动 ——
+ * 差分更新包代表的是"终点那一刻"，不是我的仓库。
  */
 export async function exportRebaselineDiffs(
 	options: ExportOptions,
@@ -259,7 +259,7 @@ export async function exportRebaselineDiffs(
 	for (const task of plan.tasks) {
 		const host = peerLabel(task.peer);
 		if (task.status === 'exists') {
-			run.skipped.push({ host, why: `已经有一份同样的差量包（${task.existing}）` });
+			run.skipped.push({ host, why: `已经有一份同样的差分更新包（${task.existing}）` });
 			continue;
 		}
 		if (task.status !== 'ready' || !task.source) continue;
@@ -267,14 +267,14 @@ export async function exportRebaselineDiffs(
 			const outcome = await exportBundle({
 				...options,
 				mode: 'changes',
-				// 两端都钉死：起点是它站的那份完整副本，终点是我站的那份（内容是终点那份包的负载）
+				// 两端都钉死：起点是那台电脑使用的那份完整备份，终点是本机当前使用的那份（内容是终点那份包的负载）
 				baseFingerprint: task.source.hash,
 				toFingerprint: plan.mine.hash,
-				logNote: `差量包：第 ${task.source.generation} 代 → 第 ${plan.mine.generation} 代`
-					+ `（${host} 还停在第 ${task.source.generation} 代）`,
+				logNote: `差分更新包：第 ${task.source.generation} 版 → 第 ${plan.mine.generation} 版`
+					+ `（${host} 仍在使用第 ${task.source.generation} 版）`,
 			});
 			if (!outcome.file) {
-				run.skipped.push({ host, why: outcome.reason ?? '没有生成（差量包是空的）' });
+				run.skipped.push({ host, why: outcome.reason ?? '没有生成（差分更新包是空的）' });
 				continue;
 			}
 			run.exported.push({
@@ -296,35 +296,35 @@ export async function exportRebaselineDiffs(
  * 计划里"为什么做不了"的一句话（每台一行，界面直接显示）。
  *
  * 只写**当前状态 + 要用户做什么**（见 `约定-传输与界面.md` 第 0 节）：
- * 数字与指纹是给人对号的，别把原理写进弹窗。
+ * 数字与校验值是给人对号的，别把原理写进弹窗。
  */
 export function describeRebaselineTask(task: RebaselineDiffTask, mineGeneration: number | null): string {
 	const host = peerLabel(task.peer);
 	const at = task.peer.baselineGeneration !== null
-		? `第 ${task.peer.baselineGeneration} 代`
+		? `第 ${task.peer.baselineGeneration} 版`
 		: (task.peer.baselineHash ?? '未记');
 	const where = `停在 ${at}`;
 	switch (task.status) {
 		case 'ready':
-			return `${host}：${where} → 会导一份第 ${task.peer.baselineGeneration ?? '?'} → ${mineGeneration ?? '?'} 代的差量包（约 ${mb(task.estimateBytes)}）`;
+			return `${host}：${where} → 会导一份第 ${task.peer.baselineGeneration ?? '?'} → ${mineGeneration ?? '?'} 代的差分更新包（约 ${mb(task.estimateBytes)}）`;
 		case 'exists':
-			return `${host}：${where}，差量包已经有了（${task.existing}），不会再导一份`;
+			return `${host}：${where}，差分更新包已经有了（${task.existing}），不会再导一份`;
 		case 'same':
 			return `${host}：已经和本机是同一份基准`;
 		case 'ahead':
-			return `${host}：它的基准是第 ${task.source?.generation ?? '?'} 代，比本机这份新 — 该收它导的差量包`;
+			return `${host}：它的基准是第 ${task.source?.generation ?? '?'} 版，比本机这份新 — 该收它导的差分更新包`;
 		case 'diverged':
-			return `${host}：和我同一代（第 ${task.peer.baselineGeneration ?? '?'} 代）但不是同一份完整副本 — 差量包会把它整片换掉，别这么做`;
+			return `${host}：和我同一代（第 ${task.peer.baselineGeneration ?? '?'} 版）但不是同一份完整备份 — 差分更新包会把它整片换掉，别这么做`;
 		case 'missing':
-			return `${host}：${where}，那份完整副本不在本机 — 做不出差量包，把新的完整副本整份拷给它`;
+			return `${host}：${where}，那份完整备份不在本机 — 做不出差分更新包，把新的完整备份整份复制给它`;
 		case 'no-baseline':
-			return `${host}：还没有基准 — 先让它应用一份完整副本`;
+			return `${host}：还没有基准 — 先让它应用一份完整备份`;
 		case 'foreign':
-			return `${host}：另一条线（分支不同），差量包不通用`;
+			return `${host}：另一条线（分支不同），差分更新包不通用`;
 		case 'too-big':
-			return `${host}：${where}，差量包约 ${mb(task.estimateBytes)}，超过单个包上限 — 把完整副本整份拷过去`;
+			return `${host}：${where}，差分更新包约 ${mb(task.estimateBytes)}，超过单个包上限 — 把完整备份整份复制过去`;
 		case 'no-target':
-			return `${host}：${where}，但本机没有这个基准的包文件 — 先把它拷进来`;
+			return `${host}：${where}，但本机没有这个基准的包文件 — 先把它复制进来`;
 	}
 }
 
@@ -335,20 +335,20 @@ function mb(bytes: number): string {
 }
 
 /**
- * **我停在某个基准上，但本机没有它的包文件** —— 该不该补一份（0.18.1）。
+ * **我仍使用某个基准，但本机没有它的包文件** —— 该不该补一份（0.18.1）。
  *
- * 什么时候会这样：应用了一份**差量包**（或者"接上后续基准"那一趟）—— 基准前进到了
- * 另一份完整副本，可我手里只有那份更新包，`state.bundle.fullFile` 只能是空的
+ * 什么时候会这样：应用了一份**差分更新包**（或者"接上后续基准"那一趟）—— 基准前进到了
+ * 另一份完整备份，可我手里只有那份更新包，`state.bundle.fullFile` 只能是空的
  * （`apply.ts` 里那段：拿更新包的文件名冒充基准包会让"恢复本机误改"去找错东西）。
  *
  * 后果（不是致命的，但都能踩到）：`findBaselineBundle` 按名字找不到 → 「恢复本机误改」/
- * 「强制回退到基准再应用」只能报"把那份包放回来"；给第三台机器导差量包时，
- * 终点那份完整副本不在本机也做不出来。补一份就全好了，而且**两边各持一份同一份基准**，
+ * 「强制回退到基准再应用」只能报"把那份包放回来"；给第三台机器导差分更新包时，
+ * 终点那份完整备份不在本机也做不出来。补一份就全好了，而且**两边各持一份同一份基准**，
  * 谁缺了都能从对方那儿再要一次。
  *
- * **必须核对指纹**再补：`fullHash` 是清单（路径 ＋ 大小 ＋ 修改时间）算出来的，
- * 拿现在的仓库算一遍如果和它不等，说明磁盘上这份**并不是**大家站的那一点
- * （典型：另一个文件系统的 mtime 精度/截断），补出来的完整副本会是**另一个基准** ——
+ * **必须核对校验值**再补：`fullHash` 是清单（路径 ＋ 大小 ＋ 修改时间）算出来的，
+ * 拿现在的仓库算一遍如果和它不等，说明磁盘上这份**并不是**大家当前使用的那个版本
+ * （典型：另一个文件系统的 mtime 精度/截断），补出来的完整备份会是**另一个基准** ——
  * 那种情况宁可不补，如实说出来，也别让两边悄悄分了岔。
  */
 export interface BaselineCopyPlan {
@@ -358,16 +358,16 @@ export interface BaselineCopyPlan {
 	reason: string | null;
 	generation: number | null;
 	hash: string | null;
-	/** 现在这份仓库算出来的指纹 */
+	/** 现在这份仓库算出来的校验值 */
 	actual: string | null;
-	/** `actual === hash`：磁盘上确实就是大家站的那一点 */
+	/** `actual === hash`：磁盘上确实就是大家当前使用的那个版本 */
 	matches: boolean;
-	/** 对不上的路径（大小 / 修改时间，最多 20 条，界面只说数量） */
+	/** 不一致的路径（大小 / 修改时间，最多 20 条，界面只说数量） */
 	drift: string[];
 	driftCount: number;
 }
 
-/** 补一份完整副本之前先算清楚（**只读**：只看状态与传进来的清单） */
+/** 补一份完整备份之前先算清楚（**只读**：只看状态与传进来的清单） */
 export function planBaselineCopy(state: PluginState, inventory: Inventory): BaselineCopyPlan {
 	const hash = state.bundle?.fullHash ?? null;
 	const base = {

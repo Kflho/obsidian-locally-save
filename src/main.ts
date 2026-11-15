@@ -17,7 +17,7 @@ import { createLogger } from './utils/log';
 import { DebugLog, setDebugSink } from './debugLog';
 import { toNative } from './utils/paths';
 
-/** 自动留包的检查节拍：每 30 秒看一次"到点了吗" */
+/** 自动导出的检查节拍：每 30 秒看一次"到点了吗" */
 const TICK_MS = 30_000;
 
 /**
@@ -32,7 +32,7 @@ const EDITING_GRACE_MS = 10_000;
  * 对表文件（"对方到哪一步了"）的快节拍：**只在两边还没对齐时**每 10 秒拉一次。
  *
  * 为什么单独一条：应用完 / 导出完，对面只改了 `.lsave-peers/<它的 copyId>.json`，
- * 要等它下一次拉取才看得到 —— 30 秒那个节拍管的是留包和收包，拿它盯对表太慢，
+ * 要等它下一次拉取才看得到 —— 30 秒那个节拍管的是导出和接收，拿它盯对表太慢，
  * 用户看到的就是"一边一致、一边待上报，怎么刷新都不变"。
  */
 const PEER_TICK_MS = 10_000;
@@ -44,7 +44,7 @@ const PEER_SYNC_MS = 30_000;
  * 插件入口：只管生命周期与装配。
  *
  * 0.8.0 砍掉「同步到本地副本」通道之后，插件只剩**同步包**一条线：
- * 留包（导出：完整副本 / 更新包）与应用（导入）。仓库存放之外的读写都走
+ * 导出（导出：完整备份 / 更新包）与应用（导入）。仓库存放之外的读写都走
  * `bundle/`，这里只提供它们要的东西（仓库路径、状态文件、配置目录、进度回调）。
  */
 export default class LocallySavePlugin extends Plugin {
@@ -53,13 +53,13 @@ export default class LocallySavePlugin extends Plugin {
 	readonly log = createLogger(() => this.settings.logLevel);
 	/** 插件目录 debug.log：失败异常写这里，MCP / sync-state 都能读 */
 	debugLog!: DebugLog;
-	/** 状态栏那一格（进度与上次留包的结果） */
+	/** 状态栏那一格（进度与上次导出的结果） */
 	statusBar!: SyncStatusBar;
 
 	/**
-	 * 正在留包：定时触发看到它就让路。
+	 * 正在导出：定时触发看到它就让路。
 	 *
-	 * 真正的串行锁在 `ui/actions.ts` 的 `exportBundlesNow`（那里是所有留包入口的交汇点）；
+	 * 真正的串行锁在 `ui/actions.ts` 的 `exportBundlesNow`（那里是所有导出入口的交汇点）；
 	 * 这个标记是给 `tick()` 用的 —— 不然一轮跑了 10 分钟时，每 30 秒的节拍都会去敲一次门。
 	 */
 	bundleBusy = false;
@@ -67,15 +67,15 @@ export default class LocallySavePlugin extends Plugin {
 	 * 正在检查 / 应用"别人发来的包"（`autoApplyIncoming` 那条路）。
 	 *
 	 * 与 `bundleBusy` 分开记：两件事都会写文件（一个写包目录、一个写仓库），
-	 * 一拍之内不许同时开跑 —— 留包要扫仓库，正好扫到"应用到一半"的仓库就麻烦了。
+	 * 一拍之内不许同时开跑 —— 导出要扫仓库，正好扫到"应用到一半"的仓库就麻烦了。
 	 */
 	incomingBusy = false;
-	/** 上一次定时同步（留包）跑完的时间（定时同步靠它判断到没到点） */
+	/** 上一次定时同步（导出）跑完的时间（定时同步靠它判断到没到点） */
 	lastBundleAt = 0;
 	/**
 	 * 正在和 git 远程同步。
 	 *
-	 * 与留包 / 收包互斥：同步会往包文件夹里写文件、也会读它，
+	 * 与导出 / 接收互斥：同步会往同步包文件夹里写文件、也会读它，
 	 * 与应用（`apply.ts` 的 `applying`）也不许同时开跑 —— 那条由 `ui/git.ts` 自己查。
 	 */
 	gitBusy = false;
@@ -84,11 +84,11 @@ export default class LocallySavePlugin extends Plugin {
 	/** 连续失败次数与退避截止时间：连不上时别每 30 秒弹一次 */
 	gitFailures = 0;
 	gitBackoffUntil = 0;
-	/** 保存事件攒到的"脏"时间：停下来多久之后才真的留包 */
+	/** 保存事件攒到的"脏"时间：停下来多久之后才真的导出 */
 	private saveDirtyAt = 0;
 	private pendingSave = false;
 	/**
-	 * 左侧栏的三个图标：留包、导出包、应用包。
+	 * 左侧栏的三个图标：导出、导出包、应用包。
 	 * 都先建好、再按设置切显隐 —— 改开关立刻生效，不用重载插件。
 	 */
 	private ribbonSyncEl: HTMLElement | null = null;
@@ -164,7 +164,7 @@ export default class LocallySavePlugin extends Plugin {
 			() => { applyBundleAction(this); },
 		);
 		this.refreshEntryPoints();
-		// 把"上次留包 / 上次应用"从状态文件里读回来 —— 不然每次重启状态栏都变回"尚未留包"
+		// 把"上次导出 / 上次应用"从状态文件里读回来 —— 不然每次重启状态栏都变回"尚未导出"
 		await this.restoreLastActivity();
 
 		registerCommands(this);
@@ -177,13 +177,13 @@ export default class LocallySavePlugin extends Plugin {
 		registerProtocolHandler(this);
 		this.addSettingTab(new LocallySaveSettingTab(this.app, this));
 
-		// 一个固定节拍管两种自动留包（定时 / 保存后），
+		// 一个固定节拍管两种自动导出（定时 / 保存后），
 		// 这样改设置立刻生效，不用重建定时器（重建最容易漏清旧的）
 		this.registerInterval(window.setInterval(() => this.tick(), TICK_MS));
 		/**
 		 * **对表文件的快节拍**（用户提的："一边显示一致一边显示待上报，还是没有即时获取同步信息"）。
 		 *
-		 * 30 秒那个节拍管留包 / 收包，太重；这里只做一件事：状态"待上报 / 不同步 / 它还没报"
+		 * 30 秒那个节拍管导出 / 接收，太重；这里只做一件事：状态"待上报 / 不同步 / 它还没报"
 		 * 时每 `PEER_TICK_MS` 拉一次对表文件，拿到对面新状态就停（`needsPeerRefresh` 自己会收敛）。
 		 */
 		this.registerInterval(window.setInterval(() => { void this.peerTick(); }, PEER_TICK_MS));
@@ -194,7 +194,7 @@ export default class LocallySavePlugin extends Plugin {
 
 		// 「仅拉」只收不发：启动 / 定时 / 保存后都不写包（见 `isReceiveOnly`）
 		if (this.settings.syncOnStartup && !isReceiveOnly(this.settings)) {
-			this.app.workspace.onLayoutReady(() => { void exportBundlesNow(this, '启动留包', { quiet: true }); });
+			this.app.workspace.onLayoutReady(() => { void exportBundlesNow(this, '启动导出', { quiet: true }); });
 		}
 		// git：启动后对一遍（关着 / 还没接上时 maybeGitSync 自己会安静跳过，不会自动 init）
 		if (this.settings.gitEnabled) {
@@ -251,13 +251,13 @@ export default class LocallySavePlugin extends Plugin {
 	}
 
 	/**
-	 * 启动时把"上次留包 / 上次应用"读回来显示。
+	 * 启动时把"上次导出 / 上次应用"读回来显示。
 	 *
 	 * 那句话的真相在状态文件的**更新记录**里（`bundleLog` 的最后一条），
 	 * 不随重启丢 —— 0.8.0 之前它来自"上次同步到副本"的记录，那条通道已经砍掉了。
 	 */
 	private async restoreLastActivity(): Promise<void> {
-		// 状态栏那一句（上次留包 / git / 对方状态）在一个地方拼，见 ui/status.ts
+		// 状态栏那一句（上次导出 / git / 对方状态）在一个地方拼，见 ui/status.ts
 		await refreshStatusBar(this);
 	}
 
@@ -270,10 +270,10 @@ export default class LocallySavePlugin extends Plugin {
 	/**
 	 * 定时同步 / 自动应用的节拍：每 30 秒看一次"到点了吗、有没有新包"。
 	 *
-	 * 一拍里两件事，**先看别人发来的包**（它要写仓库），再决定要不要留包：
-	 * - 收包那条路由 `autoApplyIncoming` 管，只有"完全不会动到本地已有东西"的更新包才会自己应用；
-	 * - 定时同步由 `autoSyncInterval` 管：到点先 git 推拉，再（如果开了自动留包）留包；
-	 * - 刚应用过东西的这一拍**不再留包**（那等于立刻生成回礼包，两边容易来回搬运）。
+	 * 一拍里两件事，**先看别人发来的包**（它要写仓库），再决定要不要导出：
+	 * - 接收那条路由 `autoApplyIncoming` 管，只有"完全不会动到本地已有东西"的更新包才会自己应用；
+	 * - 定时同步由 `autoSyncInterval` 管：到点先 git 推送和拉取，再（如果开了自动导出）导出；
+	 * - 刚应用过东西的这一拍**不再导出**（那等于立刻生成回传包，两边容易来回搬运）。
 	 */
 	private tick(): void {
 		if (!this.settings.enabled) return;
@@ -285,7 +285,7 @@ export default class LocallySavePlugin extends Plugin {
 	 * **对表文件的快节拍**（每 10 秒，见 `PEER_TICK_MS`）：只在两边还没对齐时拉一次。
 	 *
 	 * 为什么要有它：应用完 / 导出完，对面只改了 `.lsave-peers/<它的 copyId>.json`，
-	 * 本机要等下一次拉取才看得到。30 秒那个节拍管的是留包与收包，拿它盯对表太慢 ——
+	 * 本机要等下一次拉取才看得到。30 秒那个节拍管的是导出与接收，拿它盯对表太慢 ——
 	 * 用户看到的就是"一边一致、一边待上报，刷新也不变"。
 	 *
 	 * 不干活的情形一律安静返回：没启用 / 没接 git / 正忙 / 没有对方 / 状态还没算过。
@@ -321,42 +321,42 @@ export default class LocallySavePlugin extends Plugin {
 		await syncGitNow(this, { quiet: true, background: true });
 	}
 
-	/** 一拍的实际内容（异步）：**先整理包、再和远程对一遍**，然后收包，最后才考虑留包 */
+	/** 一拍的实际内容（异步）：**先整理包、再和远程对一遍**，然后接收，最后才考虑导出 */
 	private async runTick(): Promise<void> {
 		/**
-		 * **先整理更新包，再推拉**（0.18.2）：把"起点已经没人用 / 同组里还有更新的一份"移到回收站。
-		 * 放在推拉**之前**，这一拍就会把删除提交并推走 —— 别的终端下一次拉取跟着没掉。
+		 * **先整理更新包，再推送和拉取**（0.18.2）：把"起点已经没人用 / 同组里还有更新的一份"移到回收站。
+		 * 放在推送和拉取**之前**，这一拍就会把删除提交并推走 —— 别的终端下一次拉取跟着没掉。
 		 * 它只看包目录里那几个头部（不扫仓库），失败了也不影响同步本身。
 		 */
 		await checkBundleGc(this);
-		// 再 git：拉下来的包，紧接着的收包就能看见（不用等下一拍）
+		// 再 git：拉下来的包，紧接着的接收就能看见（不用等下一拍）
 		await maybeGitSync(this);
 		/**
 		 * **正在打字就别动仓库**（用户报的："刚才我打字被强制同步了"）。
 		 *
-		 * 自动收包会**覆盖文件**：正在编辑的笔记被对面那一版盖掉，编辑器里的光标/选区当场跳走，
+		 * 自动接收会**覆盖文件**：正在编辑的笔记被对面那一版盖掉，编辑器里的光标/选区当场跳走，
 		 * 未保存的那几个字也可能丢。所以：最近 `EDITING_GRACE_MS` 内有过改动（`vault.on('modify')`
-		 * 记的 `saveDirtyAt`）→ 这一拍**只做 git 推拉**（那只是搬包，不碰仓库内容），
-		 * 收包与自动留包都推迟到下一拍。
+		 * 记的 `saveDirtyAt`）→ 这一拍**只做 git 推送和拉取**（那只是搬包，不碰仓库内容），
+		 * 接收与自动导出都推迟到下一拍。
 		 *
-		 * 为什么不按"某个文件最近改过"逐个跳过：收包是**整包严格同步**，
-		 * 跳过一个文件就等于把包送到的状态改了一半（状态编号当场对不上），
+		 * 为什么不按"某个文件最近改过"逐个跳过：接收是**整包严格同步**，
+		 * 跳过一个文件就等于把包送到的状态改了一半（内容校验值当场不一致），
 		 * 那比"晚 30 秒同步"糟得多。要整个推迟，而不是打补丁。
 		 *
 		 * 手动同步（命令 / 按钮）不受这条约束 —— 那是用户明确的动作。
 		 */
 		if (Date.now() - this.saveDirtyAt < EDITING_GRACE_MS) {
-			this.log.debug('正在编辑（最近 10 秒内有改动），这一拍跳过收包与自动留包');
+			this.log.debug('正在编辑（最近 10 秒内有改动），这一拍跳过接收与自动导出');
 			return;
 		}
 		if (this.bundleBusy || this.incomingBusy) return;
 		const acted = await checkIncomingBundles(this);
 		if (acted) {
 			/**
-			 * 刚应用完：**立刻把"我已经变成这一代"写进货架并推上去**。
+			 * 刚应用完：**立刻把"我已经变成这一代"写进远程仓库并推上去**。
 			 * 不推的话要等下一拍（30 秒）才有人写 peer 文件 —— 这半分钟里对面拉到的
 			 * 还是应用前的状态，状态栏会写"对方：不同步"（用户报的就是应用完之后仍报不同步）。
-			 * 这一拍仍然**不留包**：刚应用完就留包等于马上回礼，两边容易来回搬运。
+			 * 这一拍仍然**不导出**：刚应用完就导出等于马上回传，两边容易来回搬运。
 			 */
 			await maybeGitSync(this);
 			return;
@@ -365,7 +365,7 @@ export default class LocallySavePlugin extends Plugin {
 		this.tickExport();
 	}
 
-	/** 留包那一半：定时同步到点了、或者保存后静置够久了，就留一轮 */
+	/** 导出那一半：定时同步到点了、或者保存后静置够久了，就留一轮 */
 	private tickExport(): void {
 		// 「仅拉」＝只收不发：这个方向下一个包都不写（手动「导出同步包…」除外）
 		if (isReceiveOnly(this.settings)) return;
@@ -377,7 +377,7 @@ export default class LocallySavePlugin extends Plugin {
 			return;
 		}
 
-		// 保存后留包：0 ＝ 不留（一个下拉管这件事，不再有单独的开关）
+		// 保存后导出：0 ＝ 不留（一个下拉管这件事，不再有单独的开关）
 		const saveDelay = this.settings.syncAfterSaveDelay;
 		if (
 			this.pendingSave
@@ -385,7 +385,7 @@ export default class LocallySavePlugin extends Plugin {
 			&& Date.now() - this.saveDirtyAt >= saveDelay * 1000
 		) {
 			this.pendingSave = false;
-			void exportBundlesNow(this, '保存后留包', { quiet: true });
+			void exportBundlesNow(this, '保存后导出', { quiet: true });
 		}
 	}
 

@@ -13,28 +13,28 @@ import { sameRecord, DEFAULT_MTIME_TOLERANCE_MS } from '../sync/diff';
 import { toNative } from '../utils/paths';
 
 /**
- * **自动接链**：让插件自己判断"本机能不能接到包链条的末端"。
+ * **自动串联**：让插件自己判断"本机能不能接到包链条的末端"。
  *
- * 链条模型（0.11 起）：**基准点**是链条上的节点 —— 完整包是一个点，**每份被应用的更新包**
+ * 链条模型（0.11 起）：**基准**是链条上的节点 —— 完整备份是一个点，**每份被应用的更新包**
  * 也落出一个新点；点与点之间是严格镜像，所以链条上每个节点的内容都是确定的，不需要人去指。
- * 链本身就是现成的数据：每个包的头部都记着"**我从哪一个基准点往外延伸**"
- * （`baselineHash`）与"**我变成哪一个基准点**"（`targetBaselineHash`，
+ * 链本身就是现成的数据：每个包的头部都记着"**我从哪一个基准往外延伸**"
+ * （`baselineHash`）与"**我变成哪一个基准**"（`targetBaselineHash`，
  * 见 `bundle/export.ts`），首尾相接就串起来了。
  *
  * 为什么需要它（用户提的）：本机的点与"文件夹里有哪些包"原本是两件互不相干的事，全靠人手动对齐 ——
- * 手上有第 39 代的点、文件夹里是一条 39→46 的链，得手动重导一份完整副本才跟得上。
+ * 手上有第 39 版的点、文件夹里是一条 39→46 的链，得手动重新导出一份完整备份才跟得上。
  *
  * 三条判据：
- * 1. **认链**：本机这一点往后，每一步都找"起点指纹 ＝ 当前落点"的那个包（同一分支）；
- * 2. **能不能接**：本机这一点必须**在链上**（是某个包的落点，或是一份完整包）。
- *    接不上**如实说缺哪一份**，绝不猜着合；
+ * 1. **认链**：本机这一点往后，每一步都找"起点校验值 ＝ 当前目标版本"的那个包（同一分支）；
+ * 2. **能不能接**：本机这一点必须**在链上**（是某个包的目标版本，或是一份完整备份）。
+ *    无法应用**如实说缺哪一份**，绝不猜着合；
  * 3. **接到哪儿**：从本机这一点往后一路走到底（链末）。
  *
- * 执行时**不重新打包任何东西**：链上的完整副本与更新包都在文件夹里，按顺序应用即可；
+ * 执行时**不重新打包任何东西**：链上的完整备份与更新包都在文件夹里，按顺序应用即可；
  * 应用完 `state.bundle.fullHash` / `state.generation` 自然等于链末那一点。
  *
- * **本机的改动要保留**（用户明确选的）：接链会让完整副本镜像覆盖本机内容，所以接链前先把
- * "本机相对旧基准点的改动"记下来，接完再放回去 —— 最终内容 = **链末 + 本机改动**，基准点 = 链末。
+ * **本机的改动要保留**（用户明确选的）：串联会让完整备份镜像覆盖本机内容，所以串联前先把
+ * "本机相对旧基准的改动"记下来，接完再放回去 —— 最终内容 = **链末 + 本机改动**，基准 = 链末。
  * 放回用的字节取自**原来那份包**（`extractPath`），所以放回去的就是本机原来那一版，不会走形。
  *
  * 这个文件不 import obsidian：分析是纯逻辑，执行只调 `apply.ts`，测试能拿临时目录直接跑。
@@ -45,26 +45,26 @@ export interface ChainNode {
 	file: string;
 	name: string;
 	mode: 'full' | 'changes';
-	/** 完整包：它自己那一代；更新包：应用完到达的那一代 */
+	/** 完整备份：它自己那一代；更新包：应用完到达的那一代 */
 	generation: number;
-	/** 这个包**从哪一个基准点**往外延伸（完整包 ＝ 它自己） */
+	/** 这个包**从哪一个基准**往外延伸（完整备份 ＝ 它自己） */
 	baseline: string | null;
-	/** **变成哪一个基准点**（完整包 ＝ 它自己；旧版更新包没记 → null，这一环接不下去） */
+	/** **变成哪一个基准**（完整备份 ＝ 它自己；旧版更新包没记 → null，这一环接不下去） */
 	target: string | null;
 }
 
 export interface ChainPlan {
-	/** 本机现在停在链上的哪一份完整包（`null` ＝ 本机还没基准 / 基准不在链上） */
+	/** 本机现在仍使用链的哪一份完整备份（`null` ＝ 本机还没基准 / 基准不在链上） */
 	from: ChainNode | null;
 	/** 从本机基准往后要依次应用的包（空数组 ＝ 本机已经在链末） */
 	steps: ChainNode[];
-	/** 链末那一代（接完之后本机的世代） */
+	/** 链末那一代（接完之后本机的版本） */
 	endGeneration: number;
-	/** 链末那份完整包（基准要切到它）；链末是更新包时为 null（那种情况另说） */
+	/** 链末那份完整备份（基准要切到它）；链末是更新包时为 null（那种情况另说） */
 	endFull: ChainNode | null;
-	/** 接不上的原因（能接时是 null）：缺哪一份完整包、本机没有基准、选中包不在链上… */
+	/** 无法应用的原因（能接时是 null）：缺哪一份完整备份、本机没有基准、选中包不在链上… */
 	problem: string | null;
-	/** 本机相对旧基准的改动（接链后要放回去的那部分） */
+	/** 本机相对旧基准的改动（串联后要放回去的那部分） */
 	edits: LocalEdit[];
 	/** 本机独有的文件（旧基准里没有、包里也不会有）—— 也会被放回去 */
 	extraFiles: string[];
@@ -76,9 +76,9 @@ export interface LocalEdit {
 }
 
 /**
- * 按头部算出"这个包的基准指纹"：
- * - 完整包：它自己的清单指纹（接收方也能重算，不信任头部字段）；
- * - 更新包：它声称基于的那份（`baselineHash`，旧包没有 → null，接不上）。
+ * 按头部算出"这个包的基准校验值"：
+ * - 完整备份：它自己的清单校验值（接收方也能重算，不信任头部字段）；
+ * - 更新包：它声称基于的那份（`baselineHash`，旧包没有 → null，无法应用）。
  */
 function baselineOf(bundle: ManagedBundle): string | null {
 	const header = bundle.header;
@@ -104,9 +104,9 @@ export async function planChain(
 	const sameLineage = bundles.filter(item => item.header?.lineage === state.lineage);
 	const nodes = sameLineage.map(node);
 
-	/** 指纹 → 节点（同指纹只留最新那一份）：完整包用它自己的指纹认，更新包用它变成的那一点认 */
+	/** 校验值 → 节点（同校验值只留最新那一份）：完整备份用它自己的校验值认，更新包用它变成的那一点认 */
 	const byHash = new Map<string, ChainNode>();
-	/** 指纹 → **完整包**：链末正好落在一份完整副本上时，那一点可以当成一份新基准来用 */
+	/** 校验值 → **完整备份**：链末正好落在一份完整备份上时，那一点可以当成一份新基准来用 */
 	const fullByHash = new Map<string, ChainNode>();
 	for (const item of nodes) {
 		const keys = item.mode === 'full' ? [item.baseline, item.target] : [item.target];
@@ -123,19 +123,19 @@ export async function planChain(
 		from: null, steps: [], endGeneration: state.generation, endFull: null, problem,
 		edits: [], extraFiles: [],
 	});
-	if (sameLineage.length === 0) return emptyPlan('这个文件夹里没有跟我同一分支的包（先把对方的包拷进来）');
-	if (mine === null) return emptyPlan('本机还没有基准点（没导过、也没应用过完整副本）：先应用一份完整副本，之后才谈得上接链');
+	if (sameLineage.length === 0) return emptyPlan('这个文件夹里没有跟我同一分支的包（先把对方的包复制进来）');
+	if (mine === null) return emptyPlan('本机还没有基准（没导过、也没应用过完整备份）：先应用一份完整备份，之后才谈得上串联');
 
-	// 本机停在链上的哪一点：一份完整包（它就是那一点），或者"变成这一点"的那个包
+	// 本机仍使用链的哪一点：一份完整备份（它就是那一点），或者"变成这一点"的那个包
 	const arrive = nodes.find(item => item.mode === 'changes' && item.target === mine) ?? null;
 	const startNode = byHash.get(mine) ?? null;
 	if (!arrive && !startNode) {
-		return emptyPlan(`本机现在的基准点（指纹 ${mine}）不在这个文件夹里的任何一条链上：中间缺那几份包。`
-			+ '让对方把它们一起发过来（或者让对方按本机这个点重导一份更新包）');
+		return emptyPlan(`本机现在的基准（校验值 ${mine}）不在这个文件夹里的任何一条链上：中间缺那几份包。`
+			+ '让对方把它们一起发过来（或者让对方按本机这个点重新导出一份更新包）');
 	}
 	const fromNode = arrive ?? (startNode as ChainNode);
 
-	// 从这一点往后接：每一步都必须是"起点指纹 ＝ 当前落点"，接不上就停在那儿并说清。
+	// 从这一点往后接：每一步都必须是"起点校验值 ＝ 当前目标版本"，无法应用就停在那儿并说清。
 	// 同一个起点上有好几份包（两台机器各导了一份）时取**最新**的那份，另一份是并行的支线。
 	const steps: ChainNode[] = [];
 	const used = new Set<string>([fromNode.file]);
@@ -148,7 +148,7 @@ export async function planChain(
 				&& item.target !== null
 				&& !used.has(item.file))
 			.sort((a, b) => b.generation - a.generation)[0];
-		// 防环：世代必须往前走
+		// 防环：版本必须往前走
 		if (!next || next.generation <= generation) break;
 		steps.push(next);
 		used.add(next.file);
@@ -161,11 +161,11 @@ export async function planChain(
 		const inChain = path.resolve(fromNode.file) === path.resolve(only)
 			|| steps.some(step => path.resolve(step.file) === path.resolve(only));
 		if (!inChain) {
-			return emptyPlan('选中的这个包不在本机所在的这条链上（它接的是别的基准点）—— 先在「管理同步包」里看它该接在谁后面');
+			return emptyPlan('选中的这个包不在本机所在的这条链上（它接的是别的基准）—— 先在「管理同步包」里看它该接在谁后面');
 		}
 	}
 
-	// 终点正好是一份完整包时（落点指纹就是它）：那一点可以当成一份新基准来用
+	// 终点正好是一份完整备份时（目标版本校验值就是它）：那一点可以当成一份新基准来用
 	const endFull = cursor === null ? null : (fullByHash.get(cursor) ?? null);
 	if (steps.length === 0) {
 		return {
@@ -175,7 +175,7 @@ export async function planChain(
 		};
 	}
 
-	// 本机相对**旧基准点**改过哪些文件：接链是镜像覆盖，所以这些要先记下来再放回
+	// 本机相对**旧基准**改过哪些文件：串联是镜像覆盖，所以这些要先记下来再放回
 	const edits = await collectLocalEdits(options, state);
 	return {
 		from: fromNode,
@@ -199,13 +199,13 @@ function node(bundle: ManagedBundle): ChainNode {
 		mode,
 		generation: header?.targetGeneration ?? 0,
 		baseline,
-		// 完整包：它自己就是那一点；更新包：头部记着落点（旧版包没记 → null）
+		// 完整备份：它自己就是那一点；更新包：头部记着目标版本（旧版包没记 → null）
 		target: mode === 'full' ? baseline : (header?.targetBaselineHash ?? null),
 	};
 }
 
 /**
- * 本机相对**旧基准**改过 / 新建的文件（接链要放回去的那部分）。
+ * 本机相对**旧基准**改过 / 新建的文件（串联要放回去的那部分）。
  *
  * 判据与导出挑成员完全一致（大小 + 修改时间，2 秒容差），所以"会被放回的"正好是
  * "下次更新包里会装的那些"。每个文件记下**它现在这份出自哪份包** —— 放回时从那份包里取字节。
@@ -236,7 +236,7 @@ async function collectLocalEdits(
 	return { edits, extra };
 }
 
-/** 接链的结果（给界面报账） */
+/** 串联的结果（给界面报账） */
 export interface ChainOutcome {
 	applied: { name: string; written: number; deleted: number; failed: number }[];
 	/** 放回本机的改动：成功几个 */
@@ -245,18 +245,18 @@ export interface ChainOutcome {
 	conflicts: number;
 	/** 放回失败 / 本机那一版已经找不到的 */
 	failed: { path: string; error: string }[];
-	/** 接完之后的世代 */
+	/** 接完之后的版本 */
 	generation: number;
-	/** 中止的原因（接链途中失败） */
+	/** 中止的原因（串联途中失败） */
 	problem: string | null;
 }
 
 /**
- * 真去接链：**先算后做**由调用方保证（先用 `planChain` 出报告，用户确认后才调这里）。
+ * 真去串联：**先算后做**由调用方保证（先用 `planChain` 出报告，用户确认后才调这里）。
  *
  * 顺序（每一步失败都能停下来说清，不会留下半截状态）：
  * 1. 把"本机相对旧基准的改动"连同字节一起**先存到临时目录**（不依赖原来那份包还在不在）；
- * 2. 按顺序应用链上的包（完整副本镜像、更新包只动点名的）；
+ * 2. 按顺序应用链上的包（完整备份镜像、更新包只动点名的）；
  * 3. 把存下的改动放回仓库 —— 这一版是本机的版本，链末也改过就按"本机赢"（如实报数）。
  */
 export async function runChain(
@@ -289,9 +289,9 @@ export async function runChain(
 		}
 	}
 
-	// 有东西没存下来就**不往下走**：接链会镜像覆盖，存不下的那些会丢
+	// 有东西没存下来就**不往下走**：串联会镜像覆盖，存不下的那些会丢
 	if (outcome.failed.length > 0) {
-		outcome.problem = '有几样本机改动没能先存下来，为了不丢东西，这次没有接链';
+		outcome.problem = '有几样本机改动没能先存下来，为了不丢东西，这次没有串联';
 		return outcome;
 	}
 
@@ -308,7 +308,7 @@ export async function runChain(
 				failed: result.failed.length,
 			});
 		} catch (error) {
-			outcome.problem = `接链在「${step.name}」这一步停下了：${describe(error)}`;
+			outcome.problem = `串联在「${step.name}」这一步停下了：${describe(error)}`;
 			break;
 		}
 	}

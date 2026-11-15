@@ -32,7 +32,7 @@ import type { PluginSettings } from '../settings/model';
  * 变过的文件进包，没了的文件进 `deleted` 列表（并带上它们的 base，
  * 让接收方能判断"我这边是不是也动过它"，动过就不删）。
  *
- * 只有包真正写完才推进世代与基准 —— 中途失败不能留下"已经导出过"的假记录，
+ * 只有包真正写完才推进版本与基准 —— 中途失败不能留下"已经导出过"的假记录，
  * 否则下一次「仅改动」会漏掉这批文件。
  */
 
@@ -43,26 +43,26 @@ export interface ExportOptions {
 	vaultName: string;
 	stateFile: string;
 	/**
-	 * 导哪种包：`full` 完整副本 / `changes` 更新包。
+	 * 导哪种包：`full` 完整备份 / `changes` 更新包。
 	 *
 	 * 从前是从设置里读一个"默认类型"下拉框，但那是**互斥**的语义 ——
-	 * 用户要的是"完整包和更新包各是一个独立选项，可以都要"。
+	 * 用户要的是"完整备份和更新包各是一个独立选项，可以都要"。
 	 * 所以改成由调用方明确指定，一次调用导一种，要两种就调两次。
 	 */
 	mode: 'full' | 'changes';
 	/**
-	 * 这次发号至少从它之后开始（git 货架上已经看到别的机器报过更高的号时用）。
-	 * 不管本机高水位多少，最终取较大值再 +1 —— 两台机器就不会各发一个同代包。
+	 * 这次发号至少从它之后开始（git 远程仓库上已经看到别的机器报过更高的号时用）。
+	 * 不管本机高水位多少，最终取较大值再 +1 —— 两台机器就不会各发一个同版本包。
 	 */
 	generationFloor?: number;
 	/**
 	 * **这次更新包从哪个状态开始**：`null` / 不填 ＝ 我状态里那份最新的（原来的行为）；
-	 * 给一个**基准指纹**（16 位十六进制）＝ 接着**那一份**完整副本往后算。
+	 * 给一个**基准校验值**（16 位十六进制）＝ 接着**那一份**完整备份往后算。
 	 *
-	 * 为什么给指纹而不是世代号：世代号说的是"内容走到第几版"，两边的"第 32 代"
-	 * 完全可能是两份不同的完整副本（用户实测踩过：按代选锚，对面报「基准对不上」）。
-	 * 指纹（`bundle/baseline.ts`）才是"这是哪一份东西"的判据 —— 也就是对方
-	 * 「更新记录」顶部那行「基准：第 N 代 · 指纹 xxxx」里那个值。
+	 * 为什么给校验值而不是版本号：版本号说的是"内容走到第几版"，两边的"第 32 版"
+	 * 完全可能是两份不同的完整备份（用户实测踩过：按代选锚，对面报「基准不一致」）。
+	 * 校验值（`bundle/baseline.ts`）才是"这是哪一份东西"的判据 —— 也就是对方
+	 * 「更新记录」顶部那行「基准：第 N 代 · 校验值 xxxx」里那个值。
 	 *
 	 * **找不到那一份时明确报错**，绝不悄悄换一份：包头部记的 `baseGeneration` /
 	 * `baselineHash` 决定接收方怎么比对，偷偷换一份等于骗它。
@@ -71,9 +71,9 @@ export interface ExportOptions {
 	/**
 	 * **这次更新包到哪个状态为止**：`null` / 不填 ＝ 最新（当前仓库）。
 	 *
-	 * 给一个基准指纹 ＝ 送到**那一份完整副本记着的那一刻**：内容取自那份包的负载
+	 * 给一个基准校验值 ＝ 送到**那一份完整备份记着的那一刻**：内容取自那份包的负载
 	 * （不是你现在的仓库 —— b 那一刻的版本可能早就被改过了）。于是能导一份
-	 * "从 a 到 b"的差量包：对方停在 a 上，收下就正好等于 b，状态编号当场对得上。
+	 * "从 a 到 b"的差分更新包：对方仍使用 a ，收下就正好等于 b，内容校验值当场对得上。
 	 *
 	 * 同样：**找不到就报错**，不悄悄改成"到最新" —— 那会把内容完全不同的包发给对方。
 	 */
@@ -83,12 +83,12 @@ export interface ExportOptions {
 	/**
 	 * **这次导出的起点改成这一份清单**（`ui/bundle-modal.ts` 的"应用前先把本机改动存成包"会填）。
 	 *
-	 * 平时起点是"我站的这一点"（`state.bundle.fullFiles`），从磁盘上找；这里给的是一份
+	 * 平时起点是"本机当前的这个版本"（`state.bundle.fullFiles`），从磁盘上找；这里给的是一份
 	 * **合成出来的点**，磁盘上没有它对应的包 —— 它是"我马上要应用的那份包**送到**的那一点"
-	 * （更新包：我这点 ＋ 它的条目 − 它点名的删除；完整副本：它自己的清单）。
+	 * （更新包：我这点 ＋ 它的条目 − 它点名的删除；完整备份：它自己的清单）。
 	 *
 	 * 为什么要这么绕：严格同步会把我这儿"它那份里没有 / 跟它不一样的"东西全部换掉，
-	 * 而这些**未必相对我自己的点算得出改动**。用户报过的现场：我这一点上有、对方那份完整副本里
+	 * 而这些**未必相对我自己的点算得出改动**。用户报过的现场：我这一点上有、对方那份完整备份里
 	 * 没有的文件（我本地压根没动过它），按"我自己的点"算 `picked` 是空的 —— 存出来的包是**空的**，
 	 * 等于什么都没存，而那条 `cp` 已经把它镜像走了。换成"以它送到的那一点为起点"之后，
 	 * 这一环就是 **新点 → 新点 ＋ 我的东西**：我自己应用它＝把东西加回来，
@@ -96,10 +96,10 @@ export interface ExportOptions {
 	 */
 	anchorOverride?: BundleAnchor;
 	/**
-	 * **本机什么都不推进**（与差量包一样）。
+	 * **本机什么都不推进**（与差分更新包一样）。
 	 *
-	 * 什么时候要：内容是"我现在的仓库"，但这一环送到的那一点**不是我导完之后站的点** ——
-	 * 应用前存下的那一份就是（存完还要去应用对方的包，落点是对方那一点）。
+	 * 什么时候要：内容是"我现在的仓库"，但这一环送到的那一点**不是我导完之后使用的点** ——
+	 * 应用前存下的那一份就是（存完还要去应用对方的包，目标版本是对方那一点）。
 	 */
 	frozen?: boolean;
 	/** 配置目录名（运行时才知道，用户可能改过） */
@@ -121,7 +121,7 @@ export interface ExportOptions {
 	 * 我们这一版原样覆盖回去。条目照常带 `base`（基准里那一版），接收方比较时
 	 * 会把它判成"本地改过"，先把误改移到回收目录、再写成我们的版本。
 	 *
-	 * 只对"从完整副本到最新"的更新包有效（差量包的内容由两份完整副本决定）。
+	 * 只对"从完整备份到最新"的更新包有效（差分更新包的内容由两份完整备份决定）。
 	 */
 	forcePaths?: Iterable<string>;
 	/**
@@ -130,27 +130,27 @@ export interface ExportOptions {
 	 * 正常导出都该识别移动（省流量、包小）。唯一需要关掉的是"让只拉端撤销误改、
 	 * 并把基准接回起点"这种恢复包：带 `moves` 的包，应用端倒推起点时没有反向移动
 	 * 这条信息（`apply.ts` 的 `startPointOf`），`adoptBaseline` 会验不过 ——
-	 * 对面内容虽然改对了，基准还停在它自己导出的那份上，下一次又对不上。
+	 * 对面内容虽然改对了，基准仍在使用它自己导出的那份上，下一次又不一致。
 	 */
 	noMoves?: boolean;
 	/**
-	 * **这些路径的内容不在仓库里**（内容指纹照这份表取）。
+	 * **这些路径的内容不在仓库里**（内容校验值照这份表取）。
 	 *
 	 * 用在"起点是合成的那一份"上（`anchorOverride`）：被对方那份包覆盖的路径上，
-	 * 落点是**对方那一版**，而仓库里还是改动前的旧版本 —— 照仓库读会算出一个描述别的状态的编号。
+	 * 目标版本是**对方那一版**，而仓库里还是改动前的旧版本 —— 照仓库读会算出一个描述别的状态的编号。
 	 */
 	stateIdHashes?: ReadonlyMap<string, string>;
 	/**
 	 * 已经扫好的仓库清单。
-	 * 同步刚扫完的话直接传进来复用 —— 少一次全库遍历，自动留包就几乎不花时间。
+	 * 同步刚扫完的话直接传进来复用 —— 少一次全库遍历，自动导出就几乎不花时间。
 	 */
 	inventory?: Inventory;
 	/**
 	 * 一次导出多个包时，把**先导出来的那些**填进来。
 	 *
-	 * 完整包会清掉被它取代的旧更新包；万一哪个调用方反过来先导了更新包，
-	 * 不把它排除掉的话，用户明明两个都勾了、最后却只剩完整包一个。
-	 * 现在两条调用链都按 `plannedExportModes` 先导完整包，所以这是一道保险。
+	 * 完整备份会清掉被它取代的旧更新包；万一哪个调用方反过来先导了更新包，
+	 * 不把它排除掉的话，用户明明两个都勾了、最后却只剩完整备份一个。
+	 * 现在两条调用链都按 `plannedExportModes` 先导完整备份，所以这是一道保险。
 	 */
 	keepPaths?: string[];
 	/**
@@ -164,7 +164,7 @@ export interface ExportOptions {
 	/**
 	 * 进度回调：`done / total` ＝ **已经打进包里的文件数 / 总文件数**，从 0 数到总数。
 	 *
-	 * 内部还有一步"算指纹"（给接收方做三方合并用），但那跟用户没关系、不占数字：
+	 * 内部还有一步"算校验值"（给接收方做三方合并用），但那跟用户没关系、不占数字：
 	 * 用户看到的就该是"这些文件打包了多少个"。
 	 */
 	onProgress?: (done: number, total: number, file: string) => void;
@@ -189,29 +189,29 @@ export interface ExportOutcome {
 	parentBundleId: string | null;
 	/** 实际写到磁盘上的文件大小 */
 	fileBytes: number;
-	/** 是不是"从一个基准点一次带到最新"的更新包（差量包不算：它送到的是另一份完整副本） */
+	/** 是不是"从一个基准一次带到最新"的更新包（差分更新包不算：它送到的是另一份完整备份） */
 	cumulative: boolean;
 	/**
-	 * 这个包**从哪一个基准点来**（完整包为 null：它自己就是那个点）。
-	 * 界面上要写出来：光有世代号对不上号，指纹 + 状态编号才认得出是对方站的哪一点。
+	 * 这个包**从哪一个基准来**（完整备份为 null：它自己就是那个点）。
+	 * 界面上要写出来：光有版本号不一致号，校验值 + 内容校验值才认得出是对方使用的哪一点。
 	 */
 	anchor: ExportAnchor | null;
-	/** 这次顺手删掉了哪些被取代的旧更新包（同一份起点重导的 / 被完整副本取代的，文件名，已排序） */
+	/** 这次顺手删掉了哪些被取代的旧更新包（同一份起点重新导出的 / 被完整备份取代的，文件名，已排序） */
 	superseded: string[];
 	/**
 	 * 这次顺手**退休到回收站**的包（文件名，已排序）：它们的起点已经没有机器站着了。
 	 *
 	 * 与 `superseded` 分开：那一边是删（内容被新包完全覆盖），这一边是移到回收站
-	 * （能捞回来）—— 界面上要说清是哪一种，不然用户会以为包丢了。
+	 * （能恢复）—— 界面上要说清是哪一种，不然用户会以为包丢了。
 	 */
 	retired: string[];
 	/**
-	 * 留着没删的更新包，以及为什么（别的起点 / 别的分支 / 世代不比新包小 / 别的机器导的）。
+	 * 留着没删的更新包，以及为什么（别的起点 / 别的分支 / 版本不比新包小 / 别的机器导的）。
 	 * 界面上要如实说明 —— 不然用户会以为"清理开关没生效"，或者当成偶发 bug（报过）。
 	 */
 	keptChanges: { name: string; why: string }[];
 	/**
-	 * **该立新完整包了** 的提醒（这一份要搬的字节数超过阈值时才有，其余是 null）：
+	 * **该立新完整备份了** 的提醒（这一份要搬的字节数超过阈值时才有，其余是 null）：
 	 * 整句由引擎算好（`baselineAdvice`），界面直接显示。
 	 */
 	advice: string | null;
@@ -221,16 +221,16 @@ export interface ExportOutcome {
 export interface SupersededReport {
 	removed: string[];
 	/**
-	 * **起点已经没人站的包**（移到回收站，不是删）。
+	 * **起点已经没人使用的包**（移到回收站，不是删）。
 	 *
 	 * 与 `removed` 分开报：那一边是"内容被这次导出完全覆盖"，删得安心；这一边只有
-	 * "再也不可能被应用"这一个理由（应用一份包要求接收方停在它的起点上），
+	 * "再也不可能被应用"这一个理由（应用一份包要求接收方仍使用它的起点），
 	 * 所以走回收站、并且界面要说清是"退休"不是"取代"。
 	 */
 	retired: string[];
 	kept: { name: string; why: string }[];
 	/**
-	 * 删掉的那些的明细：包 id + 依据（本机 apply 记录 / 对方 peer 记录的世代）。
+	 * 删掉的那些的明细：包 id + 依据（本机 apply 记录 / 对方 peer 记录的版本）。
 	 *
 	 * 为什么要有：两边的清理规则对称，但对账时需要看出"这一份为什么在那边被清了"。
 	 * 写进 `debug.log`，也随导出结果返回（界面暂时只显示 `removed` 的条数）。
@@ -242,38 +242,38 @@ export interface SupersededReport {
  * **起点是怎么定下来的** —— 界面上要说清"这一份为什么从这一点往外导"。
  *
  * 0.14 起只有两种来路（"自动接线头"那套随链条模型一起去掉了，
- * 见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
- * - `self`：**我站的那一份完整包**（`state.bundle.fullHash`）—— 默认，也是绝大多数情况；
+ * 见 `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`）：
+ * - `self`：**本机当前使用的这一份完整备份**（`state.bundle.fullHash`）—— 默认，也是绝大多数情况；
  * - `override`：调用方合成的那一点（"应用前先把本机改动存成包"那一趟）。
  * 用户在下拉里明确指定起点时，`anchor` 里那份就是指定的那一份（`picked` 记 `explicit`）。
  */
 export interface ExportStartInfo {
 	picked: 'self' | 'explicit' | 'override';
-	/** 我站的那一份完整包（还没站上过基准点时 null） */
+	/** 本机当前使用的这一份完整备份（还没有过基准时 null） */
 	mine: { generation: number; hash: string; name: string } | null;
 }
 
-/** 更新包基于的那份完整副本（界面上把"第几代 + 基准指纹 + 状态编号 + 包名"都写出来） */
+/** 更新包基于的那份完整备份（界面上把"第几代 + 基准校验值 + 内容校验值 + 包名"都写出来） */
 export interface ExportAnchor {
 	/** 起点：从第几代开始 */
 	generation: number;
 	/**
-	 * 起点那份完整副本的**基准指纹** —— 选起点要认的就是它：
-	 * 对方「更新记录」顶部写着「基准：第 N 代 · 指纹 xxxx」，照那个选。
-	 * （世代号说不出"我们是从哪一份完整副本分出来的"，只看代可能选到另一份东西 —— 用户实测踩过。）
+	 * 起点那份完整备份的**基准校验值** —— 选起点要认的就是它：
+	 * 对方「更新记录」顶部写着「基准：第 N 代 · 校验值 xxxx」，照那个选。
+	 * （版本号说不出"我们是从哪一份完整备份分出来的"，只看代可能选到另一份东西 —— 用户实测踩过。）
 	 */
 	hash: string | null;
 	file: string | null;
 	name: string | null;
-	/** 起点那份完整包记的状态编号（旧版本导的包没有 → null） */
+	/** 起点那份完整备份记的内容校验值（旧版本导的包没有 → null） */
 	stateId: string | null;
-	/** 终点到哪儿：`checkpoint` ＝ 某一份完整副本那一刻（不是当前仓库） */
+	/** 终点到哪儿：`checkpoint` ＝ 某一份完整备份那一刻（不是当前仓库） */
 	checkpoint: boolean;
-	/** 终点世代：接收方应用之后到达的世代 */
+	/** 终点版本：接收方应用之后到达的版本 */
 	targetGeneration: number;
-	/** 终点那份完整副本的基准指纹（只有差量包有） */
+	/** 终点那份完整备份的基准校验值（只有差分更新包有） */
 	targetHash: string | null;
-	/** 起点是怎么定下来的（我站的那一份完整副本 / 用户指定 / 合成的那一点） */
+	/** 起点是怎么定下来的（本机当前使用的这一份完整备份 / 用户指定 / 合成的那一点） */
 	start?: ExportStartInfo;
 }
 
@@ -285,7 +285,7 @@ function safeName(name: string): string {
 /**
  * 每个文件最多记几个"我发出去过的版本"（见 `history` 那段）。
  *
- * 为什么要有上限：新模型下一份完整包会被用很久（累积到该换基准为止），
+ * 为什么要有上限：新模型下一份完整备份会被用很久（累积到该换基准为止），
  * 每导一次更新包就给每个改过的文件加一条记录 —— 不封顶的话状态文件会一直长
  * （它每次读写都要整个过一遍）。留最近这几版就够：对方手里多半是最新的那一两版，
  * 认不出来时也只是一次多余的备份（进回收目录），不是丢数据。
@@ -293,12 +293,12 @@ function safeName(name: string): string {
 const HISTORY_LIMIT = 8;
 
 /**
- * **该立新完整包了**（用户拍板要的提醒）—— 更新包是"自起点那份完整包累积"的，
+ * **该立新完整备份了**（用户拍板要的提醒）—— 更新包是"自起点那份完整备份累积"的，
  * 变大了就该换基准：这是新模型里唯一需要用户做的维护动作，也是包会变大的唯一节制阀
- * （换了基准，之后每一份更新包都从新完整包重新算起）。
+ * （换了基准，之后每一份更新包都从新完整备份重新算起）。
  *
- * 看的是**这一份实际要搬的字节数**（＝自起点那份完整包以来的改动量），不是目录总大小。
- * 差量包不提醒（它的内容由两份完整包决定，用户就是奔着那个终点去的）；
+ * 看的是**这一份实际要搬的字节数**（＝自起点那份完整备份以来的改动量），不是目录总大小。
+ * 差分更新包不提醒（它的内容由两份完整备份决定，用户就是奔着那个终点去的）；
  * `limitMb <= 0` ＝ 关掉提醒（默认值见 `DEFAULT_SETTINGS.bundleSizeWarnLimit`）。
  * 返回整句，界面直接显示。
  */
@@ -313,13 +313,13 @@ export function baselineAdvice(
 	if (!(limitMb > 0)) return null;
 	const mb = payloadBytes / (1024 * 1024);
 	if (mb < limitMb) return null;
-	return `这一份更新包要搬 ${mb.toFixed(1)} MB（自第 ${anchorGeneration ?? '?'} 代那份完整副本以来攒下的改动），`
-		+ `已经超过 ${limitMb} MB。建议导一份新的完整副本当基准，之后的更新包会从它重新算起，小得多。`;
+	return `这一份更新包要搬 ${mb.toFixed(1)} MB（自第 ${anchorGeneration ?? '?'} 版那份完整备份以来攒下的改动），`
+		+ `已经超过 ${limitMb} MB。建议导一份新的完整备份当基准，之后的更新包会从它重新算起，小得多。`;
 }
 
 /**
  * 这些文件路径涉及到的**所有上级目录**（有文件的目录会随文件写入被顺带建出来，
- * 所以它们不算"空文件夹"）。差量包按终点那份包的清单算，普通包按当前仓库算。
+ * 所以它们不算"空文件夹"）。差分更新包按终点那份包的清单算，普通包按当前仓库算。
  */
 function dirsContainingPaths(paths: Iterable<string>): Set<string> {
 	const covered = new Set<string>();
@@ -335,17 +335,17 @@ function dirsContainingPaths(paths: Iterable<string>): Set<string> {
 }
 
 /**
- * 一次要导两种时**先导哪个**：**先完整副本、后更新包**。
+ * 一次要导两种时**先导哪个**：**先完整备份、后更新包**。
  *
  * 顺序曾经是反的（先更新、后完整），那样会演出一幕很怪的戏：先按老基准算出一个更新包
- * ——顺手把上一个更新包当成"被它取代的旧包"清掉——再导完整副本。用户看到的
+ * ——顺手把上一个更新包当成"被它取代的旧包"清掉——再导完整备份。用户看到的
  * 是"我那个老包没了，然后又生成了一个一模一样的"。
  *
- * 而完整副本一写完，它自己就是最新的基准：这时更新包按它算**必然是空的**。
+ * 而完整备份一写完，它自己就是最新的基准：这时更新包按它算**必然是空的**。
  * 写一个谁都用不上的空包（接收方应用它什么也不会发生，还让人以为漏了什么），
- * 不如不写、并说清楚为什么。要"一个小文件传出去"就单独勾更新包，别同时勾完整副本。
+ * 不如不写、并说清楚为什么。要"一个小文件传出去"就单独勾更新包，别同时勾完整备份。
  *
- * 两条调用链（手动导出弹窗 / 同步后的自动留包）都走这个函数，免得哪天又各写各的。
+ * 两条调用链（手动导出弹窗 / 同步后的自动导出）都走这个函数，免得哪天又各写各的。
  */
 export function plannedExportModes(want: { changes: boolean; full: boolean }): BundleMode[] {
 	const modes: BundleMode[] = [];
@@ -355,10 +355,10 @@ export function plannedExportModes(want: { changes: boolean; full: boolean }): B
 }
 
 /**
- * **仓库自上次导出以来动过没有**（判据与 `ui/actions.ts` 里"自动留包要不要写包"那条一致：
+ * **仓库自上次导出以来动过没有**（判据与 `ui/actions.ts` 里"自动导出要不要写包"那条一致：
  * 大小 + 修改时间，2 秒容差；空文件夹也算）。
  *
- * 只给完整副本"要不要占新世代"用：没动过就说明这份内容上一代已经装过了，
+ * 只给完整备份"要不要占新版本"用：没动过就说明这份内容上一代已经装过了，
  * 固化成基准是"换个基准"，不是"往前走一代"。
  * `state.bundle` 还没有时（第一次）算作动过 —— 那时确实是从零往前一步。
  */
@@ -380,12 +380,12 @@ function hasLocalChanges(state: PluginState, inventory: Inventory): boolean {
 
 /**
  * **本机自基准以来改了什么** —— 只统计，不写盘。 *
- * 给"要不要换基准""立一份新完整包"这类决定用的：用户得先看到"我这边有多少东西
+ * 给"要不要换基准""立一份新完整备份"这类决定用的：用户得先看到"我这边有多少东西
  * 是基准里没有的"，才知道换掉基准会不会把没传出去的改动留在一份老包上。
  * 判据与导出挑成员同一条（大小 + 修改时间，2 秒容差），所以数字跟"下一次导更新包
  * 会装几个文件"对得上。
  *
- * `null` ＝ 本机还没有基准（没导过、也没应用过完整副本），那就算不出来。
+ * `null` ＝ 本机还没有基准（没导过、也没应用过完整备份），那就算不出来。
  */
 export function describeLocalChanges(
 	state: PluginState,
@@ -411,20 +411,20 @@ interface BundleWork {
 	inventory: Inventory;
 	/** 上次导出 / 应用时仓库的样子：用来记"我发出去过哪几版"（`history`） */
 	previous: Record<string, FileRecord>;
-	/** 这次更新包**从哪一份完整包**开始；还没立过基准时是 null */
+	/** 这次更新包**从哪一份完整备份**开始；还没立过基准时是 null */
 	anchor: BundleAnchor | null;
-	/** 起点是怎么定下来的（我站的那一份 / 用户指定 / 合成的那一点）—— 界面上要说清 */
+	/** 起点是怎么定下来的（本机当前使用的这一份 / 用户指定 / 合成的那一点）—— 界面上要说清 */
 	start: ExportStartInfo | null;
 	/**
 	 * 这次更新包**到哪个状态为止**：
 	 * - `null` ＝ 最新（当前仓库，含刚改的东西）—— 默认；
-	 * - 有值 ＝ 另一份完整副本：导的是"从起点到那一份"的差量，内容取自那份包的负载。
+	 * - 有值 ＝ 另一份完整备份：导的是"从起点到那一份"的差量，内容取自那份包的负载。
 	 */
 	target: BundleAnchor | null;
 	/**
-	 * 自起点那份完整包以来、我发出去过的那些版本（每个文件一串）。
+	 * 自起点那份完整备份以来、我发出去过的那些版本（每个文件一串）。
 	 *
-	 * 用处：对方停在其中某一版上时认得出"这是对方发过的，不是我改的"——
+	 * 用处：对方仍使用其中某一版时认得出"这是对方发过的，不是我改的"——
 	 * 新模型下"接收方停在起点与最新之间某一版"是常态（他应用过上一份更新包）。
 	 */
 	history: Record<string, FileRecord[]>;
@@ -438,8 +438,8 @@ interface BundleWork {
 	 */
 	ghosts: Record<string, BundleGhost>;
 	/**
-	 * 这一份"从 a 到 b"的差量包**已经导过了**（`changes/` 里躺着一份一模一样的）：
-	 * 记下那份包的文件名，调用方据此不重复生成（内容由两份完整包决定，重导只是白写一遍）。
+	 * 这一份"从 a 到 b"的差分更新包**已经导过了**（`changes/` 里躺着一份一模一样的）：
+	 * 记下那份包的文件名，调用方据此不重复生成（内容由两份完整备份决定，重新导出只是白写一遍）。
 	 */
 	existing: string | null;
 }
@@ -447,9 +447,9 @@ interface BundleWork {
 /**
  * 这次更新包**从哪个状态**开始（**只读**）。
  *
- * 默认（没指定）＝ **我站的那一份完整包**（`state.bundle.fullHash`）：磁盘上还找得到它
+ * 默认（没指定）＝ **本机当前使用的这一份完整备份**（`state.bundle.fullHash`）：磁盘上还找得到它
  * 就把那份读回来 —— 报告里"起点 · 状态 xxxx"写的是**它**的编号，状态里那份只是"我记得的样子"。
- * 指定了指纹时去**磁盘上**把那份完整包找回来（完整副本是还原点，一直躺在 `full/` 里）；
+ * 指定了校验值时去**磁盘上**把那份完整备份找回来（完整备份是还原点，一直躺在 `full/` 里）；
  * 找不到就报错 —— 换成"最新那份"会让包头部记错基准，接收方按它比对只会得出错误结论。
  */
 async function resolveAnchor(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
@@ -462,7 +462,7 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 			hash: mineHash,
 			files: state.bundle.fullFiles,
 			emptyDirs: [],
-			name: state.bundle.fullFile ?? '（状态里记着的那份完整副本，磁盘上已找不到）',
+			name: state.bundle.fullFile ?? '（状态里记着的那份完整备份，磁盘上已找不到）',
 			file: '',
 			stateId: state.stateId ?? null,
 			mtime: 0,
@@ -470,7 +470,7 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 		: null;
 
 	const requested = options.baseFingerprint ?? null;
-	// 默认：**我站的那一份完整包**。磁盘上还找得到它就把那份读回来 ——
+	// 默认：**本机当前使用的这一份完整备份**。磁盘上还找得到它就把那份读回来 ——
 	// 报告里"起点 · 状态 xxxx"要写的是**它**的编号（状态里那份只是"我记得的样子"）。
 	if (requested === null) {
 		if (mineHash) {
@@ -487,31 +487,31 @@ async function resolveAnchor(options: ExportOptions, state: PluginState): Promis
 	if (found) return found;
 
 	throw new Error(
-		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一份完整副本。`
+		`「更新包从哪个状态开始」选的是基准 ${requested}，但这个文件夹里没有这一份完整备份。`
 		+ `${describeAnchorList(anchors)}。`
-		+ '先把那份包拷进来（或从回收站捞回来），'
+		+ '先把那份包复制进来（或从回收站恢复），'
 		+ '或者把设置里「从哪个状态开始」改回「自动：本机现在的基准」',
 	);
 }
 
-/** `resolveStart` 的结论：拿哪一份完整包当起点、界面上怎么说 */
+/** `resolveStart` 的结论：拿哪一份完整备份当起点、界面上怎么说 */
 interface StartResolution {
 	anchor: BundleAnchor;
 	info: ExportStartInfo;
 }
 
 /**
- * 这次更新包**从哪一份完整包往外导**（只读）—— 三种来路，一处说了算：
+ * 这次更新包**从哪一份完整备份往外导**（只读）—— 三种来路，一处说了算：
  *
  * 1. **合成的起点**（`anchorOverride`：应用前"先把我的改动存成包"那一趟）；
  * 2. **用户在下拉里指定了起点**（`baseFingerprint`）：找不到就报错，绝不悄悄换一份
  *    （包头部记的基准决定接收方怎么比对，偷偷换一份等于骗它）；
- * 3. **默认：我站的那一份完整包**（`state.bundle.fullHash`）。
+ * 3. **默认：本机当前使用的这一份完整备份**（`state.bundle.fullHash`）。
  *
  * "自动接在这条线的最新点后面"（0.13 那条"严格顺序"）随链条模型一起去掉了：
- * 点只有完整包了，没有"线头"可接 —— 从那份完整副本往外导时，
+ * 点只有完整备份了，没有"线头"可接 —— 从那份完整备份往外导时，
  * 新号仍然从高水位往后发（回退之后也不会撞历史上用过的号），
- * 见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`。
+ * 见 `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`。
  */
 async function resolveStart(options: ExportOptions, state: PluginState): Promise<StartResolution> {
 	const mine = state.bundle?.fullHash
@@ -530,8 +530,8 @@ async function resolveStart(options: ExportOptions, state: PluginState): Promise
 	const anchor = await resolveAnchor(options, state);
 	if (!anchor) {
 		throw new Error(
-			'还没有完整副本：更新包是两份完整副本之间的差量，没有起点就算不出来。'
-			+ '请先导一份完整副本（对方也要先应用它）',
+			'还没有完整备份：更新包是两份完整备份之间的差量，没有起点就算不出来。'
+			+ '请先导一份完整备份（对方也要先应用它）',
 		);
 	}
 	return { anchor, info: { picked: explicit ? 'explicit' : 'self', mine } };
@@ -540,7 +540,7 @@ async function resolveStart(options: ExportOptions, state: PluginState): Promise
 /**
  * 这次更新包**到哪个状态**为止（**只读**）。
  *
- * `null` ＝ 最新（当前仓库）；给了指纹就得在磁盘上找到那一份完整副本 ——
+ * `null` ＝ 最新（当前仓库）；给了校验值就得在磁盘上找到那一份完整备份 ——
  * 找不到同样报错，不能悄悄改成"到最新"：那会把一份**内容完全不同**的包发给对方。
  */
 async function resolveTarget(options: ExportOptions, state: PluginState): Promise<BundleAnchor | null> {
@@ -550,11 +550,11 @@ async function resolveTarget(options: ExportOptions, state: PluginState): Promis
 	const found = pickAnchor(anchors, requested);
 	if (found) return found;
 
-	// 链条上的点（某份更新包落出的那一点）不再是状态 —— 0.14 起只有完整副本能当终点
+	// 链条上的点（某份更新包落出的那一点）不再是状态 —— 0.14 起只有完整备份能当终点
 	throw new Error(
-		`「更新包到哪个状态为止」选的是状态 ${requested}，但这个文件夹里没有这一份完整副本。`
+		`「更新包到哪个状态为止」选的是校验值 ${requested}，但这个文件夹里没有这一份完整备份。`
 		+ `${describeAnchorList(anchors)}。`
-		+ '先把那份包拷进来（或从回收站捞回来），'
+		+ '先把那份包复制进来（或从回收站恢复），'
 		+ '或者把设置里「到哪个状态为止」改回「最新（当前仓库）」',
 	);
 }
@@ -845,34 +845,34 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	 * 上次导出 / 应用时仓库的样子（`state.bundle.files`）。
 	 *
 	 * 现在它只用来记**中间版本**（`history`）：我上一次发出去的是哪一版要带上，
-	 * 对方停在其中某一版上时才认得出"这是对方发过的，不是我改的"（见下面 base 那段）。
+	 * 对方仍使用其中某一版时才认得出"这是对方发过的，不是我改的"（见下面 base 那段）。
 	 */
 	const previous = state.bundle?.files ?? {};
 	/**
-	 * 这次更新包**从哪一份完整包往外导**（只读）。默认 ＝ **我站的那一份**
+	 * 这次更新包**从哪一份完整备份往外导**（只读）。默认 ＝ **本机当前使用的这一份**
 	 * （`state.bundle.fullHash`）—— 0.14 起没有"自动接线头"那回事了，见 `resolveStart`。
 	 */
 	const start = mode === 'changes' ? await resolveStart(options, state) : null;
 	const anchor: BundleAnchor | null = start?.anchor ?? null;
 	/** 这次更新包到哪个状态为止（null ＝ 最新，也就是当前仓库） */
 	const target = mode === 'changes' ? await resolveTarget(options, state) : null;
-	/** 自起点那份完整包以来、我发出去过的那些版本（每个文件一串，见下面 `nextHistory`） */
+	/** 自起点那份完整备份以来、我发出去过的那些版本（每个文件一串，见下面 `nextHistory`） */
 	const history = state.bundle?.history ?? {};
 	/**
-	 * 条目 / 删除项的 `base` **一律取起点那份完整包里的版本**：
-	 * 接收方就以那份完整包为基准（`checkAncestor` 要求包的起点与本机基准点严格相等），
+	 * 条目 / 删除项的 `base` **一律取起点那份完整备份里的版本**：
+	 * 接收方就以那份完整备份为基准（`checkAncestor` 要求包的起点与本机基准严格相等），
 	 * 它手里是这个文件的哪一版，只有那份清单知道。
 	 *
 	 * 拿"我上次导出的样子"当 base 会怎样（这个坑踩过）：对方正常的旧版本被判成"它也改过"，
-	 * 满屏冲突副本。至于它停在**我发过的某一版**上（应用过上一份更新包，这是新模型下的常态），
+	 * 满屏冲突副本。至于它仍使用**我发过的某一版**上（应用过一份更新包，这是新模型下的常态），
 	 * 由条目的 `history` 负责认出来 —— 见 `apply.ts` 的 `matchesHistory`，不靠 base。
 	 */
 	const anchorFiles = anchor?.files ?? null;
 
 	if (mode === 'changes' && !anchorFiles) {
 		throw new Error(
-			'还没有完整副本：更新包是两份完整副本之间的差量，没有起点就算不出来。'
-			+ '请先导一份完整副本（对方也要先应用它）',
+			'还没有完整备份：更新包是两份完整备份之间的差量，没有起点就算不出来。'
+			+ '请先导一份完整备份（对方也要先应用它）',
 		);
 	}
 
@@ -904,18 +904,18 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 		}
 		for (const [file, atAnchor] of Object.entries(anchorFiles ?? {})) {
 			if (target.files[file]) continue;
-			// 到 b 为止它已经不在了 → 点名删除；停在 a 上的接收方手里就是 a 那一版
+			// 到 b 为止它已经不在了 → 点名删除；仍使用 a 的接收方手里就是 a 那一版
 			pushDeleted(file, atAnchor);
 		}
 	} else {
-		// 成员：**自起点那份完整包以来变过的**（新模型下这一份就是累积的：
-		// 中间发过几份更新包也不会变薄，换基准靠"导一份新完整副本"来整理）。
+		// 成员：**自起点那份完整备份以来变过的**（新模型下这一份就是累积的：
+		// 中间发过几份更新包也不会变薄，换基准靠"导一份新完整备份"来整理）。
 		for (const [file, record] of inventory.files) {
 			if (skip.has(file)) continue;
 			const atAnchor = anchorFiles?.[file];
 			if (!atAnchor || !sameRecord(record, atAnchor, DEFAULT_MTIME_TOLERANCE_MS)) picked.push(file);
 		}
-		// 删除清单同理：自起点那份完整包以来"没了"的文件（起点那一侧的接收方手里就是起点那一版）
+		// 删除清单同理：自起点那份完整备份以来"没了"的文件（起点那一侧的接收方手里就是起点那一版）
 		for (const [file, atAnchor] of Object.entries(anchorFiles ?? {})) {
 			if (inventory.files.has(file)) continue;
 			pushDeleted(file, atAnchor);
@@ -923,21 +923,21 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	}
 	picked.sort();
 
-	// 「从 a 到 b」的包，内容由**两份完整包**决定，重导只会写出一个一模一样的文件 ——
-	// 已经躺在 changes/ 里就直说，别写（自动留包那条路尤其要紧：它会一轮接一轮地跑）
+	// 「从 a 到 b」的包，内容由**两份完整备份**决定，重新导出只会写出一个一模一样的文件 ——
+	// 已经躺在 changes/ 里就直说，别写（自动导出那条路尤其要紧：它会一轮接一轮地跑）
 	const existing = target ? await findExistingCheckpoint(options, state, anchor, target) : null;
 
 	/**
 	 * **改名/移动识别**（0.17：只认「基准 → 现在」这一层）。
 	 *
-	 * 更新包是**自起点那份完整包算起的累积差量**，所以包里只放"从起点清单直接变成现在"
+	 * 更新包是**自起点那份完整备份算起的累积差量**，所以包里只放"从起点清单直接变成现在"
 	 * 的那几条操作：中间改过几次名，由 `detectMoves(anchorFiles, …)` 一次配对成「旧 → 最终」。
 	 *
 	 * **不再带"上一份状态 → 现在"的链式移动**（`chainMoves`）—— 那一段是"按顺序演一遍历史"：
 	 * 应用端得靠影子清单、靠 `previous` 里的中间路径逐跳复现，真机上报过好几次
 	 * 「包里要把 X 改名成 Y，但本地两个路径都不在」「改名之后旧文件夹又回来了」。
 	 * 中间路径现在走**删除清单**（`state.bundle.ghosts` 那份累积清单会点名它们），
-	 * 停在中间某一跳上的机器按 `header.deleted` 里那一份当源（见 `apply.ts` 的 `aliasSourceFor*`），
+	 * 仍使用中间某一跳的机器按 `header.deleted` 里那一份当源（见 `apply.ts` 的 `aliasSourceFor*`），
 	 * 照样一步变成最终路径 —— 包里不必再写第二条移动。
 	 */
 	let finalMoves: BundleMove[] = [];
@@ -956,7 +956,7 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	 * 为什么会有幽灵：base 之后新增的路径不在起点清单里，删掉它只是"回到基准状态"，
 	 * 按"起点清单 − 现在"永远算不出删除。旧代码靠"上一份状态（`previous`）里还有没有它"
 	 * 临时补一笔，**只补一次**：那一份包一导，状态里的 `files` 就没它了，下一份累积包不再点名 ——
-	 * 于是没应用中间那一份、直接应用最新包的机器（自动收包按源头只取最新的那一份）
+	 * 于是没应用中间那一份、直接应用最新包的机器（自动接收按源头只取最新的那一份）
 	 * 永远删不掉它。
 	 *
 	 * 现在记进状态（`state.bundle.ghosts`）并**每一份更新包都点名**，直到换基准
@@ -1000,7 +1000,7 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 	 * **强制装进包里的路径**（`forcePaths`）：正常更新包只装"相对起点变过的"，
 	 * 但"让对面撤销误改"需要的是**我们这一版原样覆盖回去**，哪怕我们从来没动过它。
 	 *
-	 * 只在"从完整副本到最新"的更新包里生效：差量包的内容由两份完整副本决定，
+	 * 只在"从完整备份到最新"的更新包里生效：差分更新包的内容由两份完整备份决定，
 	 * 强行塞一条会破坏"应用完正好等于终点"的确定性。
 	 */
 	if (mode === 'changes' && target === null) {
@@ -1021,7 +1021,7 @@ async function prepareBundle(options: ExportOptions, mode: BundleMode): Promise<
 
 /**
  * 已经导过这一份"从 a 到 b"的包了吗：`changes/` 里有没有一份**同一个起点、同一个终点、
- * 同一份终点内容**的更新包（终点那份完整副本被重导过 → 状态编号变了 → 不算同一份）。
+ * 同一份终点内容**的更新包（终点那份完整备份被重新导出过 → 内容校验值变了 → 不算同一份）。
  *
  * 为什么靠"翻目录"而不是记在状态里：状态文件每轮同步都要读写，能少一个字段就少一个；
  * 而包就在手边，条件完全可以从它自己身上看出来。删掉那个包就能重新导一份。
@@ -1061,25 +1061,25 @@ export interface BundleExportPreview {
 	files: string[];
 	/** 点名要删的文件（更新包才有意义） */
 	deleted: string[];
-	/** 更新包基于的那份完整副本是第几代；null ＝ 还没立过基准 */
+	/** 更新包基于的那份完整备份是第几代；null ＝ 还没立过基准 */
 	anchorGeneration: number | null;
-	/** 那份完整副本的**基准指纹** —— 选起点认的就是它（跟对方「更新记录」里那个对得上） */
+	/** 那份完整备份的**基准校验值** —— 选起点认的就是它（跟对方「更新记录」里那个对得上） */
 	anchorFingerprint: string | null;
-	/** 那份完整副本的文件名（界面上对得上号） */
+	/** 那份完整备份的文件名（界面上对得上号） */
 	anchorName: string | null;
-	/** 终点：null ＝ 最新（当前仓库）；有值 ＝ 送到那份完整副本那一刻（差量包） */
+	/** 终点：null ＝ 最新（当前仓库）；有值 ＝ 送到那份完整备份那一刻（差分更新包） */
 	targetGeneration: number | null;
 	targetName: string | null;
 	/** 这一份"从 a 到 b"的包已经导过了（同名文件还在）：不会重复生成 */
 	existing: string | null;
-	/** 起点是怎么定下来的（我站的那一份完整包 / 用户指定 / 合成的那一点） */
+	/** 起点是怎么定下来的（本机当前使用的这一份完整备份 / 用户指定 / 合成的那一点） */
 	start: ExportStartInfo | null;
 	/**
-	 * **该立新完整包了**：这一份要搬的字节数已经超过阈值（见设置里的 `bundleSizeWarnLimit`）。
+	 * **该立新完整备份了**：这一份要搬的字节数已经超过阈值（见设置里的 `bundleSizeWarnLimit`）。
 	 * 引擎把整句算好，界面直接显示；没超过或关掉了提醒时是 null。
 	 */
 	advice: string | null;
-	/** 算不出来时的原因（例如"还没导过完整副本"）：预览照样打开，把原因写在界面上 */
+	/** 算不出来时的原因（例如"还没导过完整备份"）：预览照样打开，把原因写在界面上 */
 	problem?: string;
 }
 
@@ -1152,19 +1152,19 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	const { mode } = options;
 	const work = await prepareBundle(options, mode);
 	const { state, inventory, previous, anchor, start, target, history, picked, deleted, moves, ghosts, existing } = work;
-	/** 终点是一份完整副本（差量包）：内容取自那份包，结束时到达它的世代 */
+	/** 终点是一份完整备份（差分更新包）：内容取自那份包，结束时到达它的版本 */
 	const checkpoint = target !== null;
 	/**
-	 * **本机什么都不推进**：差量包（内容不是我现在的仓库），以及"应用前先把本机改动存成包"
-	 * 那一趟（`frozen`：内容是我现在的仓库，但这一环送到的那一点不是我导完之后站的点）。
+	 * **本机什么都不推进**：差分更新包（内容不是我现在的仓库），以及"应用前先把本机改动存成包"
+	 * 那一趟（`frozen`：内容是我现在的仓库，但这一环送到的那一点不是我导完之后使用的点）。
 	 */
 	const frozen = checkpoint || options.frozen === true;
 	/**
-	 * **这一刻整个仓库的状态编号**（内容指纹，见 `sync/state-id.ts`）：
+	 * **这一刻整个仓库的内容校验值**（内容校验值，见 `sync/state-id.ts`）：
 	 * 既写进包头部（接收方应用完对账用），也用来判"内容动没动"。
-	 * - **差量包**：用它送到的那份包记着的编号（它不是我现在的仓库）；
-	 * - **起点是合成的那种**（应用前存下的那一份）：照**落点**算（`landedPoint` ＝ 合成起点
-	 *   ＋ 进包的文件 − 点名的删除），那些"不在仓库里"的版本用包条目里带的指纹（`stateIdHashes`）；
+	 * - **差分更新包**：用它送到的那份包记着的编号（它不是我现在的仓库）；
+	 * - **起点是合成的那种**（应用前存下的那一份）：照**目标版本**算（`landedPoint` ＝ 合成起点
+	 *   ＋ 进包的文件 − 点名的删除），那些"不在仓库里"的版本用包条目里带的校验值（`stateIdHashes`）；
 	 * - 其余：照现在的仓库算。
 	 */
 	const landedPoint = landedPointOf(mode, checkpoint, target, anchor, inventory, picked, deleted, moves);
@@ -1195,38 +1195,38 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	/**
 	 * **仓库自上次导出以来动过没有。**
 	 *
-	 * 判据是**内容**（状态编号），不是"大小 + 修改时间"：文件被别的东西碰了一下
+	 * 判据是**内容**（内容校验值），不是"大小 + 修改时间"：文件被别的东西碰了一下
 	 * （网盘同步、编辑器重写、`touch`）时，大小和修改时间会变、**内容一个字都没变** ——
-	 * 用户的原话："导出完整副本本身根本不改变内容，不应该增加世代"。
-	 * 拿记录判会为这种"没变的内容"白占一个世代号，两边的号又对不上。
+	 * 用户的原话："导出完整备份本身根本不改变内容，不应该增加版本"。
+	 * 拿记录判会为这种"没变的内容"白占一个版本号，两边的号又不一致。
 	 * （状态里没有编号的旧状态文件退回按记录判，保守。）
 	 */
 	const moved = state.stateId
 		? stateIdInfo !== null && stateIdInfo.id !== state.stateId.id
 		: hasLocalChanges(state, inventory);
 	/**
-	 * **手里的包就是这个分支的账本**：同一份完整包报过的最小号 —— 状态里那个号被旧版本撑大了就照它改回来。
+	 * **手里的包就是这个分支的账本**：同一份完整备份报过的最小号 —— 状态里那个号被旧版本撑大了就照它改回来。
 	 */
 	const smallestForPoint = await smallestGenerationOf(options.outDir, state.lineage, state.bundle?.fullHash ?? null);
 	/**
-	 * **我站的那一份完整包只有一个世代号** —— 状态里那个号可能已经被旧版本撑大了，先照手里的包改回来。
+	 * **本机当前使用的这一份完整备份只有一个版本号** —— 状态里那个号可能已经被旧版本撑大了，先照手里的包改回来。
 	 *
-	 * 为什么会撑大（用户报的）：他那边把「更新包从哪个状态开始」钉在第 39 代（对面还在 39），
-	 * 于是**每次自动留包都重导一遍同一份内容**，而更新包是无条件 `+1` 的 ——
-	 * 39→48 / 39→49 / 39→50 三份包状态编号一模一样、世代号却一路涨，
-	 * 对面应用完永远对不上（"内容没变代数就不应该变，但实际每次导出包就多一代"）。
+	 * 为什么会撑大（用户报的）：他那边把「更新包从哪个状态开始」钉在第 39 版（对面还在 39），
+	 * 于是**每次自动导出都重新导出一遍同一份内容**，而更新包是无条件 `+1` 的 ——
+	 * 39→48 / 39→49 / 39→50 三份包内容校验值一模一样、版本号却一路涨，
+	 * 对面应用完永远不一致（"内容没变代数就不应该变，但实际每次导出包就多一代"）。
 	 *
 	 * **只改 `fullGeneration`（基准那一代），绝不动 `state.generation`（内容是第几版）**：
-	 * 0.14 起这两件事是分开的 —— 更新包不推进基准，所以"我站的完整包是第 1 代"与
+	 * 0.14 起这两件事是分开的 —— 更新包不推进基准，所以"本机当前使用的完整备份是第 1 版"与
 	 * "我这边的内容已经是第 40 版"完全可以同时成立。照旧代码把 `state.generation` 也拉回
-	 * 第 1 代，就等于把内容版本号改小了（实测会当场把两边的号搞乱）。
+	 * 第 1 版，就等于把内容版本号改小了（实测会当场把两边的号搞乱）。
 	 */
 	if (!frozen && state.bundle?.fullHash) {
 		const known = smallestForPoint;
 		const mineBase = state.bundle.fullGeneration ?? state.generation;
 		if (known !== null && known < mineBase) {
 			options.log.debug(
-				`基准世代号改回第 ${known} 代：手里有包报过同一份完整包（状态里记的是第 ${mineBase} 代；`
+				`基准版本号改回第 ${known} 版：手里有包报过同一份完整备份（状态里记的是第 ${mineBase} 版；`
 				+ '同一份东西只能有一个号，见 export.ts 里那段）',
 			);
 			state.bundle.fullGeneration = known;
@@ -1235,11 +1235,11 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			raiseGeneration(state, known);
 		}
 		/**
-		 * **内容的号同理，但要拿"内容自己"的指纹去对账**（`landedPoint` ＝ 这一刻我这边的清单）。
+		 * **内容的号同理，但要拿"内容自己"的校验值去对账**（`landedPoint` ＝ 这一刻我这边的清单）。
 		 *
-		 * 0.14 起"基准的号"与"内容的号"是两回事（更新包不推进基准，"基准第 1 代、内容第 40 版"
-		 * 完全正常），所以**不能拿基准那份完整包的号来顶内容** —— 那会把内容版本号改小。
-		 * 该做的是：手里有包报过**同一个落点清单**（`targetBaselineHash`）时报的是几代，
+		 * 0.14 起"基准的号"与"内容的号"是两回事（更新包不推进基准，"基准第 1 版、内容第 40 版"
+		 * 完全正常），所以**不能拿基准那份完整备份的号来顶内容** —— 那会把内容版本号改小。
+		 * 该做的是：手里有包报过**同一个目标版本清单**（`targetBaselineHash`）时报的是几代，
 		 * 取最小的那个 —— 旧版本"导出更新包无条件 +1"留下的虚高号靠这一步归位
 		 * （用户报过："内容没变代数就不应该变，但实际每次导出包就多一代"）。
 		 */
@@ -1250,19 +1250,19 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		);
 		if (knownContent !== null && knownContent < state.generation) {
 			options.log.debug(
-				`内容的世代号改回第 ${knownContent} 代：手里有包报过同一份内容（状态里记的是第 ${state.generation} 代）`,
+				`内容的版本号改回第 ${knownContent} 版：手里有包报过同一份内容（状态里记的是第 ${state.generation} 版）`,
 			);
 			state.generation = knownContent;
 			raiseGeneration(state, knownContent);
 		}
 	}
 	/**
-	 * **新内容从第几号往后发**：手里的高水位 ＋ 当前这一代 ＋ **起点那份完整副本报的号**。
+	 * **新内容从第几号往后发**：手里的高水位 ＋ 当前这一代 ＋ **起点那份完整备份报的号**。
 	 *
 	 * 三样都要看：
 	 * - 高水位：这个分支里发过的最大号（回退不会把它拉低，见 `sync/state.ts` 的 `maxGeneration`）；
 	 * - `state.generation`：我这边的内容走到第几版；
-	 * - **`anchor.generation`**：起点那份完整副本的号 —— 我应用过一份更老的完整副本
+	 * - **`anchor.generation`**：起点那份完整备份的号 —— 我应用过一份更老的完整备份
 	 *   （内容版本往回走了）之后再导出时，新号仍然从高水位往后发，不会撞历史上用过的号。
 	 */
 	const highWater = Math.max(
@@ -1272,16 +1272,16 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		options.generationFloor ?? 0,
 	);
 	/**
-	 * 这一份包结束时到达的世代：
-	 * - 差量包（终点是某份完整副本）＝**那份完整副本记着的那一代**（内容到它为止）；
+	 * 这一份包结束时到达的版本：
+	 * - 差分更新包（终点是某份完整备份）＝**那份完整备份记着的那一代**（内容到它为止）；
 	 * - 合成的起点（"应用前存的改动"那一份）＝**它送到的那一点 + 1**（不低于高水位）；
 	 * - **仓库自上次导出以来没动过 → 沿用当前这一代**：内容与上次打包时一模一样，
-	 *   它就是同一版内容，一代都不该多占（完整副本如此，**更新包同样如此** ——
-	 *   把起点钉在老状态上时，每次自动留包都会重导同一份内容，见上面 `moved` 那段）。
+	 *   它就是同一版内容，一代都不该多占（完整备份如此，**更新包同样如此** ——
+	 *   把起点钉在老状态上时，每次自动导出都会重新导出同一份内容，见上面 `moved` 那段）。
 	 *   回退之后**什么都不改**就导出时也走这一条：那一份变成的是你已经站着的那个老点，
-	 *   号就是那个老点的号（"把大家带回第 39 代"），不是新占一个号；
+	 *   号就是那个老点的号（"把大家带回第 39 版"），不是新占一个号；
 	 * - 其余（仓库动过）＝ **高水位 + 1**：正常情况它就是"当前代 + 1"；
-	 *   **回退（应用过更老的完整副本）之后再导出**时它保证不撞历史上用过的号 ——
+	 *   **回退（应用过更老的完整备份）之后再导出**时它保证不撞历史上用过的号 ——
 	 *   用户报过的那一幕（"这样会搞乱更新顺序产生分支"）就是这么来的。
 	 */
 	const targetGeneration = checkpoint
@@ -1289,7 +1289,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		: options.anchorOverride
 			? Math.max(highWater, anchor?.generation ?? state.generation) + 1
 			: (!moved ? state.generation : highWater + 1);
-	/** 报告里那段"从第几代 · 状态 · 到第几代"（完整包没有基准） */
+	/** 报告里那段"从第几代 · 状态 · 到第几代"（完整备份没有基准） */
 	const anchorReport: ExportAnchor | null = mode === 'changes' && anchor
 		? {
 			generation: anchor.generation,
@@ -1300,7 +1300,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			checkpoint,
 			targetGeneration,
 			targetHash: checkpoint ? (target?.hash ?? null) : null,
-			// 起点是怎么定下来的（我站的那一份完整副本时，界面要写清"这一份是从它算起的"）
+			// 起点是怎么定下来的（本机当前使用的这一份完整备份时，界面要写清"这一份是从它算起的"）
 			...(start ? { start } : {}),
 		}
 		: null;
@@ -1328,24 +1328,24 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	});
 
 	if (mode === 'changes' && existing) {
-		// 差量包的内容由**两份完整包**决定，重导只会写出一模一样的文件 —— 直说，别写
-		options.log.debug(`更新包：第 ${anchor?.generation} → ${target?.generation} 代的差量包已经导过了（${existing}）`);
+		// 差分更新包的内容由**两份完整备份**决定，重新导出只会写出一模一样的文件 —— 直说，别写
+		options.log.debug(`更新包：第 ${anchor?.generation} → ${target?.generation} 代的差分更新包已经导过了（${existing}）`);
 		return emptyOutcome(
-			`这一份「第 ${anchor?.generation} → ${target?.generation} 代」的差量包已经导过了（${existing}），`
-			+ '内容一模一样，没有重复生成；删掉那个包就能重导',
+			`这一份「第 ${anchor?.generation} → ${target?.generation} 代」的差分更新包已经导过了（${existing}），`
+			+ '内容一模一样，没有重复生成；删掉那个包就能重新导出',
 		);
 	}
 
 	if (mode === 'changes' && picked.length === 0 && freshDeleted.length === 0 && moves.length === 0) {
 		options.log.debug('更新包：起点与终点之间没有任何变化');
 		return emptyOutcome(checkpoint
-			? `第 ${anchor?.generation} 代与第 ${target?.generation} 代之间没有任何变化，不需要导出`
-			: `自第 ${anchor?.generation ?? '?'} 代完整副本以来没有任何变化，不需要导出`);
+			? `第 ${anchor?.generation} 版与第 ${target?.generation} 版之间没有任何变化，不需要导出`
+			: `自第 ${anchor?.generation ?? '?'} 版完整备份以来没有任何变化，不需要导出`);
 	}
 
 	/**
-	 * 差量包（终点不是"最新"）：每个文件的内容**取终点那一刻的**，不是当前仓库的 ——
-	 * 读一次终点那份包的头部拿到负载起点，再按条目的 offset 取（0.14 起终点只可能是完整副本）。
+	 * 差分更新包（终点不是"最新"）：每个文件的内容**取终点那一刻的**，不是当前仓库的 ——
+	 * 读一次终点那份包的头部拿到负载起点，再按条目的 offset 取（0.14 起终点只可能是完整备份）。
 	 */
 	let checkpointInfo: BundleInfo | null = null;
 	const checkpointSources = new Map<string, { file: string; offset: number; size: number; mtime: number; hash?: string }>();
@@ -1378,12 +1378,12 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	await yieldToUi();
 	let lastYieldAt = Date.now();
 	for (const file of picked) {
-		// 这一步（算指纹）不报进度：数字只认"打进包里几个文件"，见 writeBundle 那边的回调。
+		// 这一步（算校验值）不报进度：数字只认"打进包里几个文件"，见 writeBundle 那边的回调。
 		// 循环本身是纯 CPU 的（命中缓存时一个 I/O 都没有），按时间让一帧，界面别僵住。
 		lastYieldAt = await yieldIfDue(lastYieldAt);
 
-		// base：**停在起点那份完整包上的接收方**手里就是这一版（新模型下只有这一种）。
-		// 至于它停在我发过的某一版上 —— 由 `history` 认（见 apply.ts 的 matchesHistory）。
+		// base：**仍使用起点那份完整备份的接收方**手里就是这一版（新模型下只有这一种）。
+		// 至于它仍使用我发过的某一版 —— 由 `history` 认（见 apply.ts 的 matchesHistory）。
 		const base = anchor?.files[file];
 		const baseHash = base ? cachedHash(state, file, base) : null;
 		// 中间版本：更早的那些（跳过包的人停在其中一个）
@@ -1425,9 +1425,9 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		// **我上一次发出去的是哪一版**：记进中间版本，下一个包把它带上。
 		//
 		// 带的是 `previous`（我上次导出 / 应用时的样子），**不是 `base`**：
-		// 起点那一版人人都知道（它就在那份完整包里），记它没有意义；
+		// 起点那一版人人都知道（它就在那份完整备份里），记它没有意义；
 		// 要认的是"对方手里这一版是我发出去的中间某一版"——新模型下这是常态
-		// （他应用过我从同一份完整包导出的上一份更新包），见 `apply.ts` 的 `matchesHistory`。
+		// （他应用过我从同一份完整备份导出的上一份更新包），见 `apply.ts` 的 `matchesHistory`。
 		const sent = previous[file];
 		if (mode === 'changes' && sent && !carried.some(item => sameRecord(item, sent, DEFAULT_MTIME_TOLERANCE_MS))) {
 			const grown = [...carried, { ...sent }];
@@ -1437,20 +1437,20 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 
 	const now = Date.now();
 	const bundleId = randomUUID();
-	/** 哪些目录"有文件"（它们的上级目录都算）：差量包按终点那份包的清单算 */
+	/** 哪些目录"有文件"（它们的上级目录都算）：差分更新包按终点那份包的清单算 */
 	const covered = dirsContainingPaths(checkpoint ? Object.keys(target?.files ?? {}) : [...inventory.files.keys()]);
 	// 空目录：有文件的目录会随文件写入被顺带建出来，**空文件夹不记就永远传不过去**。
-	// 差量包用的是**终点那份包记着的**空文件夹清单（它那一刻的样子），不是当前仓库的
+	// 差分更新包用的是**终点那份包记着的**空文件夹清单（它那一刻的样子），不是当前仓库的
 	const emptyDirs = checkpoint
 		? [...(target?.emptyDirs ?? [])].sort()
 		: [...inventory.dirs].filter(dir => !covered.has(dir)).sort();
 
 	/**
-	 * 这一份包的**基准指纹**（见 `bundle/baseline.ts`）—— **导出前**那一刻我站的基准点：
-	 * - 导完整包：包自己就是一份新基准，指纹由它自己的清单算出来（接收方也能重算，不信任头部）；
-	 * - 导更新包：带上"我基于的**那一个基准点**"的指纹 —— 对方**必须停在这点上**才收得下
-	 *   （我手里只有变过的那部分，算不出别人站的点在哪儿）。
-	 *   指定了老起点时带的就是老那份的指纹：停在那份上的接收方一比正好是 `match`。
+	 * 这一份包的**基准校验值**（见 `bundle/baseline.ts`）—— **导出前**那一刻本机的基准：
+	 * - 导完整备份：包自己就是一份新基准，校验值由它自己的清单算出来（接收方也能重算，不信任头部）；
+	 * - 导更新包：带上"我基于的**那一个基准**"的校验值 —— 对方**必须仍使用这点**才收得下
+	 *   （我手里只有变过的那部分，算不出别人使用的点在哪儿）。
+	 *   指定了老起点时带的就是老那份的校验值：仍使用那份的接收方一比正好是 `match`。
 	 *   旧状态文件 / 旧包没有这个令牌就留空 → 对方判成"说不清"，界面会说明。
 	 */
 	const freshBaseline = listingHashOfFiles(landedPoint);
@@ -1459,39 +1459,39 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	/**
 	 * **不准悄悄另立一个基准**（0.18.1，用户拍板："必须保证同步性和安全性"）。
 	 *
-	 * 拦的是这一种：本机用的基准是**别人给的**（应用差量包之后 `fullFile` 是空的），
-	 * 而现在这份仓库算出来的指纹和它不一样 —— 这时导完整副本会把本机的基准**换掉**，
-	 * 对面之后按老基准发来的包全被判「基准对不上」；而本机又拿不出对面那份完整副本、
-	 * 连"从老基准出发的差量包"都做不出来。两边就再也凑不回去了。
+	 * 拦的是这一种：本机用的基准是**别人给的**（应用差分更新包之后 `fullFile` 是空的），
+	 * 而现在这份仓库算出来的校验值和它不一样 —— 这时导完整备份会把本机的基准**换掉**，
+	 * 对面之后按老基准发来的包全被判「基准不一致」；而本机又拿不出对面那份完整备份、
+	 * 连"从老基准出发的差分更新包"都做不出来。两边就再也凑不回去了。
 	 *
 	 * 出口是两条，都不绕弯：
-	 * 1. 拿到对面那份完整副本（拷进 `full/`，再「以这一份为基准…」应用一遍）—— 之后两边一致；
+	 * 1. 拿到对面那份完整备份（复制进 `full/`，再「以这一份为基准…」应用一遍）—— 之后两边一致；
 	 * 2. 先导**更新包**（它不动基准）：把改动交给对面，基准的问题另行解决。
 	 *
-	 * 不拦的情况：`fullFile` 有值（这份基准是本机导的/本机应用过它的完整副本）——
-	 * 那种情况"换基准"是本机的正当动作，对面靠差量包跟上来（`bundle/rebaseline.ts`）。
+	 * 不拦的情况：`fullFile` 有值（这份基准是本机导的/本机应用过它的完整备份）——
+	 * 那种情况"换基准"是本机的正当动作，对面靠差分更新包跟上来（`bundle/rebaseline.ts`）。
 	 */
 	if (mode === 'full' && state.bundle?.fullHash && !state.bundle.fullFile && freshBaseline !== state.bundle.fullHash) {
 		const generation = state.bundle.fullGeneration ?? state.generation;
 		throw new Error(
-			`本机现在用的基准是第 ${generation} 代（${state.bundle.fullHash}），但本机没有它的包文件；`
-			+ `拿现在这份仓库算出来的指纹是 ${freshBaseline} —— 现在导完整副本等于悄悄换成另一个基准，`
-			+ '对面之后按老基准发来的包都会被判「基准对不上」，而本机又做不出从老基准出发的差量包。'
-			+ '两条路：① 把对面那份完整副本拷进同步包文件夹的 full/，再在「管理同步包」里选它点「以这一份为基准…」；'
+			`本机现在用的基准是第 ${generation} 版（${state.bundle.fullHash}），但本机没有它的包文件；`
+			+ `拿现在这份仓库算出来的校验值是 ${freshBaseline} —— 现在导完整备份等于悄悄换成另一个基准，`
+			+ '对面之后按老基准发来的包都会被判「基准不一致」，而本机又做不出从老基准出发的差分更新包。'
+			+ '两条路：① 把对面那份完整备份复制进同步包文件夹的 full/，再在「管理同步包」里选它点「以这一份为基准…」；'
 			+ '② 先导更新包（它不动基准）。',
 		);
 	}
 
 	/**
-	 * **状态编号**：这一刻整个仓库长什么样的短指纹（见 `sync/state-id.ts`）。
+	 * **内容校验值**：这一刻整个仓库长什么样的短校验值（见 `sync/state-id.ts`）。
 	 *
 	 * 写进包头部 → 接收方应用完算一个自己的跟它比：相同就是"两边文件内容一致"。
-	 * 世代号做不到这件事（它只说内容走到第几版），用户提的
+	 * 版本号做不到这件事（它只说内容走到第几版），用户提的
 	 * "需要一个编号让用户能确定当前文件状态"就是这个。
 	 *
 	 * （真正算它的是函数开头那段 —— 它还要用来判"内容动没动"。这里只是说明它是什么。）
 	 */
-	/** 我自己的状态编号：不推进本机时不算（那不是我现在的仓库该报的数） */
+	/** 我自己的内容校验值：不推进本机时不算（那不是我现在的仓库该报的数） */
 	const ownStateId = frozen ? null : stateIdInfo;
 
 	/**
@@ -1506,11 +1506,11 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 * 文件夹里攒了几个之后根本认不出谁是谁 —— 得逐个点开看报告才知道它接的是哪一代
 	 * （用户提的："包起名太费解"）。现在：
 	 * - **完整 / 更新**：中文，不用再猜 full / changes；
-	 * - **第几代到第几代**：完整包写它立的基准世代；更新包写「起点代到终点代」——
-	 *   终点就是接收方应用完到达的世代（差量包的终点是它送到的那一刻）；
-	 * - **目标状态**：包头部记的那个状态编号（见 `sync/state-id.ts`）＝ **接收方应用完
-	 *   应该落在哪个状态**。世代号说不出"这是哪一份完整副本"，状态编号才认得出是不是同一份东西；
-	 *   对不上时打开列表一看便知（列表里每行也写着同一个编号）。
+	 * - **第几代到第几代**：完整备份写它立的基准版本；更新包写「起点代到终点代」——
+	 *   终点就是接收方应用完到达的版本（差分更新包的终点是它送到的那一刻）；
+	 * - **目标状态**：包头部记的那个内容校验值（见 `sync/state-id.ts`）＝ **接收方应用完
+	 *   应该落在哪个状态**。版本号说不出"这是哪一份完整备份"，内容校验值才认得出是不是同一份东西；
+	 *   不一致时打开列表一看便知（列表里每行也写着同一个编号）。
 	 *
 	 * **时间戳去掉了**（用户提的："状态后面那一长串数字没用"）：文件名里本来就只有"什么时候导的"
 	 * 这一条信息，而列表里每一行都有修改时间、更新记录里也写着；一串 15 位数字反而把名字撑长。
@@ -1539,22 +1539,22 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			vault: options.vaultName,
 			lineage: state.lineage,
 			source: copyRef(state),
-			// 完整包免校验（baseGeneration 为 null）。
-			// 更新包说"我从**哪一份**完整副本往后算"：接收方只要**应用过那一份**
-			// （也就是世代 ≥ 基准世代）就能收，不必逐个按顺序应用。
+			// 完整备份免校验（baseGeneration 为 null）。
+			// 更新包说"我从**哪一份**完整备份往后算"：接收方只要**应用过那一份**
+			// （也就是版本 ≥ 基准版本）就能收，不必逐个按顺序应用。
 			// 这个值取的是**这次实际用的起点**（可能在设置里指定了老那份），不是"我最新那份"。
 			baseGeneration: mode === 'changes' ? (anchor?.generation ?? state.generation) : null,
 			targetGeneration,
 			...(baselineHash ? { baselineHash } : {}),
-			// 起点是不是**真的一份完整副本**（见 `BundleHeader.baseFullBundle`）：
-			// 只有"我站的那一份 / 用户在下拉里指的那一份"才算（磁盘上有它的包、是个真点）；
+			// 起点是不是**真的一份完整备份**（见 `BundleHeader.baseFullBundle`）：
+			// 只有"本机当前使用的这一份 / 用户在下拉里指的那一份"才算（磁盘上有它的包、是个真点）；
 			// "应用前先把本机改动存成包"那一趟的起点是合成出来的（对方那份包送到的那一点），不算
 			...(mode === 'changes' && !options.anchorOverride && anchor?.hash ? { baseFullBundle: true } : {}),
 			// 这个包**送到**哪个状态（＝接收方应用完该有的样子）。
-			// 差量包：终点那份完整副本的指纹（`targetFullBundle` 告诉接收方"变成的是一份真基准"）；
-			// 普通更新包：落点的清单指纹（`landedPoint`——它不是基准点，只是一个状态）。
-			// 接收方拿它做两件事：认出"这包要送到的地方正好就是我站的这一点"（白跑一趟），
-			// 以及"算一遍落点"那条放行判据（见 `apply.ts` 的 `checkAncestor`）。
+			// 差分更新包：终点那份完整备份的校验值（`targetFullBundle` 告诉接收方"变成的是一份真基准"）；
+			// 普通更新包：目标版本的清单校验值（`landedPoint`——它不是基准，只是一个状态）。
+			// 接收方拿它做两件事：认出"这包要送到的地方正好就是本机当前的这个版本"（无需变更），
+			// 以及"算一遍目标版本"那条放行判据（见 `apply.ts` 的 `checkAncestor`）。
 			...(checkpoint
 				? (target?.hash ? { targetBaselineHash: target.hash, targetFullBundle: true } : {})
 				: { targetBaselineHash: freshBaseline }),
@@ -1569,8 +1569,8 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	);
 
 	/**
-	 * **该立新完整包了** 的提醒：这一份要搬多少字节自己是知道的（`payloadBytes`）——
-	 * 超过阈值就把整句算好交给界面（导出预览、导出结果、自动留包的状态栏都用它）。
+	 * **该立新完整备份了** 的提醒：这一份要搬多少字节自己是知道的（`payloadBytes`）——
+	 * 超过阈值就把整句算好交给界面（导出预览、导出结果、自动导出的状态栏都用它）。
 	 */
 	const advice = baselineAdvice(
 		mode,
@@ -1581,26 +1581,26 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	);
 
 	/**
-	 * 包写成功了才推进世代与基准。
+	 * 包写成功了才推进版本与基准。
 	 *
-	 * **不推进本机（`frozen`）的两趟**：差量包（它代表的不是我现在的仓库 —— 内容是 b 那一刻的），
-	 * 以及"应用前先把本机改动存成包"那一趟（存完还要去应用对方的包，落点由那份包决定）。
-	 * 这两趟都是：世代不动、基准不动、状态编号不动、欠对方的那笔回传也不结清。
+	 * **不推进本机（`frozen`）的两趟**：差分更新包（它代表的不是我现在的仓库 —— 内容是 b 那一刻的），
+	 * 以及"应用前先把本机改动存成包"那一趟（存完还要去应用对方的包，目标版本由那份包决定）。
+	 * 这两趟都是：版本不动、基准不动、内容校验值不动、欠对方的那笔回传也不结清。
 	 */
 	if (!frozen) {
 		/**
-		 * **点只在完整包上动**（0.14 的硬规矩，见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
-		 * 更新包**不产生新点** —— 导完它，我照样停在起点那份完整包上，
-		 * 下一份包还是从那份完整包往外算（所以它是累积的：想整理就导一份新完整包）。
+		 * **点只在完整备份上动**（0.14 的硬规矩，见 `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`）：
+		 * 更新包**不产生新点** —— 导完它，我照样仍使用起点那份完整备份，
+		 * 下一份包还是从那份完整备份往外算（所以它是累积的：想整理就导一份新完整备份）。
 		 *
 		 * 内容那一半照旧每次都前进：`files`（两边都见过的那一份）、`history`（我发过哪几版）、
-		 * `dirs`、世代号与状态编号 —— 只有"我站的那一份完整包"这几样不跟着更新包走。
+		 * `dirs`、版本号与内容校验值 —— 只有"本机当前使用的这一份完整备份"这几样不跟着更新包走。
 		 *
-		 * 为什么不能像链条时代那样"导出更新包也把点往前推"：那样点就不再是完整包，
+		 * 为什么不能像链条时代那样"导出更新包也把点往前推"：那样点就不再是完整备份，
 		 * 又会冒出一堆没有包文件的"中间点"，正是这次要砍掉的东西。
 		 *
-		 * 导完整包 ＝ 重新立一个点：中间版本记录一起清零
-		 * （这正是"包会越滚越大"的节制阀，所以完整包不是可有可无的）。
+		 * 导完整备份 ＝ 重新立一个点：中间版本记录一起清零
+		 * （这正是"包会越滚越大"的节制阀，所以完整备份不是可有可无的）。
 		 */
 		const keepBase = mode === 'full' ? null : state.bundle;
 		state.bundle = {
@@ -1609,26 +1609,26 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 			fullFiles: keepBase?.fullFiles ?? landedPoint,
 			fullGeneration: keepBase?.fullGeneration ?? targetGeneration,
 			fullHash: keepBase?.fullHash ?? freshBaseline,
-			// 界面上要能说清"我用哪一份完整包上"；更新包不是完整包，不能拿它顶名字
+			// 界面上要能说清"我用哪一份完整备份上"；更新包不是完整备份，不能拿它顶名字
 			fullFile: mode === 'full' ? path.basename(file) : (keepBase?.fullFile ?? null),
 			history: mode === 'full' ? {} : nextHistory,
 			// 目录基准：接收方靠它认出"这个空目录是对方删了"（基准里有、包里没有）还是"我独有的"（一律保留）
 			dirs: [...inventory.dirs],
 			/**
 			 * 累积删除清单（0.17，见 `prepareBundle` 里那段）：**换基准就清空**
-			 * （新的完整清单本来就不含它们）；差量包与本机无关，原样留着。
+			 * （新的完整清单本来就不含它们）；差分更新包与本机无关，原样留着。
 			 */
 			ghosts: checkpoint ? { ...(keepBase?.ghosts ?? {}) } : (mode === 'full' ? {} : ghosts),
 		};
 		state.generation = targetGeneration;
 		// 该发的都发出去了：欠对方的那笔回传结清（见 state.pendingReturn）
 		state.pendingReturn = null;
-		// 我现在的状态编号（更新记录顶部与每条都显示它；对方应用完会算一个跟它比）
+		// 我现在的内容校验值（更新记录顶部与每条都显示它；对方应用完会算一个跟它比）
 		if (ownStateId) state.stateId = { ...ownStateId, at: now };
 	}
 	/**
 	 * **高水位只增不减**：刚发出去的号（以及起点报的号）都记进来 —— 下一次"新内容"从它 +1 发。
-	 * `frozen` 那两趟（差量包 / 应用前存下的改动）也记：号确实发出去了，别人手里就有了这一份。
+	 * `frozen` 那两趟（差分更新包 / 应用前存下的改动）也记：号确实发出去了，别人手里就有了这一份。
 	 */
 	raiseGeneration(state, targetGeneration, anchor?.generation);
 	state.lastExportedBundleId = bundleId;
@@ -1650,7 +1650,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 		...(frozen ? { checkpoint: true } : {}),
 		...(options.logNote ? { note: options.logNote } : {}),
 	};
-	// 差量包记的是**终点那一刻**的状态编号（接收方应用完对的就是它），不是我当前的
+	// 差分更新包记的是**终点那一刻**的内容校验值（接收方应用完对的就是它），不是我当前的
 	if (stateIdInfo) logEntry.stateId = stateIdInfo.id;
 	appendBundleLog(state, logEntry);
 	await saveState(options.stateFile, state);
@@ -1658,9 +1658,9 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	// 旧的更新包该退休了 —— 但必须**等新包写成功、状态也落盘之后**再动它们：
 	// 旧包是"目前唯一的改动备份"，新包还没写入就先把旧的删了，导出一旦失败就什么都不剩。
 	// 一律清理（以前是个设置项）：更新包是累积的，旧包留着纯占地、还让人以为漏应用了；
-	// 没删掉的那些会在报告里如实说明理由（别的分支 / 世代不比新包小）
+	// 没删掉的那些会在报告里如实说明理由（别的分支 / 版本不比新包小）
 	/**
-	 * 本机**已经应用过**的包：bundleId → 那份包送到的世代（`bundleLog` 里的 apply 记录）。
+	 * 本机**已经应用过**的包：bundleId → 那份包送到的版本（`bundleLog` 里的 apply 记录）。
 	 *
 	 * 对面包被应用过一次，它那一半改动就已经在本机状态里了；再加上"内容被这次导出完全覆盖"
 	 * 与对面的 `peer` 记录两道闸，下一份导出成功之后它才算过时的包 —— 见
@@ -1709,13 +1709,13 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 }
 
 /**
- * **这一份包送到的那一个基准点**（清单）＝ 接收方应用完站到的那一点，也是我自己**这次导完**
+ * **这一份包送到的那一个基准**（清单）＝ 接收方应用完站到的那一点，也是我自己**这次导完**
  * 站到的那一点。
  *
  * 算法必须与接收方**一模一样**：起点那份清单 ＋ 这次进包的文件（用扫描到的记录）
  * − 这次点名的删除。**不能直接拿"当前仓库的清单"顶替** —— 2 秒容差之内的修改时间漂移
  * 在这边算作"没变"（于是没进包），接收方那边当然也保持原样；两边算出来的必须还是同一个点，
- * 否则下一个包会凭空报"基准对不上"。
+ * 否则下一个包会凭空报"基准不一致"。
  */
 function landedPointOf(
 	mode: BundleMode,
@@ -1760,9 +1760,9 @@ function landedPointOf(
 /**
  * **同一份内容，手里的包报的是第几代**（取最小的那个）；说不出就是 `null`。
  *
- * 用在哪：`exportBundle` 开头那段"世代号被撑大了就改回来"。判据是**内容本身**：
- * - **完整副本**：它自己就是那一刻的内容，`hash` 是它自己清单的指纹 → 比 `pointHash` 就行；
- * - **更新包**：头部写着"我变成哪一点"（`targetBaselineHash`）与那一代 → 同一个落点就是同一份内容。
+ * 用在哪：`exportBundle` 开头那段"版本号被撑大了就改回来"。判据是**内容本身**：
+ * - **完整备份**：它自己就是那一刻的内容，`hash` 是它自己清单的校验值 → 比 `pointHash` 就行；
+ * - **更新包**：头部写着"我变成哪一点"（`targetBaselineHash`）与那一代 → 同一个目标版本就是同一份内容。
  *
  * 只认**同一条分支**的包（别的机器导的不算账）；读不出头部的一律跳过（不是我们的包 / 传坏了）。
  * 包目录里通常只有几份（清理规则会把同一份起点的旧包去掉），所以这一步就是读几个文件的尾部，不慢。
@@ -1794,11 +1794,11 @@ async function smallestGenerationOf(outDir: string, lineage: string, pointHash: 
 /**
  * **"我马上要变成的那一点"** —— 手头这份包送到的地方（严格同步存包时的起点）。
  *
- * 为什么不是"我现在站的这一点"：
- * - **完整副本**：它自己的清单就是那个点；
+ * 为什么不是"我现在当前使用的这个版本"：
+ * - **完整备份**：它自己的清单就是那个点；
  * - **更新包**：我应用前**手里内容的样子**（`ApplyPlan.contentBefore` 那份快照）
  *   ＋ 它的条目 − 它点名的删除（对方头部 `targetBaselineHash` 报的就是它，
- *   见 `apply.ts` 的 `nextFullFiles`）。**不能拿"我站的那份完整副本"顶替** ——
+ *   见 `apply.ts` 的 `nextFullFiles`）。**不能拿"本机当前使用的那份完整备份"顶替** ——
  *   更新包不推进基准，那一份会比我的内容旧：早先几份更新包带来的文件全成了"我改过的"，
  *   存出来的包把对方自己的改动又回敬一遍（用户报过：对面明明跟上一代一字不差，
  *   应用时却导出一份「88 → 89 代」的"我的改动"包）。
@@ -1827,16 +1827,16 @@ export function landedAnchorOf(
 		emptyDirs: [...(header.emptyDirs ?? [])],
 		name: '（这份包送到的那一点）',
 		file: '',
-		// 对方那份包记的状态编号就是这个点该有的编号（旧包没记 → null，界面不写这一句）
+		// 对方那份包记的内容校验值就是这个点该有的编号（旧包没记 → null，界面不写这一句）
 		stateId: header.stateId ?? null,
 		mtime: 0,
 	};
 }
 
 /**
- * **合成起点的那一份**送到的那一点上有哪些目录（算状态编号用）。
+ * **合成起点的那一份**送到的那一点上有哪些目录（算内容校验值用）。
  *
- * 两份来源：合成起点自带的空目录（对方那份包记着的"我有这些空文件夹"）＋ 落点上文件的上级目录。
+ * 两份来源：合成起点自带的空目录（对方那份包记着的"我有这些空文件夹"）＋ 目标版本上文件的上级目录。
  * 与接收方应用完自己扫出来的那份对得上（根目录不算一条 —— 扫描出来的目录清单里也没有它）。
  */
 function landedDirsOf(anchor: BundleAnchor, landedPoint: Record<string, FileRecord>): string[] {
@@ -1855,7 +1855,7 @@ function landedDirsOf(anchor: BundleAnchor, landedPoint: Record<string, FileReco
  * 存成一个包才认得出是一整套，也才搬得走。**起点＝那份包送到的那一点**（`landedAnchorOf`），
  * 所以这一环谁都能用：自己应用＝在新点上把东西加回来，发给对方＝他用同一点上应用也一样。
  *
- * `frozen`：存完**不推进本机状态** —— 我接下来要去站的是对方那一点。
+ * `frozen`：存完**不推进本机状态** —— 我接下来要去使用的是对方那一点。
  * 返回 `file: null` ＝ 我这边跟那个点没有任何差别，没什么可存的（不是失败）。
  */
 export async function parkLocalChangesFor(
@@ -1865,8 +1865,8 @@ export async function parkLocalChangesFor(
 ): Promise<ExportOutcome> {
 	const landed = landedAnchorOf(incoming.header, incoming.contentBefore);
 	/**
-	 * 被对方那份包覆盖的路径上，落点是**对方那一版**（我仓库里还是改动前的旧版本）——
-	 * 那些版本的指纹就在包条目里带着，交给导出那头算编号用（见 `ExportOptions.stateIdHashes`）。
+	 * 被对方那份包覆盖的路径上，目标版本是**对方那一版**（我仓库里还是改动前的旧版本）——
+	 * 那些版本的校验值就在包条目里带着，交给导出那头算编号用（见 `ExportOptions.stateIdHashes`）。
 	 */
 	const hashes = new Map<string, string>();
 	for (const entry of incoming.header.entries) {
@@ -1894,65 +1894,65 @@ export async function parkLocalChangesFor(
 /**
  * 删掉被新包**完全取代**的旧更新包。
  *
- * **0.14 的"只留"规则**（用户拍板："更新包只留从完整包到完整包，或从完整包到最新状态的，
- * 防止出错"）：一份更新包永远是**相对某一份完整副本**算出来的累积差量，所以
+ * **0.14 的"只留"规则**（用户拍板："更新包只留从完整备份到完整备份，或从完整备份到最新状态的，
+ * 防止出错"）：一份更新包永远是**相对某一份完整备份**算出来的累积差量，所以
  * **同一份起点、同一形态**的旧包被新包完全说尽了 —— 留着只会让人犯迷糊（"我该发哪一份？"），
  * 也正是"要管理一堆包"的来源。于是：
  *
- * - **完整副本**：它是完整清单，谁都能取代（换基准那条路；还在用老起点上的机器直接应用它就行）；
+ * - **完整备份**：它是完整清单，谁都能取代（换基准那条路；还在用老起点上的机器直接应用它就行）；
  * - **同一份起点 ＋ 同一形态（都是"到最新状态"）＋ 我自己导的** → 旧的退休；
- * - **同一份起点 ＋ 同一个终点完整副本**（同一段区间重导了一遍）→ 旧的退休。
+ * - **同一份起点 ＋ 同一个终点完整备份**（同一段区间重新导出了一遍）→ 旧的退休。
  *
  * 其余一律留着，并说明为什么（`kept`）：悄悄留着会让人以为"清理没生效"，
  * 或者当成偶发 bug（用户报过：同一个操作第一遍没清、第二遍清了）。特别是
- * **另一台机器从同一份完整副本导出来的那一份**：那装的是**它那一半改动**，删了就丢数据。
+ * **另一台机器从同一份完整备份导出来的那一份**：那装的是**它那一半改动**，删了就丢数据。
  * 唯一例外是**本机已经应用过它**（`appliedBundleIds`）、并且**它的内容已被这次导出完全覆盖**
- * （每个条目同路径同指纹）：那时内容已经进本机状态、新包里也有一份，它就成了过时的包 ——
+ * （每个条目同路径同校验值）：那时内容已经进本机状态、新包里也有一份，它就成了过时的包 ——
  * 这条 0.16.15 起对"两边"都生效，不再只清自己导的；本机后来又改过 / 回退过的对面包不算覆盖，
  * 继续留着当回溯材料。
  *
  * 只删**确定**能删的，条件缺一不可：
  * - 同一个 `changes` 目录里的 `.lsave`（别的目录不碰）；
- * - 是**更新包**（完整包不碰：那是你的还原点）；
+ * - 是**更新包**（完整备份不碰：那是你的还原点）；
  * - 同一条分支（`lineage` 一致）—— 别的分支的包不动；
- * - 世代**严格更小**；而且不是刚写出来的那个；
+ * - 版本**严格更小**；而且不是刚写出来的那个；
  * - 对面包还必须**本机应用过它**（不在 `appliedBundleIds` 里的对面包一律留着）。
  *
- * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导完整包、再导更新包，
- * 不排除它的话，用户明明要了两个，最后只剩完整包一个。
+ * `keepPaths` 是"同一次导出里刚生成的包"：两个都勾时先导完整备份、再导更新包，
+ * 不排除它的话，用户明明要了两个，最后只剩完整备份一个。
  *
  * 内容安全性：删掉的那一份，内容必定还在别处（完整清单里，或同一份起点的新包里）；
- * 读不出头部、或者任何一条对不上的，一律留着（宁可多留，不可误删）。
+ * 读不出头部、或者任何一条不一致的，一律留着（宁可多留，不可误删）。
  */
 async function removeSupersededChanges(
 	options: ExportOptions,
 	header: BundleHeader,
 	keep: string,
-	/** 新包写入之后本机所在的世代（判"这个旧包是不是比我更新"用它，见下面那段） */
+	/** 新包写入之后本机所在的版本（判"这个旧包是不是比我更新"用它，见下面那段） */
 	generation: number,
 	/**
-	 * 本机**已经应用过**的包：bundleId → 那份包送到的世代（`bundleLog` 的 apply 记录）。
+	 * 本机**已经应用过**的包：bundleId → 那份包送到的版本（`bundleLog` 的 apply 记录）。
 	 *
 	 * 从 0.16.15 起，"另一边导的包"不再一律留着：**本机应用过它**（内容已经进本机状态）
-	 * 且**它的内容被这次导出完全覆盖**（逐条同路径同大小同指纹），它就是过时的包，可以退休。
+	 * 且**它的内容被这次导出完全覆盖**（逐条同路径同大小同校验值），它就是过时的包，可以退休。
 	 * 没应用过、或应用后又改过 / 回退过的对面包一律不碰 —— 那可能是对面较新的那一半改动，
-	 * 也可能是回溯材料，删了就只能让对方重导。
+	 * 也可能是回溯材料，删了就只能让对方重新导出。
 	 */
 	applied: ReadonlyMap<string, number> = new Map(),
 ): Promise<SupersededReport> {
 	const dir = bundleDirForMode(options.outDir, 'changes');
 	const keepPaths = new Set((options.keepPaths ?? []).map(item => path.resolve(item)));
 	keepPaths.add(path.resolve(keep));
-	/** 这一份从哪一份完整副本来（完整包免这一条：它是完整清单，谁都能取代） */
+	/** 这一份从哪一份完整备份来（完整备份免这一条：它是完整清单，谁都能取代） */
 	const myBase = header.mode === 'full' ? null : baselineOfBundle(header);
 	/**
-	 * **我导完这一份之后用哪一份完整副本上**（判"某个包的起点还有没有人站"用它）：
-	 * - 完整包：它自己；
-	 * - 差量包：它送到的**终点**那份（接收方变成那儿，而我本来就停在那儿）；
+	 * **我导完这一份之后用哪一份完整备份上**（判"某个包的起点还有没有人站"用它）：
+	 * - 完整备份：它自己；
+	 * - 差分更新包：它送到的**终点**那份（接收方变成那儿，而我本来就停在那儿）；
 	 * - 更新包：它基于的那份（导出更新包不动基准）。
 	 *
 	 * **不能一律拿 `baselineOfBundle(header)`**：那是"包自己的起点"。真机踩过 ——
-	 * 导一份差量包（起点第 320 代、终点第 961 代）时，本机自己那份「961 → 962」的更新包
+	 * 导一份差分更新包（起点第 320 版、终点第 961 版）时，本机自己那份「961 → 962」的更新包
 	 * 被判成"起点 961 没人站"而移到了回收站（它是给对面接下来用的那一份）。
 	 */
 	const myBaseline = header.mode === 'full'
@@ -1960,18 +1960,18 @@ async function removeSupersededChanges(
 		: (header.targetFullBundle === true
 			? (header.targetBaselineHash ?? baselineOfBundle(header))
 			: baselineOfBundle(header));
-	/** 送到哪个状态（旧版更新包没记 → null，那就只按"起点 ＋ 世代"认同一份） */
+	/** 送到哪个状态（旧版更新包没记 → null，那就只按"起点 ＋ 版本"认同一份） */
 	const myTarget = header.mode === 'full' ? null : (header.targetBaselineHash ?? null);
 	const removed: string[] = [];
-	/** 起点已经没人站、因此退休到回收站的包（与"被新包取代而删掉"分开报，理由不一样） */
+	/** 起点已经没人站、因此退休到回收使用的包（与"被新包取代而删掉"分开报，理由不一样） */
 	const retired: string[] = [];
 	const kept: { name: string; why: string }[] = [];
 	/**
-	 * 这次导出的内容（路径 → 大小＋指纹）：判"对面包送到的内容有没有被它完全覆盖"。
+	 * 这次导出的内容（路径 → 大小＋校验值）：判"对面包送到的内容有没有被它完全覆盖"。
 	 *
 	 * 应用过只是"那一刻收到了"；之后本机又改过 / 回退过，旧包里的版本就不再是当前内容，
 	 * 它仍然是回溯材料（实测：回退用例里那份 1→3 代包被误删后，后续步骤就应用不回来了）。
-	 * 所以只有**对面包的每个条目都能在新包里原样找到**（同路径、同大小、同指纹）、
+	 * 所以只有**对面包的每个条目都能在新包里原样找到**（同路径、同大小、同校验值）、
 	 * 并且**它点名的删除在新包的点名删除里也找得到**，才算覆盖。
 	 */
 	const myContent = new Map<string, string>(
@@ -1988,7 +1988,7 @@ async function removeSupersededChanges(
 		}
 		return missing;
 	};
-	/** 货架上各台机器写来的 `peer` 记录（`.lsave-peers/<copyId>.json`）：按 copyId 取世代 */
+	/** 远程仓库上各台机器写来的 `peer` 记录（`.lsave-peers/<copyId>.json`）：按 copyId 取版本 */
 	const peers: PeerState[] = readPeers(options.outDir, header.source?.copyId ?? '');
 	const peerGenerations = new Map<string, number>(peers.map(peer => [peer.copyId, peer.generation]));
 	const details: { name: string; bundleId: string | null; why: string }[] = [];
@@ -1996,7 +1996,7 @@ async function removeSupersededChanges(
 	 * 对面包能不能退休：返回「留着的理由」，`null` 表示可以走删除。
 	 *
 	 * 三道闸缺一不可（用户 + 对面 0.16.15 拍板的两条硬条件）：
-	 * 1. 本机**应用过**它，而且那次应用的目标世代 ≤ 本机当前世代（回退过就不算）；
+	 * 1. 本机**应用过**它，而且那次应用的目标版本 ≤ 本机当前版本（回退过就不算）；
 	 * 2. **对面也走过这一份**（它的 `peer` 记录里 generation ≥ 包的 target）——
 	 *    否则对面可能还拿这一份当基准；
 	 * 3. 内容被这次导出**完全覆盖**（见 `coverageOf`）。
@@ -2007,15 +2007,15 @@ async function removeSupersededChanges(
 			return '另一台机器导的、本机还没应用过（对面较新的那一半改动可能只在这一份里），留着';
 		}
 		if (appliedTarget > generation) {
-			return `本机应用它的那一步比现在还靠后（apply target ${appliedTarget} > 本机第 ${generation} 代，`
+			return `本机应用它的那一步比现在还靠后（apply target ${appliedTarget} > 本机第 ${generation} 版，`
 				+ '回退过），留着';
 		}
 		const peerGeneration = peerGenerations.get(otherCopy);
 		if (peerGeneration === undefined) {
-			return '对面包，但货架上没有它的 peer 记录（对表文件），没法确认对面已走过这一份，留着';
+			return '对面包，但远程仓库上没有它的 peer 记录（对表文件），没法确认对面已走过这一份，留着';
 		}
 		if (peerGeneration < other.targetGeneration) {
-			return `对面包，对面还停在第 ${peerGeneration} 代（< 包 target 第 ${other.targetGeneration} 代），`
+			return `对面包，对面仍在使用第 ${peerGeneration} 版（< 包 target 第 ${other.targetGeneration} 版），`
 				+ '可能还要拿它当基准，留着';
 		}
 		const uncovered = coverageOf(other);
@@ -2042,50 +2042,50 @@ async function removeSupersededChanges(
 			continue;
 		}
 		/**
-		 * **回退环一律留着**：那种包的落点号**比起点号还小**（"把大家带回第 39 代"）——
+		 * **回退环一律留着**：那种包的目标版本号**比起点号还小**（"把大家带回第 39 版"）——
 		 * 它是这条线上唯一一份"往回走"的说明，靠后面的正向导出再也生不出来。
-		 * 而且它按号比永远显得"旧"：拿世代当闸门时会把它当成过时的包清掉
+		 * 而且它按号比永远显得"旧"：拿版本当闸门时会把它当成过时的包清掉
 		 * （回退之后导一次全量，下一次导出就会把那份回退说明删掉 —— 用户看到的是
 		 * "我那个包没了"，实测报过这类"同一个操作两遍结论不一样"）。
 		 */
 		if (other.targetGeneration <= (other.baseGeneration ?? 0)) {
 			kept.push({
 				name: item.name,
-				why: `把大家带回第 ${other.targetGeneration} 代的那一份（回退说明），正向导出生不出来，留着`,
+				why: `把大家带回第 ${other.targetGeneration} 版的那一份（回退说明），正向导出生不出来，留着`,
 			});
 			continue;
 		}
 		/**
-		 * 世代这一道闸：**不许删"比我更新的"包**（那个包可能是更新内容的唯一副本，宁可留着）。
+		 * 版本这一道闸：**不许删"比我更新的"包**（那个包可能是更新内容的唯一副本，宁可留着）。
 		 *
-		 * 跟谁比？**新包写入之后本机所在的世代**（`generation`），不是它头部那个 `targetGeneration`：
-		 * 完整副本在"内容没动过"时不推进世代（留还原点就是这种），
-		 * 那时头部记的还是当前这一代，拿它比会把**同一个世代**的旧更新包判成"不比这次小"而永远清不掉 ——
+		 * 跟谁比？**新包写入之后本机所在的版本**（`generation`），不是它头部那个 `targetGeneration`：
+		 * 完整备份在"内容没动过"时不推进版本（留还原点就是这种），
+		 * 那时头部记的还是当前这一代，拿它比会把**同一个版本**的旧更新包判成"不比这次小"而永远清不掉 ——
 		 * 用户就会看到"我立了新基准，旧更新包还躺着"（报过）。
-		 * 按"写入后的世代"比，内容没动的完整副本照样能把同代的旧更新包清干净，
-		 * 同时"世代更大"（状态文件被换过 / 装过更晚的包）的包仍然一个不碰。
+		 * 按"写入后的版本"比，内容没动的完整备份照样能把同版本的旧更新包清干净，
+		 * 同时"版本更大"（状态文件被换过 / 装过更晚的包）的包仍然一个不碰。
 		 */
 		if (other.targetGeneration > generation) {
-			kept.push({ name: item.name, why: '记的世代不比这次的新（导出过更晚的包）' });
+			kept.push({ name: item.name, why: '记的版本不比这次的新（导出过更晚的包）' });
 			continue;
 		}
 		/**
 		 * **它的起点已经没人站了 → 谁都用不上它，退休到回收站**（0.18，用户拍板：
-		 * "自动清，但只清确定没人站的"）。
+		 * "自动清，但只清确定没人使用的"）。
 		 *
-		 * 判据是"应用它需要什么"：更新包/差量包只在**接收方正好停在它起点那份完整副本上**时
-		 * 才收得下（`checkAncestor`），差量包的用途更是"把停在起点上的机器变成终点那份上"。
-		 * 所以起点一旦空出来（我不停在那儿、货架上每台电脑报的 `baselineHash` 也不是它），
-		 * 这份包**再也不可能被应用**：它的内容要么是别处已经有的一份完整副本（差量包），
+		 * 判据是"应用它需要什么"：更新包/差分更新包只在**接收方正好仍使用它起点那份完整备份**时
+		 * 才收得下（`checkAncestor`），差分更新包的用途更是"把仍使用起点上的机器变成终点那份"。
+		 * 所以起点一旦空出来（我不仍使用那儿、远程仓库每台电脑报的 `baselineHash` 也不是它），
+		 * 这份包**再也不可能被应用**：它的内容要么是别处已经有的一份完整备份（差分更新包），
 		 * 要么是导出方自己仓库里的东西（更新包）。
 		 *
 		 * 三条边界（都是"宁可多留"的方向）：
-		 * - **货架上没有任何别的电脑上报过** → 不动（单机 / 没开 git 时，分不清谁在用）；
+		 * - **远程仓库上没有任何别的电脑上报过** → 不动（单机 / 没开 git 时，分不清谁在用）；
 		 * - 有一台还报着这个起点 → 不动（它可能就等着这一份）；
-		 * - 旧包没记指纹（`baselineHash` 缺失）→ 不动（认不出它基于哪一份）。
+		 * - 旧包没记校验值（`baselineHash` 缺失）→ 不动（认不出它基于哪一份）。
 		 *
 		 * 与"被新包取代"那条的区别：那条是删（内容被新包完全覆盖），这条是**移到回收站** ——
-		 * 这里我们只知道"没人停在它的起点上"，不能声称它的内容在别处，所以要能捞回来。
+		 * 这里我们只知道"没人仍使用它的起点"，不能声称它的内容在别处，所以要能恢复。
 		 */
 		const otherBaseline = baselineOfBundle(other);
 		if (
@@ -2100,7 +2100,7 @@ async function removeSupersededChanges(
 				details.push({
 					name: item.name,
 					bundleId: other.bundleId ?? null,
-					why: `第 ${other.baseGeneration ?? '?'} 代那份已经不是任何电脑的基准了，`
+					why: `第 ${other.baseGeneration ?? '?'} 版那份已经不是任何电脑的基准了，`
 						+ `这份包（第 ${other.baseGeneration ?? '?'} → ${other.targetGeneration} 代）退休到回收站`,
 				});
 			} catch (error) {
@@ -2113,13 +2113,13 @@ async function removeSupersededChanges(
 		}
 		/**
 		 * 到这儿它就是一份"看着该被取代"的更新包 —— 但**取代只在同一份起点上成立**（见下面那几段）：
-		 * 更新包是"相对某一份完整副本"算出来的累积差量，换了起点就是另一条线上的东西。
+		 * 更新包是"相对某一份完整备份"算出来的累积差量，换了起点就是另一条线上的东西。
 		 */
 		if (header.mode !== 'full') {
 			const otherBase = baselineOfBundle(other);
 			const otherTarget = other.targetBaselineHash ?? null;
-			// **不是同一份起点 → 留着**：换一份完整副本当起点算出来的更新包是另一条线上的东西，
-			// 还以那份完整副本为基准的机器要用它
+			// **不是同一份起点 → 留着**：换一份完整备份当起点算出来的更新包是另一条线上的东西，
+			// 还以那份完整备份为基准的机器要用它
 			if (otherBase !== myBase) {
 				kept.push({
 					name: item.name,
@@ -2136,7 +2136,7 @@ async function removeSupersededChanges(
 			 * （"我该发哪一份？"），也正是用户说的"要管理一堆包"。
 			 *
 			 * 两条不能省：
-			 * - **只限同一形态**："到另一份完整副本"的差量包与"到最新状态"的更新包终点不一样，各自有用；
+			 * - **只限同一形态**："到另一份完整备份"的差分更新包与"到最新状态"的更新包终点不一样，各自有用；
 			 * - **对面包要看应用记录**：另一台机器导的那一份装的是**它那一半改动**，没应用过就删了会丢数据；
 			 *   本机**已经应用过**（`bundleId` 在 `appliedBundleIds` 里）、且它的内容**被这次导出完全覆盖**
 			 *   （`coverageOf`）之后，那一半改动已经进本机状态、新包里也有一份，可以退休。
@@ -2146,7 +2146,7 @@ async function removeSupersededChanges(
 			if (mineIsCheckpoint !== otherIsCheckpoint) {
 				kept.push({
 					name: item.name,
-					why: '终点形态不一样（一份送到另一份完整副本，一份送到最新状态），两种各自有用',
+					why: '终点形态不一样（一份送到另一份完整备份，一份送到最新状态），两种各自有用',
 				});
 				continue;
 			}
@@ -2154,7 +2154,7 @@ async function removeSupersededChanges(
 				if (otherTarget !== myTarget) {
 					kept.push({
 						name: item.name,
-						why: `同一份起点、但送到的是另一份完整副本（第 ${other.targetGeneration} 代）`,
+						why: `同一份起点、但送到的是另一份完整备份（第 ${other.targetGeneration} 版）`,
 					});
 					continue;
 				}
@@ -2178,13 +2178,13 @@ async function removeSupersededChanges(
 			}
 		} else {
 			/**
-			 * **完整副本取代更新包**：它是完整清单，换基准那条路上谁都能直接应用它。
+			 * **完整备份取代更新包**：它是完整清单，换基准那条路上谁都能直接应用它。
 			 *
 			 * **没应用过的对面包不取代** —— 别的机器从同一分支导出来的更新包装的是
-			 * **它那一半改动**，我这份完整副本里根本没有那些内容。凭"我这份是完整的"就把它删了，
-			 * 那半边数据就只能靠对方重导一次（0.14 起的规矩）。
+			 * **它那一半改动**，我这份完整备份里根本没有那些内容。凭"我这份是完整的"就把它删了，
+			 * 那半边数据就只能靠对方重新导出一次（0.14 起的规矩）。
 			 * 本机**已经应用过**的对面包（`appliedBundleIds`）内容已经在本机状态里，
-			 * 这份完整副本也含它，可以一起退休。
+			 * 这份完整备份也含它，可以一起退休。
 			 */
 			const otherCopy = other.source?.copyId;
 			const myCopy = header.source?.copyId;
@@ -2209,8 +2209,8 @@ async function removeSupersededChanges(
 			bundleId: other.bundleId ?? null,
 			why: appliedTarget === undefined
 				? '自己导的旧包，被这次导出取代'
-				: `对面包：本机 apply target 第 ${appliedTarget} 代 ≤ 第 ${generation} 代，`
-					+ `对方第 ${peerGenerations.get(other.source?.copyId ?? '')} 代 ≥ 包 target 第 ${other.targetGeneration} 代`,
+				: `对面包：本机 apply target 第 ${appliedTarget} 版 ≤ 第 ${generation} 版，`
+					+ `对方第 ${peerGenerations.get(other.source?.copyId ?? '')} 版 ≥ 包 target 第 ${other.targetGeneration} 版`,
 		});
 	}
 	removed.sort();
@@ -2220,21 +2220,21 @@ async function removeSupersededChanges(
 }
 
 /**
- * 换基准时顺手导一份「旧基准 → 新完整包」的差量包。
+ * 换基准时顺手导一份「旧基准 → 新完整备份」的差分更新包。
  *
- * 为什么要它：完整包太大、按决定**不推 git**，可对端还还在用旧基准上；没有这一份，
- * 它下一次收到的更新包（从新基准算起）会被 `checkAncestor` 判成"基准对不上"，两边就卡住了。
- * 差量包很小（只装这两份完整副本之间的差异），对端收下、应用完就站到新基准上 ——
- * **它手里不需要有新的完整包**（`apply.ts` 的 `landedOnBaseline` 只认清单与指纹）。
+ * 为什么要它：完整备份太大、按决定**不推 git**，可对端还还在用旧基准上；没有这一份，
+ * 它下一次收到的更新包（从新基准算起）会被 `checkAncestor` 判成"基准不一致"，两边就卡住了。
+ * 差分更新包很小（只装这两份完整备份之间的差异），对端收下、应用完就以新基准为基准 ——
+ * **它手里不需要有新的完整备份**（`apply.ts` 的 `landedOnBaseline` 只认清单与校验值）。
  *
- * 调用时机：**导出一份完整包之后**（`beforeHash` 是导出前我站的那一份）。
+ * 调用时机：**导出一份完整备份之后**（`beforeHash` 是导出前本机当前使用的这一份）。
  * 没有旧基准（第一次立基准）、或者新包和旧基准是同一份（内容没动）时什么都不做。
- * 失败不抛：把原因交回去，让界面如实说一句（别把已经导好的完整包也一起变成失败）。
+ * 失败不抛：把原因交回去，让界面如实说一句（别把已经导好的完整备份也一起变成失败）。
  */
 export async function exportRebaselineDiff(
 	options: ExportOptions,
 	beforeHash: string | null,
-	logNote = '换基准：把对方从旧基准带到新完整包',
+	logNote = '换基准：把对方从旧基准带到新完整备份',
 ): Promise<{ outcome: ExportOutcome | null; error: string | null }> {
 	if (!beforeHash) return { outcome: null, error: null };
 
@@ -2250,13 +2250,13 @@ export async function exportRebaselineDiff(
 		const outcome = await exportBundle({
 			...options,
 			mode: 'changes',
-			// 两端都钉死：起点是旧基准、终点是新完整包（内容是终点那份包的负载，不是现在的仓库）
+			// 两端都钉死：起点是旧基准、终点是新完整备份（内容是终点那份包的负载，不是现在的仓库）
 			baseFingerprint: beforeHash,
 			toFingerprint: after,
 			logNote,
 		});
 		if (outcome.file) return { outcome, error: null };
-		return { outcome: null, error: outcome.reason ?? '差量包没生成' };
+		return { outcome: null, error: outcome.reason ?? '差分更新包没生成' };
 	} catch (error) {
 		return { outcome: null, error: error instanceof Error ? error.message : String(error) };
 	}

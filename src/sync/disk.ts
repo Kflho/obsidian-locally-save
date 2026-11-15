@@ -26,7 +26,7 @@ export interface ScanOptions {
  *
  * 为什么不留在原地：留在仓库里的冲突副本会**跟着同步传到对面去**，两边各滚一份、越滚越多。
  * 移到回收目录之后它天然不参与同步（`.trash` / `.lsave` 本来就被排除），
- * 而且照样能捞回来。
+ * 而且照样能恢复。
  */
 export const CONFLICT_TRASH_DIR = '冲突';
 
@@ -37,8 +37,8 @@ export const CONFLICT_TRASH_DIR = '冲突';
  * - 里面有看得见的东西（文件 / 子目录）→ 算；
  * - **一个条目都没有** → 算（空文件夹也是内容，用户拍过板）；
  * - 有条目、但**全被排除规则挡住**（`desktop.ini` / `*.lsave` / `.git`…）→ **不算**。
- *   这种目录搬不过去、也删不掉（`rmdir` 非空），算进状态编号只会让它永远对不上：
- *   用户报过"应用完整副本后编号一直差一点、基准却显示站上了"，就是这种目录搞的。
+ *   这种目录搬不过去、也删不掉（`rmdir` 非空），算进内容校验值只会让它永远不一致：
+ *   用户报过"应用完整备份后编号一直差一点、基准却显示站上了"，就是这种目录搞的。
  *   既然它里面没有一个字节参与同步，它本身也就不该参与"内容一不一样"的判断。
  */
 export async function scanTree(root: string, options: ScanOptions): Promise<Inventory> {
@@ -119,7 +119,7 @@ export async function removeEmptyDir(absPath: string): Promise<boolean> {
  * `keep` 是**不许删的目录**：应用同步包时要传"这份包说它存在的目录"
  * （`dirsInBundle` = 包里的空文件夹 ＋ 条目的上级目录）。踩过：对面把一个文件夹里的文件
  * 全删了、那个文件夹它留着（空文件夹也是要同步的内容），接收方这边删完文件顺手把空壳收掉，
- * 于是**状态编号当场对不上**（编号把目录也算进去）—— 用户看到的是一句
+ * 于是**内容校验值当场不一致**（编号把目录也算进去）—— 用户看到的是一句
  * "跟对方导出时的 xxxx 还差一点"，而文件一个都不差。
  */
 export async function pruneEmptyDirsDetailed(
@@ -286,8 +286,8 @@ export async function readJsonFile<T>(absPath: string): Promise<T | null> {
  * 同步版 `readJsonFile`：**只给设置面板那类"同步渲染"的地方用**。
  *
  * 设置面板（Obsidian 1.13 的声明式定义）是同步渲染的，等不了 `await`；
- * 而"更新包从哪个状态到哪个状态"的选项要列出本地那几份完整包 —— 得先知道
- * 状态文件里的分支与基准世代，只能同步读一次。读的还是同一个文件、同样容错。
+ * 而"更新包从哪个状态到哪个状态"的选项要列出本地那几份完整备份 —— 得先知道
+ * 状态文件里的分支与基准版本，只能同步读一次。读的还是同一个文件、同样容错。
  */
 export function readJsonFileSync<T>(absPath: string): T | null {
 	try {
@@ -305,7 +305,7 @@ export async function writeJsonAtomic(absPath: string, data: unknown): Promise<v
 	await fs.promises.rename(temp, absPath);
 }
 
-/** 一个文件的内容指纹（sha256，十六进制）。降级合并与完整性校验用 */
+/** 一个文件的内容校验值（sha256，十六进制）。降级合并与完整性校验用 */
 export async function hashFile(absPath: string): Promise<string> {
 	const hash = createHash('sha256');
 	const handle = await fs.promises.open(absPath, 'r');
@@ -339,7 +339,7 @@ export async function listFiles(absDir: string): Promise<{ name: string; size: n
 }
 
 /**
- * 同步版 `listFiles`：设置面板要**当场**把本地那几份完整包列成下拉选项。
+ * 同步版 `listFiles`：设置面板要**当场**把本地那几份完整备份列成下拉选项。
  *
  * 只在包目录上用（那几个目录里文件数很少），所以同步读一次的开销可以忽略；
  * 读不到（目录不存在、没权限）照样返回空 —— 选项里就只剩「最新」那一项。

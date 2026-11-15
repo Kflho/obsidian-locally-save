@@ -9,54 +9,54 @@ import type { StateIdInfo } from '../sync/state';
 import type { FileRecord } from '../sync/types';
 
 /**
- * 「状态」＝**一份完整副本**（或者"最新"＝当前仓库）。
+ * 「状态」＝**一份完整备份**（或者"最新"＝当前仓库）。
  *
  * 更新包只有两种形态，两个端点都从这份清单出发（用户拍板，见
- * `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
+ * `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`）：
  *
- * - **从**：一份**完整副本** —— 默认是"我站的那一份"（`state.bundle.fullHash`），
- *   也可以指定硬盘上更老的那一份。为什么需要：我立了新基准（第 36 代那份），
- *   对方还基准是第 32 代上，按最新基准导出来的更新包对它是"基于一份它没有的完整副本"。
- *   而**第 32 代那份完整包还在硬盘上**（完整副本是还原点，从来不会被清），
+ * - **从**：一份**完整备份** —— 默认是"本机当前使用的这一份"（`state.bundle.fullHash`），
+ *   也可以指定硬盘上更老的那一份。为什么需要：我立了新基准（第 36 版那份），
+ *   对方还基准是第 32 版上，按最新基准导出来的更新包对它是"基于一份它没有的完整备份"。
+ *   而**第 32 版那份完整备份还在硬盘上**（完整备份是还原点，从来不会被清），
  *   指定它当起点，对方收到就是接着自己那份基准的确定性更新。
- * - **到**：默认"最新"（当前仓库，含你刚改的东西）；也可以指定另一份完整副本 ——
- *   那就导一份"从 a 到 b 那一刻"的差量包，内容取自 b 那份包本身（不是你现在的仓库）。
+ * - **到**：默认"最新"（当前仓库，含你刚改的东西）；也可以指定另一份完整备份 ——
+ *   那就导一份"从 a 到 b 那一刻"的差分更新包，内容取自 b 那份包本身（不是你现在的仓库）。
  *
- * 一句话对照 git：完整包 ＝ commit，更新包 ＝ "从某个 commit 到某个 commit（或工作区）的 diff"。
- * **只有完整包才算"点"**：更新包不再落出一个能当起点的新点（0.14 起，
+ * 一句话对照 git：完整备份 ＝ commit，更新包 ＝ "从某个 commit 到某个 commit（或工作区）的 diff"。
+ * **只有完整备份才算"点"**：更新包不再落出一个能当起点的新点（0.14 起，
  * 那是 0.11–0.13 那套链条模型里的东西，它带来的"包越串越多、起点要自己认"正是被砍掉的原因）。
  *
- * **认状态靠「基准指纹」，世代号只是给人读的**：世代号说的是"这份内容走到第几版"
+ * **认状态靠「基准校验值」，版本号只是给人读的**：版本号说的是"这份内容走到第几版"
  * （同一个内容必然同一个号，见 `apply.ts` 里那段定义），可它认不出"我们是不是从同一份
- * 完整副本分出来的" —— 两台各自立过基准时，两边的"第 3 代"可能是两份不同的东西。
+ * 完整备份分出来的" —— 两台各自立过基准时，两边的"第 3 版"可能是两份不同的东西。
  * 所以界面上每个状态都写成「第 N 代 · 基准 xxxx」（起点）/「第 N 代 · 状态 xxxx」（终点）。
  * 这个文件不 import obsidian。
  */
 
-/** 一份可用于当"状态"的完整副本 */
+/** 一份可用于当"状态"的完整备份 */
 export interface BundleAnchor {
-	/** 它是第几代导出的（包头部 `targetGeneration`）—— 以它为准的接收方手里的世代 */
+	/** 它是第几代导出的（包头部 `targetGeneration`）—— 以它为准的接收方手里的版本 */
 	generation: number;
-	/** 它的基准指纹（见 `baseline.ts`）：应用过它的机器，`fullHash` 就是这个 */
+	/** 它的基准校验值（见 `baseline.ts`）：应用过它的机器，`fullHash` 就是这个 */
 	hash: string | null;
-	/** 它的完整清单（path → 大小 / 修改时间）：差量包按它挑"自它以来变过的文件" */
+	/** 它的完整清单（path → 大小 / 修改时间）：差分更新包按它挑"自它以来变过的文件" */
 	files: Record<string, FileRecord>;
 	/** 它记着的空文件夹（有文件的目录会随文件写入顺带建出来，空的只能靠这份清单） */
 	emptyDirs: string[];
 	/** 在界面 / 报告里显示的文件名（不含目录） */
 	name: string;
-	/** 包文件绝对路径（导 a→b 差量包时要读它的负载；空串 ＝ 状态里记着、磁盘上找不到） */
+	/** 包文件绝对路径（导 a→b 差分更新包时要读它的负载；空串 ＝ 状态里记着、磁盘上找不到） */
 	file: string;
 	/**
-	 * 这份完整包记的**状态编号**（导出方导完那一刻的文件状态，见 `sync/state-id.ts`）。
+	 * 这份完整备份记的**内容校验值**（导出方导完那一刻的文件状态，见 `sync/state-id.ts`）。
 	 *
-	 * 存整份而不只是那个 id：导"到某一份完整副本"的差量包时，要把它原样写进新包的头部 ——
+	 * 存整份而不只是那个 id：导"到某一份完整备份"的差分更新包时，要把它原样写进新包的头部 ——
 	 * 接收方应用完算一个自己的跟它比，**相同就说明正好变成了那一刻**。
 	 */
 	stateId: StateIdInfo | null;
 	/** 包文件的修改时间：同一代有好几份时按它挑最新的那份 */
 	mtime: number;
-	/** 它记着的中间版本（`history`）：导差量包时要把路上的版本一并带上（见 `export.ts`） */
+	/** 它记着的中间版本（`history`）：导差分更新包时要把路上的版本一并带上（见 `export.ts`） */
 	history?: Record<string, FileRecord[]>;
 }
 
@@ -71,7 +71,7 @@ export interface AnchorRef {
 	name: string;
 }
 
-/** 一份完整包 → 一个状态（不是完整包就返回 null） */
+/** 一份完整备份 → 一个状态（不是完整备份就返回 null） */
 export function anchorOfHeader(
 	header: BundleHeader | null | undefined,
 	file: string,
@@ -94,10 +94,10 @@ export function anchorOfHeader(
 }
 
 /**
- * 包里目录下所有**同一条分支**的完整副本，世代大的排前面（同代按修改时间新的在前）。
+ * 包里目录下所有**同一条分支**的完整备份，版本大的排前面（同版本按修改时间新的在前）。
  *
  * 为什么只认同一条分支：别的机器独立立的基准**跟我这边不是一份东西**
- * （它有它自己的第 1 代、第 2 代），拿它当起点算出来的更新包谁也不认识。
+ * （它有它自己的第 1 版、第 2 版），拿它当起点算出来的更新包谁也不认识。
  */
 export async function listFullAnchors(baseDir: string, lineage: string): Promise<BundleAnchor[]> {
 	const out: BundleAnchor[] = [];
@@ -113,14 +113,14 @@ export async function listFullAnchors(baseDir: string, lineage: string): Promise
 
 /**
  * 同步版：设置面板是**同步渲染**的，"从哪个状态 / 到哪个状态"两个下拉要在渲染那一刻
- * 就有选项，等不了 `await`。只看 `full/` 与根目录（完整包就放那儿，数量很少），
+ * 就有选项，等不了 `await`。只看 `full/` 与根目录（完整备份就放那儿，数量很少），
  * 读不出头部的包直接跳过 —— 选项里少一个，总比下拉框空着强。
  */
 export function listFullAnchorsSync(baseDir: string, lineage: string): BundleAnchor[] {
 	if (!baseDir) return [];
 	const out: BundleAnchor[] = [];
 	for (const dir of bundleDirsToScan(baseDir)) {
-		// 更新包目录里不会有完整包，但真放了一份（用户手动移的）也该列出来 —— 反正读头部很便宜
+		// 更新包目录里不会有完整备份，但真放了一份（用户手动移的）也该列出来 —— 反正读头部很便宜
 		for (const item of listFilesSync(dir)) {
 			if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;
 			const file = path.join(dir, item.name);
@@ -137,20 +137,20 @@ export function listFullAnchorsSync(baseDir: string, lineage: string): BundleAnc
 	return sortAnchors(out);
 }
 
-/** 世代大的在前；同代取最近写的那一份 */
+/** 版本大的在前；同版本取最近写的那一份 */
 function sortAnchors(anchors: BundleAnchor[]): BundleAnchor[] {
 	return anchors.sort((a, b) => b.generation - a.generation || b.mtime - a.mtime);
 }
 
 /**
- * 按**基准指纹**找状态 —— 下拉框的键就是它（`''` ＝ 默认：起点"我站的那一份"、终点"最新"）。
+ * 按**基准校验值**找状态 —— 下拉框的键就是它（`''` ＝ 默认：起点"本机当前使用的这一份"、终点"最新"）。
  *
- * **为什么认指纹、不认世代号**：世代号说的是"这份内容走到第几版了"（同一内容必然同一个号，
- * 见 `apply.ts` 里那段新定义），可它**不说明"我们是从哪一份完整副本分出来的"** ——
- * 两台机器各自立过完整副本时，两边的"第 3 代"可能是**两份内容完全不同的完整副本**，
- * 号一样、祖先不一样。用户实测就踩了这个：按"第 32 代"选起点导出的更新包，
- * 对面报「基准对不上」—— 选中的那一份根本不是对方手里那份。
- * 指纹是那份清单的直接证据，认它才认得出"同一份东西"。
+ * **为什么认校验值、不认版本号**：版本号说的是"这份内容走到第几版了"（同一内容必然同一个号，
+ * 见 `apply.ts` 里那段新定义），可它**不说明"我们是从哪一份完整备份分出来的"** ——
+ * 两台机器各自立过完整备份时，两边的"第 3 版"可能是**两份内容完全不同的完整备份**，
+ * 号一样、祖先不一样。用户实测就踩了这个：按"第 32 版"选起点导出的更新包，
+ * 对面报「基准不一致」—— 选中的那一份根本不是对方手里那份。
+ * 校验值是那份清单的直接证据，认它才认得出"同一份东西"。
  */
 export function pickAnchor(anchors: BundleAnchor[], hash: string): BundleAnchor | null {
 	return anchors.find(anchor => anchor.hash === hash) ?? null;
@@ -158,49 +158,49 @@ export function pickAnchor(anchors: BundleAnchor[], hash: string): BundleAnchor 
 
 /**
  * 一个状态在界面上怎么念 —— **写对方报给你的那一项**：
- * - `from`（起点）：`第 32 代 · 基准 7a22d790635332a0` —— 对方「更新记录」顶部写着
- *   「基准：第 32 代 · 指纹 7a22d790635332a0」，照那个指纹选，别只看代；
- * - `to`（终点）：`第 32 代 · 状态 3f9a2c1d4e5f6a7b` —— 对方应用完的结论里写的是「状态 …」。
+ * - `from`（起点）：`第 32 版 · 基准 7a22d790635332a0` —— 对方「更新记录」顶部写着
+ *   「基准：第 32 版 · 校验值 7a22d790635332a0」，照那个校验值选，别只看代；
+ * - `to`（终点）：`第 32 版 · 状态 3f9a2c1d4e5f6a7b` —— 对方应用完的结论里写的是「状态 …」。
  *
- * **世代与编号必须一起写**：世代号是"这份内容走到第几版"（好认、好读），
- * 但它认不出"我们是不是从同一份完整副本分出来的" —— 那件事只有**基准指纹**说了算。
- * 所以标签里两个都在：先报第几代（人读的），再报指纹 / 状态编号（机器对得上的）。
+ * **版本与编号必须一起写**：版本号是"这份内容走到第几版"（好认、好读），
+ * 但它认不出"我们是不是从同一份完整备份分出来的" —— 那件事只有**基准校验值**说了算。
+ * 所以标签里两个都在：先报第几代（人读的），再报校验值 / 内容校验值（机器对得上的）。
  */
 export function describeAnchor(anchor: AnchorRef, end: 'from' | 'to' = 'from'): string {
 	const id = end === 'from'
 		? `基准 ${anchor.hash ?? '未记（旧版包）'}`
-		: `状态 ${anchor.stateId?.id ?? '未记（旧版包）'}`;
-	return `第 ${anchor.generation} 代 · ${id}`;
+		: `校验值 ${anchor.stateId?.id ?? '未记（旧版包）'}`;
+	return `第 ${anchor.generation} 版 · ${id}`;
 }
 
 /**
  * 下拉框里"默认那一项"的键。
  *
  * 两端意思不一样（所以文案分开写）：
- * - `from`：默认 ＝ **我站的那一份完整包**（`state.bundle.fullHash`）—— 也就是"接着我这份基准往外导"；
+ * - `from`：默认 ＝ **本机当前使用的这一份完整备份**（`state.bundle.fullHash`）—— 也就是"接着我这份基准往外导"；
  * - `to`：默认 ＝ **当前仓库**（现在这一刻，含你刚改的东西）。
  */
 export const LATEST_STATE = '';
 
 export interface LatestInfo {
-	/** 我站的那一份完整包是第几代（还没站上过基准时为 null） */
+	/** 本机当前使用的这一份完整备份是第几代（还没有过基准时为 null） */
 	generation: number | null;
-	/** 那份完整包的基准指纹 */
+	/** 那份完整备份的基准校验值 */
 	hash: string | null;
-	/** 那份完整包的文件名 */
+	/** 那份完整备份的文件名 */
 	file: string | null;
 }
 
 /**
  * 两个下拉（从哪个状态 / 到哪个状态）的选项。
  *
- * **键是基准指纹**（不是世代号）：同一代可能有好几份完整副本（两台机器各导过一份），
- * 按世代做键会把它们挤成一个选项、还默默挑一份（用户实测就是这么踩到"基准对不上"的）。
- * 同一份东西（指纹相同）只留一个选项。
+ * **键是基准校验值**（不是版本号）：同一代可能有好几份完整备份（两台机器各导过一份），
+ * 按版本做键会把它们挤成一个选项、还默默挑一份（用户实测就是这么踩到"基准不一致"的）。
+ * 同一份东西（校验值相同）只留一个选项。
  *
- * **候选只有完整副本**（0.14 起）：链条上的中间点（每份更新包落出的那一点）不再算状态，
+ * **候选只有完整备份**（0.14 起）：链条上的中间点（每份更新包落出的那一点）不再算状态，
  * 它们没有自己的包文件、还得沿链条叠加才算得出来 —— 正是"自由度太高、用户容易出错"
- * 的那一半来源（用户拍板："更新包只留从完整包到完整包，或从完整包到最新状态的"）。
+ * 的那一半来源（用户拍板："更新包只留从完整备份到完整备份，或从完整备份到最新状态的"）。
  */
 export function anchorOptions(
 	anchors: AnchorRef[],
@@ -210,8 +210,8 @@ export function anchorOptions(
 	const options: Record<string, string> = {};
 	if (end === 'from') {
 		const detail = latest.generation !== null
-			? `本机基准：第 ${latest.generation} 代${latest.hash ? ` · ${latest.hash}` : ''}`
-			: '还没有完整副本（要先导一份）';
+			? `本机基准：第 ${latest.generation} 版${latest.hash ? ` · ${latest.hash}` : ''}`
+			: '还没有完整备份（要先导一份）';
 		options[LATEST_STATE] = `自动：${detail}`;
 	} else {
 		options[LATEST_STATE] = '最新（当前仓库）';
@@ -227,11 +227,11 @@ export function anchorOptions(
 }
 
 /**
- * 报错 / 界面提示里把"现在有哪些状态"列出来：`第 36 代 · 基准 7a22d790…（包名）`。
- * 照这一串去对方「更新记录」里找同一个指纹，就知道该选哪一个。
+ * 报错 / 界面提示里把"现在有哪些状态"列出来：`第 36 版 · 基准 7a22d790…（包名）`。
+ * 照这一串去对方「更新记录」里找同一个校验值，就知道该选哪一个。
  */
 export function describeAnchorList(anchors: AnchorRef[]): string {
-	if (anchors.length === 0) return '这个文件夹里还没有可以当起点的完整副本';
+	if (anchors.length === 0) return '这个文件夹里还没有可以当起点的完整备份';
 	return `现在找得到的状态是：${anchors
 		.map(anchor => `${describeAnchor(anchor, 'from')}（${anchor.name}）`)
 		.join('、')}`;

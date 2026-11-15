@@ -56,7 +56,7 @@ export interface DiffOptions {
 	directionDecidesConflict?: boolean;
 	/**
 	 * mtime 容差（毫秒）。
-	 * 默认 2000：FAT/exFAT 这类文件系统只精确到 2 秒，U 盘来回拷会被误判成"改过"。
+	 * 默认 2000：FAT/exFAT 这类文件系统只精确到 2 秒，U 盘来回复制会被误判成"改过"。
 	 */
 	mtimeToleranceMs?: number;
 	/**

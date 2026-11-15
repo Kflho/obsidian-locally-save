@@ -16,13 +16,13 @@ import type { FieldSection } from './types';
  * 进包规则、更新包起点终点、校验、拖放这些不常用的，全移到「高级」页 ——
  * 用户提过"包设置太繁琐"，主页面不该摆一排下拉框。
  *
- * 0.8.0 起这是插件唯一的内容通道：完整副本（基准 + 还原点）+ 更新包（日常）。
+ * 0.8.0 起这是插件唯一的内容通道：完整备份（基准 + 还原点）+ 更新包（日常）。
  * 0.11.0 把「应用方式」收成严格同步，界面上已经没有可选项。
  */
 export const SYNC_SECTION: FieldSection = {
 	type: 'page',
 	heading: '同步包',
-	desc: '同步包放在哪，以及手动导出、应用和管理。',
+	desc: '同步包的存放位置，以及手动导出、应用与管理。',
 	groups: [
 		{
 			heading: '包放在哪',
@@ -30,7 +30,7 @@ export const SYNC_SECTION: FieldSection = {
 				{
 					key: 'bundleDir',
 					name: '同步包文件夹',
-					desc: '仓库之外的文件夹。完整副本存到 full，更新包存到 changes。必填。',
+					desc: '仓库之外的文件夹，完整备份与更新包都存放在这里。必填。',
 					control: { type: 'text', placeholder: 'D:\\备份\\同步包' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.bundleDir),
 				},
@@ -42,7 +42,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '立即同步',
-					desc: '导出包、推拉远程、应用拉到的包。',
+					desc: '导出同步包、与远程推送与拉取，并应用收到的包。',
 					button: '同步',
 					cta: true,
 					run: plugin => { void syncNow(plugin); },
@@ -57,7 +57,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '导出到文件',
-					desc: '把仓库或改动打包成 .lsave，拷到别的机器上应用。',
+					desc: '把仓库或改动打包成 .lsave，复制到其他电脑上应用。',
 					button: '导出同步包…',
 					run: plugin => { new ExportBundleModal(plugin.app, plugin).open(); },
 					disabled: settings => !hasBundleDir(settings),
@@ -95,7 +95,7 @@ export const SYNC_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '把 .lsave 关联到 Obsidian',
-					desc: '双击 .lsave 用 Obsidian 打开并弹出应用对话框。只写当前用户的注册表，不需要管理员权限。',
+					desc: '双击 .lsave 时由 Obsidian 打开并显示应用对话框。仅写入当前用户注册表，无需管理员权限。',
 					button: '设置关联',
 					run: plugin => { new AssociateModal(plugin.app, plugin.app.vault.getName()).open(); },
 					disabled: () => !associationSupported(),

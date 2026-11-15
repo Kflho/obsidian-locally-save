@@ -12,33 +12,33 @@ import { copyRef, loadState, saveState } from '../sync/state';
 import type { Logger } from '../utils/log';
 
 /**
- * **把首尾相接的几份更新包合并成一份**（用户要的："防止基准点太多、更新太碎"）。
+ * **把首尾相接的几份更新包合并成一份**（用户要的："防止基准太多、更新太碎"）。
  *
- * 0.14 起"点"只有完整包，但**包与包之间照样能首尾相接**：一份差量包送到的是一份完整副本
+ * 0.14 起"点"只有完整备份，但**包与包之间照样能首尾相接**：一份差分更新包送到的是一份完整备份
  * （F1），下一份从 F1 往外算的包起点就是它 —— 导出几次就攒出这么一串：
  *
  * ```
- *   F0 ──L1──► F1 ──L2──► F2        两份包、三个完整副本
- *   F0 ────────── M ──────────► F2  合并后：一份包，停在 F0 上的机器一步到位
+ *   F0 ──L1──► F1 ──L2──► F2        两份包、三个完整备份
+ *   F0 ────────── M ──────────► F2  合并后：一份包，仍使用 F0 的机器一步到位
  * ```
  *
  * **合并 ＝ 把那几份包的负载接起来**：顺着链条把每份的条目叠上去（后面的覆盖前面的），
- * 段首那份记的 `base` 就是段首那份完整副本里的版本，删除项取"最后一次提到它时是删"的那些。
+ * 段首那份记的 `base` 就是段首那份完整备份里的版本，删除项取"最后一次提到它时是删"的那些。
  * 头部两端照旧：起点＝段首那份的起点、终点＝段末那份的终点。
  *
  * 它现在是个**清历史遗留**的工具：新模型下同一份起点 + 同一形态 + 同一台机器导的包
  * 会被自动取代（`removeSupersededChanges`），所以一般攒不出长串；真正还会串起来的，
- * 是"一台机器停在 F1 上、另一台停在 F0 上"这种多机器场景。
+ * 是"一台机器仍使用 F1 上、另一台停在 F0 "这种多机器场景。
  *
  * 为什么是"拼装"而不是"重新导一遍"（**用户报的「39 到 54、54 到 55 合不上」之后改的**）：
- * 重新导要先把**段首那一份**算出来，而它得从一份完整副本起步 —— 用户把第 39 代那份完整副本
+ * 重新导要先把**段首那一份**算出来，而它得从一份完整备份起步 —— 用户把第 39 版那份完整备份
  * 删了（几百 MB，太占地方），于是"算不出起点"就什么都合不了。可合并要的东西其实**全在这几份包里**：
- * 内容在它们的负载里、版本关系在它们的 `base` 里。拼装这条路**一份完整副本都不需要**，
+ * 内容在它们的负载里、版本关系在它们的 `base` 里。拼装这条路**一份完整备份都不需要**，
  * 也不读仓库 —— 手头只有这几份，照样合得成。
  *
  * 顺带：拼装出来的包**跟"重新导一份"给接收方的东西是一样的**（同样的两个端点、同样的内容），
- * 而且中间版本的记录（`history`）也一并带上 —— 停在被吞掉的那一份上的机器照样收得下
- * （见 `apply.ts` 的 `checkAncestor`：起点相等，或者"算一遍落点"正好对得上）。
+ * 而且中间版本的记录（`history`）也一并带上 —— 仍使用被吞掉的那一份的机器照样收得下
+ * （见 `apply.ts` 的 `checkAncestor`：起点相等，或者"算一遍目标版本"正好对得上）。
  */
 
 /** 一段可以合并的相邻更新包 */
@@ -46,23 +46,23 @@ export interface MergePlan {
 	/** 段首那一环的起点（合并后的包基于这一点） */
 	anchorHash: string;
 	anchorGeneration: number;
-	/** 段末那一环的落点（合并后送到这一点） */
+	/** 段末那一环的目标版本（合并后送到这一点） */
 	targetHash: string;
 	targetGeneration: number;
 	/** 被顶掉的那几份包（按链条顺序，文件名） */
 	links: string[];
 	/** 那几份包现在一共多大（界面报数：合并前 / 合并后） */
 	bytes: number;
-	/** 中间经过的那几个点（报数用：少掉几个基准点） */
+	/** 中间经过的那几个点（报数用：少掉几个基准） */
 	middlePoints: string[];
 }
 
-/** 一条"边"：某份包从哪个指纹 → 变成哪个指纹（合并只用到这几个字段） */
+/** 一条"边"：某份包从哪个校验值 → 变成哪个校验值（合并只用到这几个字段） */
 interface RingRef {
-	/** 落点指纹（完整包 ＝ 它自己的清单指纹；更新包 ＝ 头部报的落点） */
+	/** 目标版本校验值（完整备份 ＝ 它自己的清单校验值；更新包 ＝ 头部报的目标版本） */
 	hash: string;
 	generation: number;
-	/** 从哪一份完整副本来（完整包 ＝ null，它不是"一环"） */
+	/** 从哪一份完整备份来（完整备份 ＝ null，它不是"一环"） */
 	from: string | null;
 	/** 这一环基于的那一代（头部 `baseGeneration`）——起点那份包不在文件夹里时，区间还得靠它报出来 */
 	baseGeneration: number | null;
@@ -75,8 +75,8 @@ interface RingRef {
  * 扫一遍包目录，把每份能读出头部的包变成一条"边"。
  *
  * 从前这一步由 `bundle/points.ts` 提供（它还会把"链条上的点"物化出来）。
- * 0.14 起点只有完整副本了，合并要的只是**包与包之间的首尾关系**（谁的落点 ＝ 谁的起点），
- * 就地扫一遍就够 —— 同一个指纹只留一份（两台机器可能各导过一份一模一样的落点）：留最近写的那份。
+ * 0.14 起点只有完整备份了，合并要的只是**包与包之间的首尾关系**（谁的目标版本 ＝ 谁的起点），
+ * 就地扫一遍就够 —— 同一个校验值只留一份（两台机器可能各导过一份一模一样的目标版本）：留最近写的那份。
  */
 async function listRings(baseDir: string, lineage: string): Promise<RingRef[]> {
 	const byHash = new Map<string, RingRef>();
@@ -87,7 +87,7 @@ async function listRings(baseDir: string, lineage: string): Promise<RingRef[]> {
 		if (header.moves && header.moves.length > 0) continue;
 		const from = baselineOfBundle(header);
 		const hash = header.mode === 'full' ? from : (header.targetBaselineHash ?? null);
-		if (!hash) continue; // 旧版更新包没记落点：接不出下一环，不能当边
+		if (!hash) continue; // 旧版更新包没记目标版本：接不出下一环，不能当边
 		const ref: RingRef = {
 			hash,
 			generation: header.targetGeneration,
@@ -113,7 +113,7 @@ export async function planBundleMerges(
 	for (const item of await listFiles(bundleDirForMode(baseDir, 'changes'))) {
 		if (item.name.toLowerCase().endsWith(BUNDLE_EXT)) sizes.set(item.name, item.size ?? 0);
 	}
-	/** 每个点的世代：落点由更新包报，起点那份完整副本由它自己报 */
+	/** 每个点的版本：目标版本由更新包报，起点那份完整备份由它自己报 */
 	const generations = new Map<string, number>();
 	for (const ref of refs) generations.set(ref.hash, ref.generation);
 	for (const anchor of await listFullAnchors(baseDir, lineage)) {
@@ -122,16 +122,16 @@ export async function planBundleMerges(
 	/** 谁落在哪个点上（同一点可能有好几份 —— 那就是分叉） */
 	const outgoing = new Map<string, typeof refs>();
 	for (const ref of refs) {
-		if (!ref.from) continue; // 完整副本不是"一环"，不从它出发
+		if (!ref.from) continue; // 完整备份不是"一环"，不从它出发
 		const list = outgoing.get(ref.from) ?? [];
 		list.push(ref);
 		outgoing.set(ref.from, list);
 	}
 
 	const plans: MergePlan[] = [];
-	/** 有分叉的那几个点（同一个点导过好几份不同落点的包）：按点去重，界面上报"几处" */
+	/** 有分叉的那几个点（同一个点导过好几份不同目标版本的包）：按点去重，界面上报"几处" */
 	const forkPoints = new Set<string>();
-	/** 同一段链条可能从中间某个点起也被走一遍（走出来的更短）—— 按"落点"去重，留最长的那段 */
+	/** 同一段链条可能从中间某个点起也被走一遍（走出来的更短）—— 按"目标版本"去重，留最长的那段 */
 	const longest = new Map<string, MergePlan>();
 	for (const start of refs) {
 		/**
@@ -159,9 +159,9 @@ export async function planBundleMerges(
 		const first = run[0] as (typeof refs)[number];
 		const anchorHash = first.from as string;
 		/**
-		 * 段首那一代的号：链条上那一点报过的（一份完整副本 / 别处的落点），
-		 * 或者**这一环自己记的**（头部 `baseGeneration`）—— 起点那份完整副本被删掉时，
-		 * 就只剩后者了（用户报的：「可能是因为我把 39 代完整包删了」——正是这个原因）。
+		 * 段首那一代的号：链条上那一点报过的（一份完整备份 / 别处的目标版本），
+		 * 或者**这一环自己记的**（头部 `baseGeneration`）—— 起点那份完整备份被删掉时，
+		 * 就只剩后者了（用户报的：「可能是因为我把 39 代完整备份删了」——正是这个原因）。
 		 */
 		const anchorGeneration = generations.get(anchorHash) ?? first.baseGeneration;
 		if (anchorGeneration === null || anchorGeneration === undefined) continue;
@@ -183,7 +183,7 @@ export async function planBundleMerges(
 	return { plans, forks: forkPoints.size };
 }
 
-/** 合并要用到的东西：**只有包目录、日志、状态文件** —— 拼装不读仓库，也不碰本机的世代与基准 */
+/** 合并要用到的东西：**只有包目录、日志、状态文件** —— 拼装不读仓库，也不碰本机的版本与基准 */
 export interface MergeOptions {
 	outDir: string;
 	log: Logger;
@@ -194,7 +194,7 @@ export interface MergeOptions {
 	onProgress?: BundleWriteProgress;
 }
 
-/** 合并一段的结果：合并后那份包、移到回收站的那几份、以及没移动的 */
+/** 合并一段的结果：合并后那份包、移到回收使用的那几份、以及没移动的 */
 export interface MergeOutcome {
 	/** 合并后的包（完整路径） */
 	file: string;
@@ -231,11 +231,11 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 		const link = links[index] as (typeof links)[number];
 		const expected = index === 0 ? plan.anchorHash : (links[index - 1] as (typeof links)[number]).header.targetBaselineHash;
 		if (link.header.mode !== 'changes' || (link.header.baselineHash ?? null) !== expected) {
-			throw new Error(`合并要用的这几环现在接不上了（「${link.name}」的起点对不上）。包目录可能刚被改动过，重新打开这个窗口再看一遍。`);
+			throw new Error(`合并要用的这几环现在无法应用了（「${link.name}」的起点不一致）。包目录可能刚被改动过，重新打开这个窗口再看一遍。`);
 		}
 	}
 	if ((last.header.targetBaselineHash ?? null) !== plan.targetHash) {
-		throw new Error(`合并要送到的那一点变了（「${last.name}」的落点对不上）。重新打开这个窗口再看一遍。`);
+		throw new Error(`合并要送到的那一点变了（「${last.name}」的目标版本不一致）。重新打开这个窗口再看一遍。`);
 	}
 
 	/**
@@ -315,7 +315,7 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 	const targetGeneration = last.header.targetGeneration;
 	const stateId = last.header.stateId ?? null;
 	const vault = first.header.vault || options.vaultName || 'vault';
-	/** 这一路经过的那几个中间点（不含起点与落点）：停在它们上面的机器照样收得下 */
+	/** 这一路经过的那几个中间点（不含起点与目标版本）：仍使用它们面的机器照样收得下 */
 	const viaHashes = links
 		.slice(0, -1)
 		.map(link => link.header.targetBaselineHash)
@@ -348,14 +348,14 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 				baseGeneration,
 				targetGeneration,
 				...(first.header.baselineHash ? { baselineHash: first.header.baselineHash } : {}),
-				// 起点是不是"真的一份完整副本"也**从段首那一环继承**（见 `BundleHeader.baseFullBundle`）：
+				// 起点是不是"真的一份完整备份"也**从段首那一环继承**（见 `BundleHeader.baseFullBundle`）：
 				// 段首那一环的起点要是合成的（"应用前先把本机改动存成包"那一份），
 				// 合出来的这一份也不能自称起点是真点 —— 接收方据此决定"要不要把基准接到它上面"
 				...(first.header.baseFullBundle === true ? { baseFullBundle: true } : {}),
 				...(plan.targetHash ? { targetBaselineHash: plan.targetHash } : {}),
-				// **段末那一环送到的是"一份完整副本"时，合并出来的这一份也一样**：
+				// **段末那一环送到的是"一份完整备份"时，合并出来的这一份也一样**：
 				// 接收方应用它就该把基准推到那一份（否则它还还在用老基准上，下一步导出的包
-				// 对方收不下，报"基准对不上"）。标记**从段末那一环继承** ——
+				// 对方收不下，报"基准不一致"）。标记**从段末那一环继承** ——
 				// 段末是"→最新状态"的包时天然没有它。
 				...(last.header.targetFullBundle === true ? { targetFullBundle: true } : {}),
 				...(viaHashes.length > 0 ? { viaHashes } : {}),
@@ -385,11 +385,11 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 		reused = false;
 	}
 	/**
-	 * 本机正好停在**段末那一点**上时：只处理"原来记的包文件被这一趟移走"的情况。
+	 * 本机正好仍使用**段末那一点**时：只处理"原来记的包文件被这一趟移走"的情况。
 	 *
-	 * 合并出来的是**更新包**（差量），不是完整包 —— 不能把 `fullFile` 改成它：
+	 * 合并出来的是**更新包**（差量），不是完整备份 —— 不能把 `fullFile` 改成它：
 	 * 后面"恢复本机改动"要按 `fullFile` 找 mode=full 的文件，记成更新包会报
-	 * 「得读基准完整副本「…-更新-…」」。真正的完整包文件没被合并移走，就保持原样；
+	 * 「得读基准完整备份「…-更新-…」」。真正的完整备份文件没被合并移走，就保持原样；
 	 * 只有原记录指向这趟要移走的更新包（旧版本留下的错误记录）时才清空。
 	 */
 	if (state.bundle && plan.targetHash && state.bundle.fullHash === plan.targetHash) {
@@ -400,7 +400,7 @@ export async function mergeBundleGroup(options: MergeOptions, plan: MergePlan): 
 	}
 	await saveState(options.stateFile, state);
 
-	// 新的那份已经写入，这才把那几份小的移到回收站（不是真删：万一还有机器停在中间某个点上，捞回来就能补上）
+	// 新的那份已经写入，这才把那几份小的移到回收站（不是真删：万一还有机器仍使用中间某个点，恢复就能补上）
 	const trashed = await trashBundles(
 		options.outDir,
 		plan.links.map(name => path.join(dir, name)),
@@ -427,24 +427,24 @@ function safeName(name: string): string {
  *
  * 用户报的现场："之前生成了很多相邻代数的更新包，按道理都要删掉只保留最新的，
  * 点合并相邻包也没有生效" —— 点合并没反应是对的：`planBundleMerges` 只认
- * **首尾相接**的链（前一环的落点 ＝ 后一环的起点），而"320 → 862 / 320 → 863 / …"
- * 是**兄弟包**（同一个起点、不同落点），永远配不成链，于是那句"没有可以合并的包"。
+ * **首尾相接**的链（前一环的目标版本 ＝ 后一环的起点），而"320 → 862 / 320 → 863 / …"
+ * 是**兄弟包**（同一个起点、不同目标版本），永远配不成链，于是那句"没有可以合并的包"。
  *
- * 兄弟包之间本来就有取代关系：更新包是"自起点那份完整副本累积"的，新的把旧的全说了。
+ * 兄弟包之间本来就有取代关系：更新包是"自起点那份完整备份累积"的，新的把旧的全说了。
  * 平时这件事由导出时的 `removeSupersededChanges` 做（导新包时顺手清旧的）；
  * 这里给一个**随时可点**的出口，判据与它一致，但不需要先导一份新包：
  *
  * - 只认**我导的**（`source.copyId` 是我）：别的机器导的那一份装的是**它那一半改动**，删了就丢；
- * - 同一组按「起点指纹 ＋ 形态 ＋ 差量包的终点」分（送到不同完整副本的差量包各自有用）；
- * - **回退环**（落点号 ≤ 起点号）不动：那是这条线上唯一一份"往回走"的说明；
- * - 留最新＝落点世代最大的；同号时留导出时间更晚的；
- * - 移到**回收站**（能捞回来），不是真删。
+ * - 同一组按「起点校验值 ＋ 形态 ＋ 差分更新包的终点」分（送到不同完整备份的差分更新包各自有用）；
+ * - **回退环**（目标版本号 ≤ 起点号）不动：那是这条线上唯一一份"往回走"的说明；
+ * - 留最新＝目标版本版本最大的；同号时留导出时间更晚的；
+ * - 移到**回收站**（能恢复），不是真删。
  */
 export interface SiblingTrim {
-	/** 这一组的起点：第几代 · 指纹 */
+	/** 这一组的起点：第几代 · 校验值 */
 	baseGeneration: number | null;
 	baseHash: string | null;
-	/** 这一组是"送到某份完整副本"的差量包吗（不同终点的差量包不合并） */
+	/** 这一组是"送到某份完整备份"的差分更新包吗（不同终点的差分更新包不合并） */
 	checkpoint: boolean;
 	keep: { file: string; name: string; target: number };
 	drop: { file: string; name: string; target: number; size: number }[];
@@ -477,7 +477,7 @@ export async function planSupersededSiblings(
 		if (header.lineage !== lineage) continue;
 		// 别的机器导的那一份是它那一半改动，绝不在这里动
 		if (header.source?.copyId !== selfCopyId) continue;
-		// 回退环：落点号 ≤ 起点号，留着当"往回走"的说明
+		// 回退环：目标版本号 ≤ 起点号，留着当"往回走"的说明
 		if (header.targetGeneration <= (header.baseGeneration ?? 0)) continue;
 		const hash = baselineOfBundle(header);
 		const checkpoint = header.targetFullBundle === true;
@@ -517,7 +517,7 @@ export async function planSupersededSiblings(
 	return trims.sort((a, b) => (a.baseGeneration ?? 0) - (b.baseGeneration ?? 0));
 }
 
-/** 把上面挑出来的那几份移到回收站（能捞回来） */
+/** 把上面挑出来的那几份移到回收站（能恢复） */
 export async function trimSupersededSiblings(
 	baseDir: string,
 	trims: SiblingTrim[],
@@ -531,7 +531,7 @@ export async function trimSupersededSiblings(
 	};
 }
 
-/** 目录里有没有一份"从 a 到 b"的更新包（同一环重导过时用它）；给的是**完整路径**（与导出那条路一致） */
+/** 目录里有没有一份"从 a 到 b"的更新包（同一环重新导出过时用它）；给的是**完整路径**（与导出那条路一致） */
 async function findRing(outDir: string, anchorHash: string, targetHash: string): Promise<string | null> {	const dir = bundleDirForMode(outDir, 'changes');
 	for (const item of await listFiles(dir)) {
 		if (!item.name.toLowerCase().endsWith(BUNDLE_EXT)) continue;

@@ -8,7 +8,7 @@ import { formatBytes } from '../utils/format';
 import { refreshBundlesAction } from './git';
 
 /**
- * 货架相关的两个动作 —— **导出窗与导入窗共用**（用户提的："管理同步包那个窗口我根本不会打开，
+ * 远程仓库相关的两个动作 —— **导出窗与导入窗共用**（用户提的："管理同步包那个窗口我根本不会打开，
  * 功能都移动到导出包和导入包界面"）。
  *
  * 放在这里而不是 `manage-modal.ts`：那个文件反过来要 import 应用对话框（`ApplyBundleModal`），
@@ -35,14 +35,14 @@ export async function mergeAdjacentBundles(
 	/**
 	 * **同一份起点的兄弟包**（320→862 / 320→863 …）配不成链，合并管不了它 ——
 	 * 用户点「合并」时看到"没有可以合并的包"，以为按钮没生效。这里一并收掉：
-	 * 同一份起点 ＋ 同一形态 ＋ 我导的，只留落点最新的那一份（判据见 `planSupersededSiblings`）。
+	 * 同一份起点 ＋ 同一形态 ＋ 我导的，只留目标版本最新的那一份（判据见 `planSupersededSiblings`）。
 	 * 平时这件事由导出与每 30 秒的自动整理（`bundle/gc.ts`）做，这里给一个"马上就清"的出口。
 	 */
 	const trims = await planSupersededSiblings(dir, state.lineage, state.copyId);
 	const trimCount = trims.reduce((sum, trim) => sum + trim.drop.length, 0);
 	if (plans.length === 0 && trimCount === 0) {
 		new Notice(forks > 0
-			? '没有可以合并的包：同一个起点分出了几份不同落点的包，插件不替你猜哪条是正路'
+			? '没有可以合并的包：同一个起点分出了几份不同目标版本的包，插件不替你猜哪条是正路'
 			: '没有要整理的包：这里没有首尾相接的链，也没有同一份起点的多余旧包', 9000);
 		return;
 	}
@@ -61,7 +61,7 @@ export async function mergeAdjacentBundles(
 				}, plan);
 				done.push(`${plan.anchorGeneration} → ${plan.targetGeneration} 代（${plan.links.length} 份并成 1 份）`);
 				if (outcome.failed.length > 0) {
-					failed.push(`${plan.links.length} 份里有 ${outcome.failed.length} 份没能移到回收站`);
+					failed.push(`${plan.links.length} 份里有 ${outcome.failed.length} 份未能移入回收站`);
 				}
 			} catch (error) {
 				failed.push(describeError(error));
@@ -73,20 +73,20 @@ export async function mergeAdjacentBundles(
 			try {
 				const trimmed = await trimSupersededSiblings(dir, trims);
 				done.push(`同一份起点的旧包清掉 ${trimmed.moved.length} 份，只留最新那一份`);
-				if (trimmed.failed.length > 0) failed.push(`${trimmed.failed.length} 份没能移到回收站`);
+				if (trimmed.failed.length > 0) failed.push(`${trimmed.failed.length} 份未能移入回收站`);
 			} catch (error) {
 				failed.push(describeError(error));
 			}
 		}
 		const parts = [...done];
 		if (failed.length > 0) parts.push(`失败：${failed.join('；')}`);
-		new Notice(`整理完成：${parts.join('、')}。移走的那几份在回收站里，能捞回来。`, 9000);
+		new Notice(`整理完成：${parts.join('、')}。已移除的同步包在回收站中，可随时恢复。`, 9000);
 		await onChanged?.();
 	}).open();
 }
 
 /**
- * 导出 / 导入窗口底部那一排"货架"按钮：**刷新包（对齐远程）** 与 **合并相邻的更新包…**。
+ * 导出 / 导入窗口底部那一排"远程仓库"按钮：**刷新包（对齐远程）** 与 **合并相邻的更新包…**。
  *
  * 没有开 git 时也照常显示 —— 点下去会由 `refreshBundlesAction` 弹一句"先打开启用 git 传输"，
  * 比把按钮藏起来更好懂（用户会问"我的刷新按钮去哪了"）。
@@ -101,19 +101,19 @@ export function renderShelfTools(
 	new Setting(container)
 		.addButton(button => button
 			.setButtonText('刷新包（对齐远程）')
-			.setTooltip('丢掉本地货架那一段没推的提交，整段对齐远程，把新包拉下来')
+			.setTooltip('丢掉本地远程仓库那一段没推的提交，整段对齐远程，把新包拉下来')
 			.onClick(() => {
 				void refreshBundlesAction(plugin).then(() => onChanged?.());
 			}))
 		.addButton(button => button
 			.setButtonText('整理更新包…')
-			.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新那一份（都移到回收站，能捞回来）')
+			.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新那一份（都移到回收站，能恢复）')
 			.onClick(() => { void mergeAdjacentBundles(app, plugin, dir(), onChanged); }));
 }
 
 /**
  * 合并前的确认框：**把账摊开**（哪几份并成哪一份、省多少），
- * 并说清"原来那几份去回收站"与"停在这些包送到的状态上的机器照样收得下"。
+ * 并说清"原来那几份去回收站"与"仍使用这些包送到的状态的机器照样收得下"。
  */
 class ConfirmMergeModal extends Modal {
 	private plans: MergePlan[];
@@ -147,12 +147,12 @@ class ConfirmMergeModal extends Modal {
 		}
 		for (const trim of this.trims) {
 			facts.createEl('li', {
-				text: `第 ${trim.baseGeneration ?? '?'} 代那群包：清掉 ${trim.drop.length} 份旧包`
-					+ `（${formatBytes(trim.bytes)}），留第 ${trim.keep.target} 代那一份`,
+				text: `第 ${trim.baseGeneration ?? '?'} 版那群包：清掉 ${trim.drop.length} 份旧包`
+					+ `（${formatBytes(trim.bytes)}），留第 ${trim.keep.target} 版那一份`,
 			});
 		}
 		contentEl.createEl('p', {
-			text: '移走的会进回收站，能捞回来。已经停在这些包送到的状态上的机器，照样收得下留下来的那一份。',
+			text: '移除的同步包会进入回收站，可随时恢复。已处于这些包送达状态的电脑，仍可接收保留的那一份。',
 			cls: 'locally-save-hint',
 		});
 

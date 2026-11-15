@@ -11,29 +11,29 @@ import type { PeerState } from '../git/peers';
 
 /**
  * **更新包的自动管理**（0.18.2）。用户的原话：
- * "所有终端都在新的完整包后，老包到新包的更新包就应该从所有终端和 git 中清掉，保持整洁……
+ * "所有终端都在新的完整备份后，老包到新包的更新包就应该从所有终端和 git 中清掉，保持整洁……
  *  只保留需要的更新包，无意义的更新包自动删，防止仓库繁杂。"
  *
- * 一条判据：**还有没有机器能用得上它**。更新包/差量包只在"接收方的基准正好是它的起点"时
+ * 一条判据：**还有没有机器能用得上它**。更新包/差分更新包只在"接收方的基准正好是它的起点"时
  * 才应用得上（`checkAncestor` 那条硬规矩），所以：
  *
  * | 情况 | 判定 |
  * |---|---|
- * | 它的起点是本机的基准，或者货架上还有电脑报着这个起点 | **有用**（留着） |
+ * | 它的起点是本机的基准，或者远程仓库上还有电脑报着这个起点 | **有用**（留着） |
  * | 起点已经没人用（本机换了基准、别的机器也都跟上去了） | **没用** → 移到回收站 |
  * | 同一份起点 ＋ 同一形态 ＋ 同一台机器导的，还有更新的那一份 | **多余** → 移到回收站 |
- * | 回退环（落点号 ≤ 起点号） | **留着**：这条线上唯一一份"往回走"的说明 |
- * | 落点比我这一代还新 | **留着**：可能是更新的内容，宁可多留 |
+ * | 回退环（目标版本号 ≤ 起点号） | **留着**：这条线上唯一一份"往回走"的说明 |
+ * | 目标版本比我这一代还新 | **留着**：可能是更新的内容，宁可多留 |
  * | 别的分支 / 读不出头部 | **留着**：判不了就绝不猜 |
  *
  * 三道安全闸（都是"宁可留着"的方向）：
- * 1. **货架上没有任何电脑上报过** → 整条不跑（单机 / 没开 git，分不清谁在用）；
+ * 1. **远程仓库上没有任何电脑上报过** → 整条不跑（单机 / 没开 git，分不清谁在用）；
  * 2. **只说得出"再也不可能被应用"** → 一律移到**回收站**（`trashBundles` + 记号），
  *    不真删；真删只有「彻底删除」「清空回收站」两条用户点的路；
  * 3. 清出来的删除照 `git/removals.ts` 的记号提交并推走 → **别的终端和远程一起没掉**
  *    （那边 `salvageDroppedBundles` 会把它也备份进本机回收站再删）。
  *
- * 什么时候跑：`main.runTick` 每一拍在 git 推拉**之前**看一遍（30 秒一次，读几个包头部，
+ * 什么时候跑：`main.runTick` 每一拍在 git 推送和拉取**之前**看一遍（30 秒一次，读几个包头部，
  * 不扫仓库）。所以"最后一台机器跟上来"之后最多 30 秒，那份老包就从所有地方消失。
  * 导出时顺手清（`removeSupersededChanges`）那条路照旧保留：它多一道"内容被新包完全覆盖"的判据。
  */
@@ -87,11 +87,11 @@ export async function planBundleGc(
 		return plan;
 	}
 	if (!mine) {
-		plan.blocked = '本机还没有基准：先导一份完整副本，才分得清哪些包还有人用';
+		plan.blocked = '本机还没有基准：先导一份完整备份，才分得清哪些包还有人用';
 		return plan;
 	}
 	if (peers.length === 0) {
-		plan.blocked = '货架上还没有别的电脑上报过状态：分不清哪些包还有人用（先让对面同步一次）';
+		plan.blocked = '远程仓库上还没有别的电脑上报过状态：分不清哪些包还有人用（先让对面同步一次）';
 		return plan;
 	}
 	const inUse = new Set<string>([mine]);
@@ -117,17 +117,17 @@ export async function planBundleGc(
 		}
 		// 回退环：这条线上唯一一份"往回走"的说明，靠正向导出再也生不出来
 		if (header.targetGeneration <= (header.baseGeneration ?? 0)) {
-			plan.kept.push({ name: item.name, why: `把大家带回第 ${header.targetGeneration} 代的那一份（回退说明）` });
+			plan.kept.push({ name: item.name, why: `把大家带回第 ${header.targetGeneration} 版的那一份（回退说明）` });
 			continue;
 		}
-		// 落点比我还新：可能是更新的内容，宁可多留
+		// 目标版本比我还新：可能是更新的内容，宁可多留
 		if (header.targetGeneration > state.generation) {
-			plan.kept.push({ name: item.name, why: '落点比我这一代还新（可能装着我还没有的内容）' });
+			plan.kept.push({ name: item.name, why: '目标版本比我这一代还新（可能装着我还没有的内容）' });
 			continue;
 		}
 		const base = baselineOfBundle(header);
 		if (!base) {
-			plan.kept.push({ name: item.name, why: '旧版包没记基准指纹，认不出它的起点' });
+			plan.kept.push({ name: item.name, why: '旧版包没记基准校验值，认不出它的起点' });
 			continue;
 		}
 		if (!inUse.has(base)) {
@@ -155,7 +155,7 @@ export async function planBundleGc(
 		});
 	}
 
-	// 同一份起点 ＋ 同一形态 ＋ 同一台机器导的：只留落点最新的那一份
+	// 同一份起点 ＋ 同一形态 ＋ 同一台机器导的：只留目标版本最新的那一份
 	const groups = new Map<string, Row[]>();
 	for (const row of rows) {
 		// 别的机器导的那一份装的是它那一半改动，不参与"只留最新"
@@ -169,7 +169,7 @@ export async function planBundleGc(
 		if (list.length < 2) continue;
 		const sorted = [...list].sort((a, b) => b.targetGeneration - a.targetGeneration || b.created - a.created);
 		const [keep, ...rest] = sorted;
-		if (keep) plan.kept.push({ name: keep.name, why: `第 ${keep.baseGeneration ?? '?'} 代那群包里的最新一份` });
+		if (keep) plan.kept.push({ name: keep.name, why: `第 ${keep.baseGeneration ?? '?'} 版那群包里的最新一份` });
 		for (const row of rest) {
 			plan.drop.push({
 				file: row.file,
@@ -200,11 +200,15 @@ export async function runBundleGc(baseDir: string, plan: GcPlan): Promise<TrashO
 export function describeGcRun(plan: GcPlan, moved: string[]): string {
 	if (moved.length === 0) return '';
 	const labels = new Set(plan.drop.map(item => item.why));
-	const why = labels.has('base-unused') ? '起点已经没人用了' : '同组里还有更新的一份';
-	return `整理更新包：移走 ${moved.length} 份（${why}），腾出 ${Math.max(1, Math.round(plan.bytes / 1048576))} MB`;
+	const why = labels.has('base-unused') ? '基准已无电脑使用' : '同组中已有更新的版本';
+	const kb = plan.bytes / 1024;
+	const size = kb < 1024
+		? `${Math.max(1, Math.round(kb))} KB`
+		: `${(plan.bytes / 1048576).toFixed(1)} MB`;
+	return `整理更新包：已移除 ${moved.length} 份（${why}），释放 ${size}`;
 }
 
 /** 各台电脑现在各自用的是哪一份基准（日志 / 悬停用） */
 export function describeGcPeers(peers: PeerState[]): string[] {
-	return peers.map(peer => `${peerLabel(peer)}：第 ${peer.baselineGeneration ?? '?'} 代 · ${peer.baselineHash ?? '未记'}`);
+	return peers.map(peer => `${peerLabel(peer)}：第 ${peer.baselineGeneration ?? '?'} 版 · ${peer.baselineHash ?? '未记'}`);
 }

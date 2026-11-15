@@ -11,8 +11,8 @@ import type { IncomingRecord, PluginState } from '../sync/state';
 /**
  * 失败的包**自动重试几次**（用户拍板的"持续协同，没问题就别让人管"）。
  *
- * 为什么不只靠手动的「立即同步」：包失败往往是一时的（包还没拷完、对面正在重写、
- * 完整副本临时不在），而记录成 `failed` 之后自动节拍就不再挑它 —— 用户不点，
+ * 为什么不只靠手动的「立即同步」：包失败往往是一时的（包还没复制完、对面正在重写、
+ * 完整备份临时不在），而记录成 `failed` 之后自动节拍就不再挑它 —— 用户不点，
  * 两边就永远差一截，而且**没有第二个人知道为什么**（283 就是这么卡住的）。
  *
  * 边界（别改成无限重试）：
@@ -25,14 +25,14 @@ export const MAX_FAILED_ATTEMPTS = 3;
 export const RETRY_FAILED_AFTER_MS = 10 * 60 * 1000;
 
 /**
- * 货架上有没有**同一代、更晚导出**的包 —— 口径：**同一代只吃最新的那一份**
+ * 远程仓库上有没有**同一代、更晚导出**的包 —— 口径：**同一代只吃最新的那一份**
  * （用户 2026-10-26 拍板："更新包只留最新的就行了"）。
  *
- * 2026-10-26 真机事故：两台机器各自导过第 563 代、内容不同（其中一份还带着一条临时笔记）。
- * 先应用最新那份、再回头吃同代旧的那份 → **删掉的文件复活**。所以在应用一份更新包之前，
- * 先看同代里有没有更晚创建的；有就先让位，等最新那份来。
+ * 2026-10-26 真机事故：两台机器各自导过第 563 版、内容不同（其中一份还带着一条临时笔记）。
+ * 先应用最新那份、再回头吃同版本旧的那份 → **删掉的文件复活**。所以在应用一份更新包之前，
+ * 先看同版本里有没有更晚创建的；有就先让位，等最新那份来。
  *
- * 只比"同代更新"，不拦往回走的恢复包（`download` / 锚点恢复本来就是往回拉）。
+ * 只比"同版本更新"，不拦往回走的恢复包（`download` / 锚点恢复本来就是往回拉）。
  */
 export function hasNewerSameGenerationSibling(
 	others: { header?: { mode?: string; targetGeneration?: number; bundleId?: string; created?: number } | null }[],
@@ -58,12 +58,12 @@ export function hasNewerSameGenerationSibling(
  * 这是包通道唯一的"手感缺口"。补法不是把副本通道请回来，而是：
  *
  * **每 30 秒看一眼同步包文件夹，按「方向」决定怎么处理**（策略见 `IncomingPolicy`）：
- * - 默认（没开 git、或 direction 都不是）＝只认**更新包 / 差量包**、只做不会动到本地已有东西的：
+ * - 默认（没开 git、或 direction 都不是）＝只认**更新包 / 差分更新包**、只做不会动到本地已有东西的：
  *   要删文件 / 删空目录 / 覆盖本地改动 / 会产生冲突副本 → 一律不动手，只提示一句；
- * - **仅拉**（`download`，只收不发）＝跟对面保持一致：完整副本也收，会删 / 覆盖的也照做，
+ * - **仅拉**（`download`，只收不发）＝跟对面保持一致：完整备份也收，会删 / 覆盖的也照做，
  *   本机改动进回收目录（`apply.strictness = 'mirror'` ＋ `alignToPeer`）—— 调用方开 `force`；
  * - **双向**（`both`）＝先弹一句确认（`confirm`），确认后才应用；应用完由调用方把本机改动回传。
- * - **按基准收**（0.14 起）：只有"起点正好是本机站的那一份完整副本"的包才收得下；
+ * - **按基准收**（0.14 起）：只有"起点正好是本机当前使用的那一份完整备份"的包才收得下；
  *   同一份基准上同一个源头只取**最新**那一份（更新包是累积的，先应用旧的就等于往回退一格），
  *   别的源头的各自都要应用（那是各自那一半改动）；
  * - 我自己的导出、已经处理过的包，一律跳过（见 `pickIncoming`）；
@@ -102,7 +102,7 @@ export interface PickIncomingOptions {
  * - 已经决定过的（`state.incoming` 里有记录）—— 只有 `retryBlocked` 时放行那两类
  *   "还没做完"的（`needs-review` / `failed`）。
  *
- * 完整包**也在候选里**：它不自动应用，但要提示一句（不然用户以为自动那步坏了）。
+ * 完整备份**也在候选里**：它不自动应用，但要提示一句（不然用户以为自动那步坏了）。
  */
 export function pickIncoming(
 	bundles: ManagedBundle[],
@@ -141,10 +141,10 @@ export function pickIncoming(
 }
 
 /**
- * 货架上**看过、但没应用成功**的那些（`needs-review` / `failed`）。
+ * 远程仓库上**看过、但没应用成功**的那些（`needs-review` / `failed`）。
  *
  * 给「立即同步」那句总结用：不能让用户看到"没有新改动"就以为没事 ——
- * 明明还有一份包躺着、两边的状态编号也不一样（用户报的"一台 108、一台 109，
+ * 明明还有一份包躺着、两边的内容校验值也不一样（用户报的"一台 108、一台 109，
  * 点同步都提示已经最新"）。
  */
 export function unappliedIncoming(bundles: ManagedBundle[], state: PluginState): IncomingCandidate[] {
@@ -185,7 +185,7 @@ export type IncomingOutcome =
 		pending: number;
 		/**
 		 * 这一份是**强制回退到基准再应用**才落下的（第一遍没对上）。
-		 * 「仅拉」的严格相等就是靠它兜底的，界面要如实说一句。
+		 * 「仅拉」的严格相等就是靠它保底的，界面要如实说一句。
 		 */
 		recovered?: boolean;
 	}
@@ -197,7 +197,7 @@ export type IncomingOutcome =
 	| { kind: 'failed'; file: string; error: string };
 
 /**
- * 收包策略：**由「方向」决定**（拼装见 `ui/actions.ts` 的 `incomingPolicy`）。
+ * 接收策略：**由「方向」决定**（拼装见 `ui/actions.ts` 的 `incomingPolicy`）。
  *
  * 默认一个都不开 ＝ 老的安全边界（只自动应用不会动本地已有东西的更新包）。
  */
@@ -211,13 +211,13 @@ export interface IncomingPolicy {
 	 * 对这一份放了行，不必再开一个全局的 `force`。
 	 */
 	force?: boolean;
-	/** 完整副本也自动应用（默认不；「仅拉」才开 —— 它可能删掉本机独有的文件） */
+	/** 完整备份也自动应用（默认不；「仅拉」才开 —— 它可能删掉本机独有的文件） */
 	allowFull?: boolean;
 	/** 覆盖应用参数（「仅拉」用 `strictness: 'mirror'` ＋ `alignToPeer`：目标 ＝ 对面那一点） */
 	apply?: Partial<ApplyOptions>;
 	/**
 	 * 动手前问一句；返回 false ＝ 这次不应用（`kind: 'dismissed'`）。
-	 * 「双向」用它在界面弹确认窗 —— 注意这里是**异步**的，窗口开着时这一轮收包就停在这儿。
+	 * 「双向」用它在界面弹确认窗 —— 注意这里是**异步**的，窗口开着时这一轮接收就停在这儿。
 	 *
 	 * 返回 `'defer'`：现在问不了（窗口不在前台 / 没有可交互的界面）—— 别挂起，
 	 * 记 `needs-review`，等用户手动同步时再问。REST / 后台节拍触发时就是这种情形。
@@ -243,7 +243,7 @@ export async function handleIncoming(
 	const file = candidate.bundle.file;
 	const name = path.basename(file);
 	try {
-		// 完整包默认不自动应用：它可能删掉本机独有的文件，只提示一句让人自己看。
+		// 完整备份默认不自动应用：它可能删掉本机独有的文件，只提示一句让人自己看。
 		// 「仅拉」是"变成对面那样"，调用方会开 allowFull —— 那不是悄悄删，是用户的明确选择。
 		if (candidate.bundle.header?.mode !== 'changes' && !policy.allowFull) {
 			debugEvent('incoming.skip', {
@@ -256,23 +256,23 @@ export async function handleIncoming(
 			return {
 				kind: 'needs-review',
 				file: name,
-				why: '完整副本可能会删掉你本机独有的文件，所以不自动应用',
+				why: '完整备份可能会删掉你本机独有的文件，所以不自动应用',
 			};
 		}
 
 		let applyOptions: ApplyOptions = policy.apply ? { ...options, ...policy.apply } : options;
 		/**
-		 * **差量包一律按严格镜像应用**（0.18，硬边界，不是提示）。
+		 * **差分更新包一律按严格镜像应用**（0.18，硬边界，不是提示）。
 		 *
-		 * 差量包（头部 `targetFullBundle`）送到的是**另一份完整副本**，应用完我就该站到那份上。
+		 * 差分更新包（头部 `targetFullBundle`）送到的是**另一份完整备份**，应用完我就该以那份为基准。
 		 * 跟着 `normal` 合并走会坏在这件事上：合并档把"我这一半"留下，而 `apply.ts` 算新基准
 		 * 用的是"应用前的清单 ＋ **真的写成了一致**的条目 − 点名删除" —— 冲突里赢下本机那一版
 		 * 的路径因此不在清单里，新基准令牌就记成**祖先那一版**：既不等于旧基准，也不等于包里报的
 		 * `targetBaselineHash`（实测：`test/rebaseline.test.ts` 第 5 组末尾那条对照）。
-		 * 之后对面按新基准导出的更新包一律"基准对不上"，这台机器就永远卡住了。
+		 * 之后对面按新基准导出的更新包一律"基准不一致"，这台机器就永远卡住了。
 		 *
-		 * 镜像档下结果是确定的 ＝ 包里那一点，写入指纹正好等于头部报的那个。
-		 * 代价：本机被覆盖 / 多出来的文件进回收目录（严格档必然备份），捞得回来；
+		 * 镜像档下结果是确定的 ＝ 包里那一点，写入校验值正好等于头部报的那个。
+		 * 代价：本机被覆盖 / 多出来的文件进回收目录（严格档必然备份），可以恢复；
 		 * 「双向」方向仍会先问一句（`policy.confirm`），只有开了无人值守那条路才直接落。
 		 */
 		if (candidate.bundle.header?.targetFullBundle === true && applyOptions.strictness !== 'mirror') {
@@ -282,11 +282,11 @@ export async function handleIncoming(
 		/**
 		 * **同一代只吃最新的那一份**（用户 2026-10-26 拍板："更新包只留最新的就行了"）。
 		 *
-		 * 真机事故：两台机器各自导过第 563 代、内容不同（我这台那份里还带着一条临时笔记）。
-		 * 对方先删了笔记，随后又吃到我这台那份同代包 → **删掉的文件复活**。
-		 * 所以：货架上有更晚创建的同代包时，这份先不应用 —— 等最新那份来处理。
+		 * 真机事故：两台机器各自导过第 563 版、内容不同（我这台那份里还带着一条临时笔记）。
+		 * 对方先删了笔记，随后又吃到我这台那份同版本包 → **删掉的文件复活**。
+		 * 所以：远程仓库上有更晚创建的同版本包时，这份先不应用 —— 等最新那份来处理。
 		 *
-		 * 只比"同代且更新"，不拦"往回"的恢复包：`download`/恢复路径本来就要把本机拉回
+		 * 只比"同版本且更新"，不拦"往回"的恢复包：`download`/恢复路径本来就要把本机拉回
 		 * 对面那一点，那是用户明确选的方向，不能按这条挡。
 		 */
 		if (candidate.bundle.header?.mode === 'changes' && options.bundleDir) {
@@ -295,7 +295,7 @@ export async function handleIncoming(
 				candidate.bundle.header,
 			);
 			if (newer) {
-				// 排障要能回答「为什么这份没吃」：把同代里谁更新记下来
+				// 排障要能回答「为什么这份没吃」：把同版本里谁更新记下来
 				debugEvent('incoming.skip', {
 					file: name,
 					bundleId: candidate.bundleId,
@@ -306,15 +306,15 @@ export async function handleIncoming(
 				return {
 					kind: 'needs-review',
 					file: name,
-					why: `同一代（第 ${candidate.bundle.header.targetGeneration ?? 0} 代）还有更晚导出的包，`
+					why: `同一代（第 ${candidate.bundle.header.targetGeneration ?? 0} 版）还有更晚导出的包，`
 						+ '只吃最新那份，这份先不应用',
 				};
 			}
 		}
 
 		/**
-		 * **「仅拉」的兜底**：本机被改乱、算不出计划时别直接记成失败 ——
-		 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准，再应用一遍就落。
+		 * **「仅拉」的保底**：本机被改乱、算不出计划时别直接记成失败 ——
+		 * 有基准完整备份 + 这份包，信息就是全的：强制回退到基准，再应用一遍就落。
 		 * 用户的原话："不管本机怎么改过，有基准包和对应更新包就一定能成功。"
 		 */
 		let plan: ApplyPlan;
@@ -372,8 +372,8 @@ export async function handleIncoming(
 		 * 「双向」：先问一句。取消就记一笔 dismissed —— 同一个包不再弹第二次
 		 * （用户刚刚亲手做过选择，再弹就是烦人；想应用还能从「打开同步包并应用…」手动来）。
 		 *
-		 * **他点了「应用」＝ 看过这份账了**，下面那条"会删文件就不动手"的兜底**不能再用**：
-		 * 那份兜底是给**没人问过**的自动路径准备的。这里是"问过了、用户选了应用"，
+		 * **他点了「应用」＝ 看过这份账了**，下面那条"会删文件就不动手"的保底**不能再用**：
+		 * 那份保底是给**没人问过**的自动路径准备的。这里是"问过了、用户选了应用"，
 		 * 再拦一次等于让他白点一下 —— 而且包被记成 `needs-review`、以后再也不会被挑出来，
 		 * 两边就永远差着一代（用户报的"一台 108、一台 109，点同步都提示已经最新"）。
 		 */
@@ -413,7 +413,7 @@ export async function handleIncoming(
 		let result = await executeBundlePlan(plan, applyOptions);
 		/**
 		 * **「仅拉」做完了要核对**：这个方向的承诺是"跟对面严格相等"。
-		 * 有动作没写入、或者编号对不上（本机被改乱过）→ 强制回退到基准再应用一遍。
+		 * 有动作没写入、或者编号不一致（本机被改乱过）→ 强制回退到基准再应用一遍。
 		 * 这是"不管本机怎么改过都能成功"的最后一道闸（`recoverToBaselineAndApply`）。
 		 */
 		let recovered = false;
@@ -456,7 +456,7 @@ export async function handleIncoming(
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		// 日志里带上包头部坐标：只有文件名时，事后对不上是哪一份基准/落点
+		// 日志里带上包头部坐标：只有文件名时，事后不一致是哪一份基准/目标版本
 		const header = candidate.bundle.header;
 		debugEvent('incoming.failed', {
 			file: name,
@@ -502,7 +502,7 @@ async function rememberDecision(
 
 /** 一次"看一眼收到的包"的结果：给界面报账用 */
 export interface IncomingSweep {
-	/** 自己接下来了的（起点正好是本机站的那一份完整副本） */
+	/** 自己接下来了的（起点正好是本机当前使用的那一份完整备份） */
 	applied: {
 		file: string;
 		written: number;
@@ -513,26 +513,26 @@ export interface IncomingSweep {
 		/** 这一份是靠**强制回退到基准再应用**才落下的 */
 		recovered?: boolean;
 	}[];
-	/** 要人看的：会动本机东西 / 是完整副本 / 试了失败（理由照旧） */
+	/** 要人看的：会动本机东西 / 是完整备份 / 试了失败（理由照旧） */
 	review: { file: string; why: string; kind: 'needs-review' | 'failed'; full: boolean }[];
 	/** 用户在确认窗里取消的（记了一笔就不再问，也不提示） */
 	dismissed: string[];
-	/** 起点不是本机站的那一份完整副本、先搁着的（等对方按本机这份基准重导，或者补一份完整副本） */
+	/** 起点不是本机当前使用的那一份完整备份、先搁着的（等对方按本机这份基准重新导出，或者补一份完整备份） */
 	waiting: string[];
 }
 
 /**
  * **按基准**把能接上的包依次应用（0.14 起；从前是"按链条一环一环接"）。
  *
- * 判据只有一条：**包的起点 ＝ 本机现在站的那一份完整副本**（`checkAncestor` 那条硬规矩）。
+ * 判据只有一条：**包的起点 ＝ 本机现在使用的那一份完整备份**（`checkAncestor` 那条硬规矩）。
  * 一趟里可能接上好几份，两种情况：
  *
- * - **差量包**（送到另一份完整副本）：应用完基准就前进到它终点那份 → 接着看下一段；
+ * - **差分更新包**（送到另一份完整备份）：应用完基准就前进到它终点那份 → 接着看下一段；
  * - **更新包**（送到"最新状态"）：应用完**基准不动** —— 所以不能"应用一份就换下一个基准"，
  *   也不能在同一份基准上反复挑（同一个源头先后导的几份里，只有**最新**那一份有用，
  *   先应用旧的就等于把内容往回退一格）。
  *
- * 于是规则是：**同一份基准上，按源头分组，每个源头只取终点世代最大的那一份**；
+ * 于是规则是：**同一份基准上，按源头分组，每个源头只取终点版本最大的那一份**；
  * 剩下的同源旧包记一笔"不用管"（它们的内容确实过时了）。不同源头的各自都要应用 ——
  * 那装的是各自那一半改动，漏一份就丢数据。
  *
@@ -549,7 +549,7 @@ export async function sweepIncoming(
 	const sweep: IncomingSweep = { applied: [], review: [], dismissed: [], waiting: [] };
 	const pending = [...candidates];
 
-	// 完整副本：默认不自动应用（它可能删掉本机独有的文件）；「仅拉」开了 allowFull 才收
+	// 完整备份：默认不自动应用（它可能删掉本机独有的文件）；「仅拉」开了 allowFull 才收
 	for (const item of [...pending]) {
 		if (item.bundle.header?.mode !== 'full') continue;
 		pending.splice(pending.indexOf(item), 1);
@@ -568,24 +568,24 @@ export async function sweepIncoming(
 		}
 	}
 
-	/** 本机现在站的基准：只有"起点正好是它"的包收得下 */
+	/** 本机现在当前的基准：只有"起点正好是它"的包收得下 */
 	let cursor = (await loadState(stateFile)).bundle?.fullHash ?? null;
 	/** 同一个源头里，哪一份是"最新"的那一份（其余同源旧包这一趟就作废） */
 	const sourceOf = (item: IncomingCandidate): string => item.bundle.header?.source?.copyId ?? item.bundleId;
 	const generationOf = (item: IncomingCandidate): number => item.bundle.header?.targetGeneration ?? 0;
 
-	// 兜底上限：正常一趟就几份，卡住时别把这一拍拖住
+	// 保底上限：正常一趟就几份，卡住时别把这一拍拖住
 	for (let guard = 0; guard < 64 && pending.length > 0; guard++) {
 		const mine = pending.filter(item => item.bundle.header?.mode === 'changes'
 			&& baselineOfBundle(item.bundle.header) === cursor);
-		if (mine.length === 0) break; // 没有接得上的了（缺那一份完整副本，或者剩下的都是别的基准）
+		if (mine.length === 0) break; // 没有接得上的了（缺那一份完整备份，或者剩下的都是别的基准）
 
 		const newest = new Map<string, IncomingCandidate>();
 		for (const item of mine) {
 			const held = newest.get(sourceOf(item));
 			if (!held || generationOf(item) >= generationOf(held)) newest.set(sourceOf(item), item);
 		}
-		// 先应用世代小的那一份（内容往后走），多个源头时顺序稳定
+		// 先应用版本小的那一份（内容往后走），多个源头时顺序稳定
 		const chosen = [...newest.values()].sort((a, b) => generationOf(a) - generationOf(b))[0];
 		if (!chosen) break;
 		pending.splice(pending.indexOf(chosen), 1);
@@ -618,7 +618,7 @@ export async function sweepIncoming(
 				pending: outcome.pending,
 				...(outcome.recovered ? { recovered: true } : {}),
 			});
-			// 差量包会把基准推到它终点那份完整副本上；更新包不动基准（那就接着挑别的源头）
+			// 差分更新包会把基准推到它终点那份完整备份上；更新包不动基准（那就接着挑别的源头）
 			cursor = (await loadState(stateFile)).bundle?.fullHash ?? cursor;
 			continue;
 		}
@@ -635,14 +635,14 @@ export async function sweepIncoming(
 	}
 
 	/**
-	 * **起点不是我站的那一份、但落点算出来对得上的包**：也要能自动接。
+	 * **起点不是本机当前使用的这一份、但目标版本算出来对得上的包**：也要能自动接。
 	 *
-	 * 用户报的现场：只拉那台误改了一行，对方（只推）导了一份"从旧完整副本到最新"的恢复包；
-	 * 只拉那台的起点已经被它自己导出的完整副本移走了 —— 按上面的"起点严格相等"永远挑不到它，
+	 * 用户报的现场：只拉那台误改了一行，对方（只推）导了一份"从旧完整备份到最新"的恢复包；
+	 * 只拉那台的起点已经被它自己导出的完整备份移走了 —— 按上面的"起点严格相等"永远挑不到它，
 	 * 只能手动应用。可这份包的内容是确定的：**我现在的清单 ＋ 条目 − 删除**正好等于它头部报的
-	 * 落点指纹（`landsOnTarget`），应用完一定变成那道状态，不会"猜着合"。
+	 * 目标版本校验值（`landsOnTarget`），应用完一定变成那道状态，不会"猜着合"。
 	 *
-	 * 只处理落点对得上的，最多 16 份（防御坏目录）；同一轮里按目标世代从大到小挑，
+	 * 只处理目标版本对得上的，最多 16 份（防御坏目录）；同一轮里按目标版本从大到小挑，
 	 * 应用一份后状态变了，其余候选下一轮再算 —— 不拿旧计划硬套新状态。
 	 */
 	for (let guard = 0; guard < 16 && pending.length > 0; guard++) {
@@ -679,7 +679,7 @@ export async function sweepIncoming(
 		});
 	}
 
-	// 剩下的：起点不是本机站的这一份完整副本（缺那份包，或者它已经被更新的取代了）—— 不动它
+	// 剩下的：起点不是本机当前使用的这一份完整备份（缺那份包，或者它已经被更新的取代了）—— 不动它
 	for (const item of pending) sweep.waiting.push(path.basename(item.bundle.file));
 	return sweep;
 }

@@ -9,7 +9,7 @@ import { formatBytes } from '../utils/format';
 const MAX_ROWS = 200;
 
 /**
- * 导出预览：**这次留包会装什么**。
+ * 导出预览：**这次导出会装什么**。
  *
  * 为什么要有：导出是"往磁盘写一个可能几百 MB 的文件"的动作，而"包里到底有什么"
  * 以前只有导完才能从结果里看到。这里把挑选结果（哪些文件、点名删哪些、多大）先摊开 ——
@@ -43,13 +43,13 @@ export class ExportPreviewModal extends Modal {
 			text: '只预览，不会写入。下面是按当前设置导出时会装进包里的内容。',
 			cls: 'locally-save-hint',
 		});
-		// 对方停在别的基准上：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
+		// 对方仍使用别的基准：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
 		if (this.hint) {
 			contentEl.createEl('p', { text: this.hint, cls: 'locally-save-warn' });
 		}
 
 		for (const preview of this.previews) {
-			contentEl.createEl('h3', { text: preview.mode === 'full' ? '完整副本' : '更新包' });
+			contentEl.createEl('h3', { text: preview.mode === 'full' ? '完整备份' : '更新包' });
 			if (preview.problem) {
 				contentEl.createEl('p', { text: preview.problem, cls: 'locally-save-warn' });
 				continue;
@@ -60,21 +60,21 @@ export class ExportPreviewModal extends Modal {
 				parts.push(`点名删除 ${preview.deletedCount} 个`);
 			}
 			if (preview.mode === 'changes' && preview.anchorGeneration !== null) {
-				parts.push(`第 ${preview.anchorGeneration} 代`
+				parts.push(`第 ${preview.anchorGeneration} 版`
 					+ `${preview.anchorFingerprint ? `（基准 ${preview.anchorFingerprint}）` : ''}`
-					+ (preview.targetGeneration === null ? ' → 最新' : ` → 第 ${preview.targetGeneration} 代`));
+					+ (preview.targetGeneration === null ? ' → 最新' : ` → 第 ${preview.targetGeneration} 版`));
 			}
 			contentEl.createEl('p', { text: parts.join(' · '), cls: 'locally-save-summary' });
 
-			// 起点是"你站的那份完整副本"时说明一句（与导出对话框、导出结果共用同一句话，
+			// 起点是"本机当前使用的那份完整备份"时说明一句（与导出对话框、导出结果共用同一句话，
 			// 见 bundle/log.ts 的 describeExportStart）
 			const startNote = describeExportStart(preview.start);
 			if (startNote) {
 				contentEl.createEl('p', { text: startNote, cls: 'locally-save-hint' });
 			}
 
-			// 「该立新完整包了」：引擎按这份包自起点以来要搬的字节数算好，到阈值才给一句。
-			// **预览里也要提前说** —— 用户看到这一句就能先导一份完整副本，把累积截断在这里
+			// 「该立新完整备份了」：引擎按这份包自起点以来要搬的字节数算好，到阈值才给一句。
+			// **预览里也要提前说** —— 用户看到这一句就能先导一份完整备份，把累积截断在这里
 			if (preview.advice) {
 				contentEl.createEl('p', { text: preview.advice, cls: 'locally-save-warn' });
 			}
@@ -110,11 +110,11 @@ export class ExportPreviewModal extends Modal {
 			}
 		}
 
-		// 没有任何内容可留时，把出路写出来：想去导一份完整副本得走导出对话框
+		// 没有任何内容可留时，把出路写出来：想去导一份完整备份得走导出对话框
 		const nothing = this.previews.every(item => item.problem || (item.fileCount === 0 && item.deletedCount === 0));
 		if (nothing) {
 			contentEl.createEl('p', {
-				text: '要导一份完整副本（即使没有改动）：用命令「导出同步包…」，'
+				text: '要导一份完整备份（即使没有改动）：用命令「导出同步包…」，'
 					+ '或者在设置 → Locally Save → 同步包 里点「导出同步包…」。',
 				cls: 'locally-save-hint',
 			});

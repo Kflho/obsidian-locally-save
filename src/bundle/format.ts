@@ -40,7 +40,7 @@ export const BUNDLE_VERSION_PLAIN = 1;
 /** 后缀：界面里也用这个值（settings/model.ts 的 BUNDLE_EXTENSION） */
 export const BUNDLE_EXT = '.lsave';
 
-/** 一份副本的身份 + 世代，用于同步包头部的分支信息 */
+/** 一份副本的身份 + 版本，用于同步包头部的分支信息 */
 export interface CopyRef {
 	copyId: string;
 	generation: number;
@@ -60,13 +60,13 @@ export interface BundleEntry {
 	offset: number;
 	size: number;
 	mtime: number;
-	/** 内容指纹（十六进制 sha256）；算得出来才有（单个超过 64MB、读失败时没有） */
+	/** 内容校验值（十六进制 sha256）；算得出来才有（单个超过 64MB、读失败时没有） */
 	hash?: string;
 	baseSize?: number;
 	baseMtime?: number;
 	baseHash?: string;
 	/**
-	 * 这个文件自上次**完整包**以来经历过的版本（不含现在这一版）。
+	 * 这个文件自上次**完整备份**以来经历过的版本（不含现在这一版）。
 	 *
 	 * 用来认"中间版本"：接收方可能跳过了一两个更新包，手里那份是我以前发过的，
 	 * 而不是他自己改的 —— 比对得上就直接覆盖，不该留冲突副本。
@@ -116,70 +116,70 @@ export interface BundleHeader {
 	vault: string;
 	/**
 	 * 分支：标识"这是同一份内容家族"。
-	 * 接收方应用**完整包**时会认祖（把自己的分支改成包里的），
-	 * 之后两边就能靠分支 + 世代判断彼此是不是同一条线上的人。
+	 * 接收方应用**完整备份**时会认祖（把自己的分支改成包里的），
+	 * 之后两边就能靠分支 + 版本判断彼此是不是同一条线上的人。
 	 */
 	lineage: string;
 	/** 导出方的身份（排查问题用：这个包是哪台机器、第几代导出的） */
 	source: CopyRef;
 	/**
-	 * 增量包的基准世代：导出方以为接收方现在停在第几代。
-	 * **完整包为 null ＝ 免校验**。
+	 * 增量包的基准版本：导出方以为接收方现在停在第几代。
+	 * **完整备份为 null ＝ 免校验**。
 	 */
 	baseGeneration: number | null;
-	/** 应用这个包之后，接收方应该到达的世代 */
+	/** 应用这个包之后，接收方应该到达的版本 */
 	targetGeneration: number;
 	/**
-	 * **我这份基准的指纹**（见 `bundle/baseline.ts`）：
-	 * - 完整包：它自己这份清单的指纹（接收方应用后就把这个当成自己的基准令牌）；
-	 * - 更新包：我基于的那份完整副本的指纹 —— 接收方一比就知道"是不是接着同一份基准"。
+	 * **我这份基准的校验值**（见 `bundle/baseline.ts`）：
+	 * - 完整备份：它自己这份清单的校验值（接收方应用后就把这个当成自己的基准令牌）；
+	 * - 更新包：我基于的那份完整备份的校验值 —— 接收方一比就知道"是不是接着同一份基准"。
 	 * 旧版本的包没有这个字段 → 判成"说不清"，只能逐文件合并（不静默降级，界面会说明）。
 	 */
 	baselineHash?: string;
 	/**
-	 * **差量包（"到某一份完整副本为止"）的目的地指纹**：那份终点完整副本的基准指纹。
+	 * **差分更新包（"到某一份完整备份为止"）的目的地校验值**：那份终点完整备份的基准校验值。
 	 *
-	 * 有了它，接收方就能一眼看出"这个包要送到的那份完整副本，**正好就是我现在的基准**"——
+	 * 有了它，接收方就能一眼看出"这个包要送到的那份完整备份，**正好就是我现在的基准**"——
 	 * 那说明包里点名的东西它全都有，应用它什么都不会改（用户实测遇到过：把"32→36"的包
-	 * 发给一台**已经基准是第 36 代**上的机器，只看到一句"基准对不上"，看不出其实是白跑一趟）。
-	 * 普通更新包（到"最新"）没有终点完整副本，就没有这个字段。
+	 * 发给一台**已经基准是第 36 版**上的机器，只看到一句"基准不一致"，看不出其实是无需变更）。
+	 * 普通更新包（到"最新"）没有终点完整备份，就没有这个字段。
 	 */
 	targetBaselineHash?: string;
 	/**
-	 * **这个包送到的是"另一份完整副本"**（差量包）—— 只有这种包的终点才算一个真基准点。
+	 * **这个包送到的是"另一份完整备份"**（差分更新包）—— 只有这种包的终点才算一个真基准。
 	 *
-	 * 接收方靠它决定**应用完基准点往不往前走**（0.14，见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
-	 * - 有这一项：应用完就站到终点那份完整副本上（`targetBaselineHash` 就是它的指纹）；
-	 * - 没有（更新包，送到的是"最新状态"）：**基准点不动** —— 它只是"从这份完整包往外长出来的一层"。
+	 * 接收方靠它决定**应用完基准往不往前走**（0.14，见 `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`）：
+	 * - 有这一项：应用完就以终点那份完整备份为基准（`targetBaselineHash` 就是它的校验值）；
+	 * - 没有（更新包，送到的是"最新状态"）：**基准不动** —— 它只是"从这份完整备份往外长出来的一层"。
 	 *
-	 * 旧包没有这个字段 → 当成更新包（不推进基准点），下次导出自然归位。
+	 * 旧包没有这个字段 → 当成更新包（不推进基准），下次导出自然归位。
 	 */
 	targetFullBundle?: boolean;
 	/**
-	 * **起点那份完整副本是真的一份包**（磁盘上有人有它），不是"合成出来的那一点"。
+	 * **起点那份完整备份是真的一份包**（磁盘上有人有它），不是"合成出来的那一点"。
 	 *
-	 * 为什么需要这一条：绝大多数更新包的起点就是导出方**站的那份完整副本**（"点"），
+	 * 为什么需要这一条：绝大多数更新包的起点就是导出方**当前使用的那份完整备份**（"点"），
 	 * 可有一趟例外 —— "应用前先把本机改动存成包"（`export.ts` 的 `anchorOverride`）：
 	 * 那一份的起点是**对方那份包送到的那一点**（一个状态，不是点），
 	 * 谁手里都没有它的包文件。接收方靠这一项区分两种情况，决定
 	 * **应用完要不要把自己的基准接到这个起点上**（见 `apply.ts` 的 `ApplyPlan.adoptBaseline`）：
-	 * - 有这一项：起点是真点 → 我的内容就是从它长出来的，接上它两边才在同一份完整副本上；
+	 * - 有这一项：起点是真点 → 我的内容就是从它长出来的，接上它两边才在同一份完整备份上；
 	 * - 没有（合成起点 / 旧版本导的包）：**不接** —— 拿一个谁都没有包文件的"点"当基准，
-	 *   只会让"两边以同一份完整副本为基准"变成谎话。
+	 *   只会让"两边以同一份完整备份为基准"变成谎话。
 	 */
 	baseFullBundle?: boolean;
 	/**
-	 * **这个包一路上经过哪几个基准点**（不含起点与落点）—— 链条时代（0.11–0.13）的来路说明。
+	 * **这个包一路上经过哪几个基准**（不含起点与目标版本）—— 链条时代（0.11–0.13）的来路说明。
 	 *
-	 * **0.14 起不再生成**（点只有完整包了，没有"中间点"这回事），只为老包留着：
+	 * **0.14 起不再生成**（点只有完整备份了，没有"中间点"这回事），只为老包留着：
 	 * `apply.ts` 的 `checkAncestor` 照样认它，链条时代发出去的包收得下。
 	 */
 	viaHashes?: string[];
 	/**
-	 * **导出方导完这一刻的状态编号**（见 `sync/state-id.ts`）：整个仓库的内容指纹。
+	 * **导出方导完这一刻的内容校验值**（见 `sync/state-id.ts`）：整个仓库的内容校验值。
 	 *
 	 * 接收方应用完之后算一个自己的跟它比：**相同 ＝ 两边文件内容一致**（用户要的就是这句话）。
-	 * 基准指纹只能说明"我们是同一份祖先"，说不清"此刻一样不一样"；世代号连祖先都说不准。
+	 * 基准校验值只能说明"我们是同一份祖先"，说不清"此刻一样不一样"；版本号连祖先都说不准。
 	 * 旧版本的包没有这个字段 → 判成"说不清"（界面说明对方那个包没记编号）。
 	 */
 	stateId?: StateIdInfo;
@@ -226,7 +226,7 @@ export interface BundleSource {
 	/**
 	 * 内容**来自另一份包**里的某一段（`payloadOffset + offset`）。
 	 *
-	 * 什么时候用：导"从状态 a 到状态 b"的差量包（b 是一份完整副本）时，要装的是
+	 * 什么时候用：导"从状态 a 到状态 b"的差分更新包（b 是一份完整备份）时，要装的是
 	 * **b 那一刻的内容** —— 那些字节只存在于 b 那份包的负载里，当前仓库里可能早就不是那一版了。
 	 * 给了它就用它，`abs` 不读。
 	 */
@@ -237,7 +237,7 @@ export interface BundleSource {
 	baseSize?: number;
 	baseMtime?: number;
 	baseHash?: string;
-	/** 自上次完整包以来经历过的版本（见 BundleEntry.history） */
+	/** 自上次完整备份以来经历过的版本（见 BundleEntry.history） */
 	history?: { size: number; mtime: number }[];
 }
 
@@ -250,7 +250,7 @@ export type BundleWriteProgress = (done: number, total: number, path: string) =>
  * 写一个同步包。
  *
  * 逐块搬运（4MB 一块），几百 MB 的仓库也不会把内存吃满。
- * 每个文件搬完都会核对字节数 —— 对不上说明扫描之后文件被改过，
+ * 每个文件搬完都会核对字节数 —— 不一致说明扫描之后文件被改过，
  * 这时**删掉半截的包并报错**，而不是留下一个看似正常的坏包。
  */
 export async function writeBundle(
@@ -301,7 +301,7 @@ export async function writeBundle(
 		let doneFiles = 0;
 
 		for (const source of sources) {
-			// 内容可能来自仓库里的文件，也可能来自另一份包里的某一段（导 a→b 的差量包）
+			// 内容可能来自仓库里的文件，也可能来自另一份包里的某一段（导 a→b 的差分更新包）
 			const sourceHandle = await fs.promises.open(source.from?.file ?? source.abs, 'r');
 			const start = source.from?.offset ?? 0;
 			const where = source.from ? `包里的那一段（${source.from.file}）` : source.abs;
@@ -315,7 +315,7 @@ export async function writeBundle(
 					await handle.write(buffer, 0, bytesRead, position);
 					position += bytesRead;
 					written += bytesRead;
-					// 导一个几百 MB 的完整包要好几秒：中途让出事件循环，界面才不会僵在那儿
+					// 导一个几百 MB 的完整备份要好几秒：中途让出事件循环，界面才不会僵在那儿
 					if (++chunks % YIELD_EVERY === 0) await yieldToUi();
 				}
 				if (written !== source.size) {
@@ -327,7 +327,7 @@ export async function writeBundle(
 				await sourceHandle.close();
 			}
 			// 报进度放在**搬完一个文件之后**：写包是导出里最耗时的一段，
-			// 不报的话右下角的数字会一直停在算指纹结束的那个数上
+			// 不报的话右下角的数字会一直仍使用算校验值结束的那个数
 			onProgress?.(++doneFiles, sources.length, source.path);
 		}
 
@@ -340,7 +340,7 @@ export async function writeBundle(
 		const trailerLength = Buffer.alloc(4);
 		trailerLength.writeUInt32BE(trailerBytes.length, 0);
 		// 顺序必须是 [标记][JSON][长度]：读取时从**文件最后 4 字节**拿长度，
-		// 再按长度回退定位 JSON 与标记。写成 [标记][长度][JSON] 就对不上了。
+		// 再按长度回退定位 JSON 与标记。写成 [标记][长度][JSON] 就不一致了。
 		await handle.write(BUNDLE_TRAILER_MAGIC, 0, BUNDLE_TRAILER_MAGIC.length, position);
 		position += BUNDLE_TRAILER_MAGIC.length;
 		await handle.write(trailerBytes, 0, trailerBytes.length, position);
@@ -363,7 +363,7 @@ export async function writeBundle(
  *
  * 实现放在同步版里（`readBundleInfoSync`），这里只是等价的异步外壳：
  * 读的只有**开头几十字节 + 末尾几十字节**，同步读一次的开销可以忽略，
- * 而设置面板那条路（同步渲染，要列出本地有几份完整包）需要同步版本 ——
+ * 而设置面板那条路（同步渲染，要列出本地有几份完整备份）需要同步版本 ——
  * 两个版本各写一遍解析最容易走偏（尾部布局的读写顺序错一次就是读不出来），所以只留一份实现。
  */
 export async function readBundleInfo(file: string): Promise<BundleInfo> {

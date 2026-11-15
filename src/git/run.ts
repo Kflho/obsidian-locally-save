@@ -31,7 +31,7 @@ export class GitMissingError extends Error {
 }
 
 export interface GitRunOptions {
-	/** 在哪个目录里跑（货架根目录） */
+	/** 在哪个目录里跑（远程仓库根目录） */
 	cwd: string;
 	/** git 程序路径；留空 ＝ 从 PATH 里找 */
 	gitPath?: string;

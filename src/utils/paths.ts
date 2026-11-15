@@ -61,7 +61,7 @@ export function depthOf(rel: string): number {
  *
  * `rmdir` 对非空目录会失败，而父子目录同时要删时，父目录里还挂着子目录 ——
  * 先删父目录必然失败，这一轮就只删掉了最深的那一层，用户看到的是
- * "应用一次包文件夹删不干净，每次只多删几个"（报过的 bug）。
+ * "应用一次同步包文件夹删不干净，每次只多删几个"（报过的 bug）。
  * 同层之间按码位排，结果与系统语言无关。
  */
 export function byDepthDesc(a: string, b: string): number {

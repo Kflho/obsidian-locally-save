@@ -10,7 +10,7 @@ import { markDestructive } from './modal-layout';
  *
  * 两种用法：
  * - 只给 `onConfirm`（点按钮时执行动作）；
- * - 给 `onResolve`（回调布尔结果，调用方 `await` 它）—— 自动收包那条路要"等用户点完再决定应用"，
+ * - 给 `onResolve`（回调布尔结果，调用方 `await` 它）—— 自动接收那条路要"等用户点完再决定应用"，
  *   取消 / 关窗 / 点确认都会**只回报一次**，不会重复也不悬着。
  */
 export class ConfirmModal extends Modal {

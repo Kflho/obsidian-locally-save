@@ -8,11 +8,11 @@ import path from 'node:path';
  *    （`removeSupersededChanges`）—— 这些是**有意的**：要提交、要推到对面，
  *    不然对面下一次拉取又把它带回来了（用户拍板："删包要同步，保证两边一致"）；
  * 2. **用户自己在资源管理器 / 别处删掉的** —— 那不是"撤下"，是"我这份副本丢了"：
- *    同步时应当**从货架（HEAD / 远程）把它恢复回来**。
+ *    同步时应当**从远程仓库（HEAD / 远程）把它恢复回来**。
  *    用户的现场：包弄乱了就删掉，想从远程重新拉最新的 —— 结果插件把删除当改动推上去，
  *    还因为本地多了一笔提交而卡在"不能快进"，于是**一直拉不下来**。
  *
- * 记号放在货架根目录的一个小 JSON 里（`.lsave-removals.json`）：不进仓库（货架的
+ * 记号放在远程仓库根目录的一个小 JSON 里（`.lsave-removals.json`）：不进仓库（远程仓库的
  * `.gitignore` / `info/exclude` 只放行 `*.lsave`）、每台机器各记各的，不污染远程。
  */
 const REMOVALS_FILE = '.lsave-removals.json';
@@ -21,7 +21,7 @@ const LIMIT = 500;
 interface RemovalsFile {
 	format: 'locally-save-removals';
 	version: 1;
-	/** 货架相对路径（正斜杠） */
+	/** 远程仓库相对路径（正斜杠） */
 	paths: string[];
 	at: number;
 }
@@ -30,7 +30,7 @@ function fileOf(baseDir: string): string {
 	return path.join(path.resolve(baseDir), REMOVALS_FILE);
 }
 
-/** 货架相对路径（正斜杠）：外部传绝对路径也认 */
+/** 远程仓库相对路径（正斜杠）：外部传绝对路径也认 */
 export function shelfRelative(baseDir: string, file: string): string {
 	const rel = path.relative(path.resolve(baseDir), path.resolve(file));
 	return rel.split(path.sep).join('/');
@@ -48,7 +48,7 @@ export function noteBundleRemoved(baseDir: string, files: string[]): void {
 	write(baseDir, [...current].slice(-LIMIT));
 }
 
-/** 读记号（货架相对路径） */
+/** 读记号（远程仓库相对路径） */
 export function readRemovals(baseDir: string): Set<string> {
 	try {
 		const raw = JSON.parse(fs.readFileSync(fileOf(baseDir), 'utf8')) as Partial<RemovalsFile>;

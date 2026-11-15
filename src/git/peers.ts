@@ -5,27 +5,27 @@ import { writeJsonAtomic } from '../sync/disk';
 import type { PluginState } from '../sync/state';
 
 /**
- * 货架里的**每台机器的小状态**（对表用，不是包）。
+ * 远程仓库里的**每台机器的小状态**（对表用，不是包）。
  *
  * 为什么要有：包是单向广播 —— 对方不应用，我这边永远不知道它到了哪一步。
- * git 货架既然是共享的，每台机器往 `.lsave-peers/<copyId>.json` 写一小份自己的状态
- * （状态编号、用哪份完整副本上、最后导出 / 应用了哪个包），同步时跟着提交；
+ * git 远程仓库既然是共享的，每台机器往 `.lsave-peers/<copyId>.json` 写一小份自己的状态
+ * （内容校验值、用哪份完整备份上、最后导出 / 应用了哪个包），同步时跟着提交；
  * 拉一下就能回答三个问题：
  * - **两边内容一样了吗**（`stateId` 相同就是一样）；
  * - **我的包对方应用了没有**（它应用完会把 `lastApply` 写上去、`stateId` 变成我的目标）；
- * - **谁还没重导**（用哪一份完整副本上）。
+ * - **谁还没重新导出**（用哪一份完整备份上）。
  *
  * 它只是**状态**，不是第二条通道：不参与基准 / 冲突 / 删除那一套，
  * 也不带任何文件内容（`stateId` 已经能说明内容一不一样）。
  */
 
-/** 货架里放机器状态的目录 */
+/** 远程仓库里放机器状态的目录 */
 export const PEER_DIR = '.lsave-peers';
 
 export const PEER_FORMAT = 'locally-save-peer';
 export const PEER_VERSION = 1;
 
-/** 一台机器的一笔状态（写在货架里，别人拉得到） */
+/** 一台机器的一笔状态（写在远程仓库里，别人拉得到） */
 export interface PeerState {
 	format: typeof PEER_FORMAT;
 	version: number;
@@ -35,10 +35,10 @@ export interface PeerState {
 	/** 主机名（0.15.3 起；旧状态文件没有就是空串）—— 多台机器时用来认出"是哪台" */
 	host: string;
 	lineage: string;
-	/** 这台机器现在的内容指纹（`sync/state-id.ts`）；还没算过就是 null */
+	/** 这台机器现在的内容校验值（`sync/state-id.ts`）；还没算过就是 null */
 	stateId: string | null;
 	generation: number;
-	/** 它用哪一份完整副本上 */
+	/** 它用哪一份完整备份上 */
 	baselineHash: string | null;
 	baselineGeneration: number | null;
 	/** 最后一次导出 / 应用（状态栏与"对方应用了没"靠它） */
@@ -47,10 +47,10 @@ export interface PeerState {
 	/** 它这边还有多少改动没发出去（`pendingReturn`） */
 	pending: number;
 	/**
-	 * **最近一次收包失败的原因**（0.15.9 起；没有就不写这个字段）。
+	 * **最近一次接收失败的原因**（0.15.9 起；没有就不写这个字段）。
 	 *
-	 * 为什么放进对表文件：收包失败只留在本机 `sync-state.json` / `debug.log`，
-	 * 对面想排查只能等这边的人手动发日志（283 就卡在这里）。peer 文件本来就跟着货架同步，
+	 * 为什么放进对表文件：接收失败只留在本机 `sync-state.json` / `debug.log`，
+	 * 对面想排查只能等这边的人手动发日志（283 就卡在这里）。peer 文件本来就跟着远程仓库同步，
 	 * 顺手带上"哪个包、什么原因"，对面拉一次就能看到，不用再要日志。
 	 */
 	lastError?: { file?: string; bundleId: string; message: string; at: number };
@@ -58,7 +58,7 @@ export interface PeerState {
 	 * **内容与"它以为的那个状态"不一致**（＝ `state.applyDrift`）。
 	 *
 	 * 有这一项时，上面那个 `generation` / `stateId` 只是"记录里的号"，**内容并不等于那一代**
-	 * （典型：完整副本镜像有删不掉的目录）。不写出来的话，对面只能看到"它说自己在第 392 代"，
+	 * （典型：完整备份镜像有删不掉的目录）。不写出来的话，对面只能看到"它说自己在第 392 版"，
 	 * 于是按 392 去推理 —— 本次 112/392 的排查就是这么被带偏的。
 	 */
 	contentDrift?: { expected: string; actual: string; generation?: number | null; at: number };
@@ -66,7 +66,7 @@ export interface PeerState {
 	at: number;
 }
 
-/** 某台机器的状态文件路径（货架根目录下） */
+/** 某台机器的状态文件路径（远程仓库根目录下） */
 export function peerFile(baseDir: string, copyId: string): string {
 	return path.join(baseDir, PEER_DIR, `${copyId}.json`);
 }
@@ -123,7 +123,7 @@ export function buildPeer(state: PluginState): PeerState {
 	};
 }
 
-/** 把本机状态写进货架（`vault` 由调用方填）；返回"这次真写了吗"与失败原因 */
+/** 把本机状态写进远程仓库（`vault` 由调用方填）；返回"这次真写了吗"与失败原因 */
 export async function writePeer(
 	baseDir: string,
 	state: PluginState,
@@ -135,7 +135,7 @@ export async function writePeer(
 		/**
 		 * **内容没变就不写**：`at`（写这份状态的时间）一改，`git add` 就会造一笔空提交 ——
 		 * 每 5 分钟拉一次就是每 5 分钟一笔"只是时间变了"的提交，仓库很快就没法看。
-		 * 所以比较时把 `at` 去掉：只有状态编号 / 基准 / 最后导出应用这些**有意义的东西**变了才写。
+		 * 所以比较时把 `at` 去掉：只有内容校验值 / 基准 / 最后导出应用这些**有意义的东西**变了才写。
 		 */
 		try {
 			const existing = JSON.parse(fs.readFileSync(target, 'utf8')) as PeerState;
@@ -153,7 +153,7 @@ export async function writePeer(
 }
 
 /**
- * 读货架上所有**别人**的状态（自己的跳过；读不出的也跳过 —— 可能是旧版本写的半截文件）。
+ * 读远程仓库上所有**别人**的状态（自己的跳过；读不出的也跳过 —— 可能是旧版本写的半截文件）。
  *
  * 只看 `*.json`，按文件名的 copyId 认人；不信任文件内容里的 copyId 之外的东西，
  * 一律过一遍形状检查。
@@ -228,11 +228,11 @@ function normalizePeer(raw: Partial<PeerState> | null): PeerState | null {
 
 /**
  * 一台机器和我这边的内容对得上吗：
- * - `same`：状态编号相同 —— 内容一致；
+ * - `same`：内容校验值相同 —— 内容一致；
  * - `different`：它上报的状态比我新（或同一时间），编号却不同 —— 真没同步；
  * - `stale`：它上次上报**早于**我最近一次应用/导出 —— 我这边刚动过，它还没报新状态，
  *   不能断言"不同步"（用户看到的就是应用完右下角立刻写"对方未同步"）；
- * - `unknown`：它还没算过状态编号，或我这边还没有。
+ * - `unknown`：它还没算过内容校验值，或我这边还没有。
  */
 export type PeerMatch = 'same' | 'different' | 'stale' | 'unknown';
 
@@ -242,7 +242,7 @@ const STALE_GRACE_MS = 60_000;
 export function peerMatch(
 	peer: PeerState,
 	myStateId: string | null,
-	/** 我这边的状态编号是什么时候算的（`state.stateId.at`） */
+	/** 我这边的内容校验值是什么时候算的（`state.stateId.at`） */
 	myUpdatedAt = 0,
 ): PeerMatch {
 	if (!myStateId || !peer.stateId) return 'unknown';
@@ -289,9 +289,9 @@ export function describePeersShort(
 	myStateId: string | null,
 	myUpdatedAt = 0,
 ): string | null {
-	if (peers.length === 0) return '对方：还没上报';
-	// 本机还没算过状态编号：不是"对方没上报"，是没法比
-	if (!myStateId) return '对方：本机还没算过状态';
+	if (peers.length === 0) return '对方：尚未上报';
+	// 本机还没算过内容校验值：不是"对方没上报"，是没法比
+	if (!myStateId) return '对方：本机尚未计算状态';
 	const counts: Record<PeerMatch, number> = { same: 0, different: 0, stale: 0, unknown: 0 };
 	for (const peer of peers) counts[peerMatch(peer, myStateId, myUpdatedAt)]++;
 	// 只有一台时不必写"1 台"：状态栏那一格能省一个字是一个字
@@ -299,7 +299,7 @@ export function describePeersShort(
 		if (counts.same === 1) return '对方：一致';
 		if (counts.different === 1) return '对方：不同步';
 		if (counts.stale === 1) return '对方：待上报';
-		return '对方：没上报';
+		return '对方：未上报';
 	}
 	if (counts.same === peers.length) return `对方：${peers.length} 台一致`;
 	const bits: string[] = [];
@@ -313,7 +313,7 @@ export function describePeersShort(
 /**
  * 一台机器的完整一行（「检查环境」/「各台电脑同步状态」/ 状态栏悬停提示共用）。
  *
- * 写清 **谁、一致不一致、两边的状态编号、最后上报时间**：用户要判断"是哪一台、
+ * 写清 **谁、一致不一致、两边的内容校验值、最后上报时间**：用户要判断"是哪一台、
  * 它是不是只是还没同步"，只给一句"未同步"不够。
  */
 export function describePeerDetail(
@@ -322,34 +322,45 @@ export function describePeerDetail(
 	myUpdatedAt = 0,
 ): string {
 	const match = peerMatch(peer, myStateId, myUpdatedAt);
-	const mark = !myStateId
-		? '? 无法比较（本机还没算过状态）'
+	// 先给一句结论（主谓齐全），再逐条补细节；不用「字段：值 · 字段：值」的电报体
+	const verdict = !myStateId
+		? '无法比较，因为本机尚未计算内容校验值'
 		: match === 'same'
-			? '✓ 一致'
+			? '内容与本机一致'
 			: match === 'stale'
-				? '? 还没报新状态'
+				? '尚未上报新状态'
 				: match === 'unknown'
-					? '? 还没上报状态编号'
-					: '✗ 不同步';
+					? '尚未上报内容校验值'
+					: '内容与本机不同步';
 	// 多台机器时最容易混：仓库都叫 obsidian。**主机名 + copyId 前 8 位**才认得出是哪台
 	const label = [peer.vault, peer.host, shortId(peer.copyId)].filter(item => item !== '');
-	const who = `另一台（${label.join(' · ')}）`;
-	const parts = [`${who}：${mark}`];
-	if (myStateId && peer.stateId) parts.push(`它 ${peer.stateId} / 我 ${myStateId}`);
-	else parts.push(`它 ${peer.stateId ?? '还没算过'}`);
-	parts.push(`第 ${peer.generation} 代`);
-	parts.push(`基准 ${peer.baselineGeneration ?? '?'} 代 ${peer.baselineHash ?? '未记'}`);
-	parts.push(`最后上报 ${peer.at > 0 ? hhmm(peer.at) : '没记时间'}`);
-	if (peer.lastExport) parts.push(`最后导出 ${peer.lastExport.file ?? shortId(peer.lastExport.bundleId)}`);
-	if (peer.lastApply) parts.push(`最后应用 ${peer.lastApply.file ?? shortId(peer.lastApply.bundleId)}`);
+	const sentences = [`另一台（${label.join(' · ')}）${verdict}。`];
+	if (peer.stateId && myStateId) {
+		sentences.push(`它的内容校验值是 ${peer.stateId}，本机是 ${myStateId}。`);
+	} else if (peer.stateId) {
+		sentences.push(`它的内容校验值是 ${peer.stateId}，本机尚未计算。`);
+	} else {
+		sentences.push('它还没有上报内容校验值。');
+	}
+	sentences.push(`它当前是第 ${peer.generation} 版。`);
+	sentences.push(peer.baselineGeneration !== null
+		? `它以第 ${peer.baselineGeneration} 版完整备份为基准（编号 ${peer.baselineHash ?? '未记录'}）。`
+		: '它还没有记录基准。');
+	sentences.push(peer.at > 0 ? `它最后一次上报是 ${hhmm(peer.at)}。` : '它没有记录上报时间。');
+	if (peer.lastExport) {
+		sentences.push(`它最后一次导出的是 ${peer.lastExport.file ?? shortId(peer.lastExport.bundleId)}。`);
+	}
+	if (peer.lastApply) {
+		sentences.push(`它最后一次应用的是 ${peer.lastApply.file ?? shortId(peer.lastApply.bundleId)}。`);
+	}
 	if (peer.lastError) {
 		const message = peer.lastError.message.length > 40
 			? `${peer.lastError.message.slice(0, 40)}…`
 			: peer.lastError.message;
-		parts.push(`它上次收包失败：${message}`);
+		sentences.push(`它上次接收同步包失败，对方记录的原因是「${message}」。`);
 	}
-	if (peer.pending > 0) parts.push(`还有 ${peer.pending} 个改动没发出去`);
-	return parts.join(' · ');
+	if (peer.pending > 0) sentences.push(`它还有 ${peer.pending} 项改动没有发送。`);
+	return sentences.join('');
 }
 
 /** 状态栏悬停 / 弹窗里用：把每台机器的详情摊开 */
@@ -358,7 +369,7 @@ export function describePeersDetailed(
 	myStateId: string | null,
 	myUpdatedAt = 0,
 ): string[] {
-	if (peers.length === 0) return ['还没有别的机器上报过状态：对方同步一次之后才会出现。'];
+	if (peers.length === 0) return ['尚无其他电脑上报状态：对方完成一次同步后才会出现。'];
 	return peers.map(peer => describePeerDetail(peer, myStateId, myUpdatedAt));
 }
 

@@ -121,7 +121,7 @@ export class SshKeyModal extends Modal {
 		if (this.key) {
 			contentEl.createEl('p', {
 				cls: 'locally-save-hint',
-				text: '第一次连接可能会问主机指纹：先在终端里跑一次 ssh -T git@' + host + '，'
+				text: '第一次连接可能会问主机校验值：先在终端里跑一次 ssh -T git@' + host + '，'
 					+ '或者点「测试」看报错。',
 			});
 		}

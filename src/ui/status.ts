@@ -10,12 +10,12 @@ import { GitStatusModal } from './git-modal';
 /**
  * 状态栏那一句：**尽量短**，但要把两件事分开说清楚 ——
  *
- * 1. **git 推拉本身**：`已推送` / `已拉取` / `已推拉` / `远程已是最新` / `同步失败`
+ * 1. **git 推送和拉取本身**：`已推送` / `已拉取` / `已完成推送和拉取` / `远程已是最新` / `同步失败`
  *    （旧文案写"已同步"，等于把"推上去了"说成"两边内容一样了"，用户会误解）；
  * 2. **各台电脑的内容状态**：`对方：一致` / `对方：1 台不同步` / `对方：1 台待上报`
  *    （多台时逐台计数；只给一句"不同步"看不出是哪台、也看不出是不是它还没上报）。
  *
- * 没启用 git 的机器仍然写"上次留包…"（它没有"远程同步"这回事）。
+ * 没启用 git 的机器仍然写"上次导出…"（它没有"远程同步"这回事）。
  */
 
 /** 一次状态栏刷新要的两层信息（结果 + 悬停详情） */
@@ -43,15 +43,15 @@ export function statusSummary(state: PluginState, peer?: string | null): string 
 			text = `同步失败 ${when}`;
 		} else {
 			const action = git.pushed && git.pulled > 0
-				? '已推拉'
+				? '已完成推送与拉取'
 				: git.pushed
 					? '已推送'
 					: git.pulled > 0
 						? '已拉取'
 						: '远程已是最新';
 			text = `${action} ${when}`;
-			if (git.ahead > 0) text += ` · ${git.ahead} 个没推`;
-			if (git.behind > 0) text += ` · 落后 ${git.behind}`;
+			if (git.ahead > 0) text += ` · ${git.ahead} 项未推送`;
+			if (git.behind > 0) text += ` · 待拉取 ${git.behind}`;
 		}
 	} else {
 		text = describeLastActivity(state);
@@ -69,15 +69,15 @@ export async function refreshStatusBar(plugin: LocallySavePlugin): Promise<void>
 		const peer = withGit ? peerStatusText(peers, state) : null;
 		plugin.statusBar.setSummary(statusSummary(state, peer?.short ?? null));
 		const mine = [
-			`我这台（${plugin.vaultName()}）：状态 ${state.stateId?.id ?? '还没算过'} · 第 ${state.generation} 代`,
-			`基准：第 ${state.bundle?.fullGeneration ?? '?'} 代 · ${state.bundle?.fullHash ?? '未记'}`,
+			`我这台（${plugin.vaultName()}）的内容校验值是 ${state.stateId?.id ?? '尚未计算'}，当前是第 ${state.generation} 版。`,
+			`本机基准是第 ${state.bundle?.fullGeneration ?? '?'} 版（编号 ${state.bundle?.fullHash ?? '未记录'}）。`,
 			...(state.applyDrift
-				? [`⚠ 内容与第 ${state.applyDrift.generation ?? '?'} 代（${state.applyDrift.expected}）不一致：`
-					+ `实际是 ${state.applyDrift.actual} —— 上一次镜像有路径没落成，看应用报告里的失败项`]
+				? [`⚠ 内容与第 ${state.applyDrift.generation ?? '?'} 版（${state.applyDrift.expected}）不一致：`
+					+ `实际是 ${state.applyDrift.actual} —— 上一次镜像应用有文件未写入成功，详情见应用报告。`]
 				: []),
 			state.git
-				? `上次推拉：${state.git.ok ? '成功' : '失败'} ${hhmm(state.git.at)}`
-				: '还没和 git 远程同步过',
+				? `上次推送和拉取${state.git.ok ? '成功' : '失败'}（${hhmm(state.git.at)}）。`
+				: '尚未与 Git 远程同步',
 		];
 		plugin.statusBar.setDetail([...mine, ...(peer?.details ?? [])].join('\n'));
 	} catch (error) {
@@ -99,8 +99,8 @@ export async function openPeerStatus(
 	const lines: string[] = [];
 	try {
 		const state = await loadState(plugin.stateFile());
-		lines.push(`我这台（${plugin.vaultName()}）：状态 ${state.stateId?.id ?? '还没算过'} · 第 ${state.generation} 代`);
-		lines.push(`基准：第 ${state.bundle?.fullGeneration ?? '?'} 代 · ${state.bundle?.fullHash ?? '未记'}`);
+		lines.push(`我这台（${plugin.vaultName()}）的内容校验值是 ${state.stateId?.id ?? '尚未计算'}，当前是第 ${state.generation} 版。`);
+		lines.push(`本机基准是第 ${state.bundle?.fullGeneration ?? '?'} 版（编号 ${state.bundle?.fullHash ?? '未记录'}）。`);
 		if (state.git) {
 			const detail = [
 				`${state.git.ok ? '成功' : '失败'} ${hhmm(state.git.at)}`,
@@ -109,22 +109,22 @@ export async function openPeerStatus(
 				state.git.ahead > 0 ? `领先 ${state.git.ahead}` : '',
 				state.git.behind > 0 ? `落后 ${state.git.behind}` : '',
 			].filter(item => item !== '');
-			lines.push(`上次推拉：${detail.join(' · ')}`);
+			lines.push(`上次推送和拉取：${detail.join(' · ')}`);
 		} else {
-			lines.push('上次推拉：还没和 git 远程同步过');
+			lines.push('还没有与 Git 远程同步过。');
 		}
 
 		if (!plugin.settings.gitEnabled) {
-			lines.push('git 传输关着，这里只显示本机的留包状态。');
+			lines.push('Git 传输未启用，此处只显示本机的导出状态。');
 		} else {
 			const base = bundleBaseDir(plugin.settings);
 			if (base === '') {
-				lines.push('还没填「同步包文件夹」：去设置 → 同步包，填一个仓库之外的目录。');
+				lines.push('尚未填写「同步包文件夹」：请在 设置 → 同步包 中填写一个仓库之外的目录。');
 			} else {
 				const peers = readPeers(base, state.copyId);
 				lines.push('');
 				lines.push(peers.length === 0
-					? '还没有别的机器上报状态。对方同步一次之后会出现在这里。'
+					? '尚无其他电脑上报状态。对方完成一次同步后即会出现在这里。'
 					: '各台机器（按最后上报排序）：');
 				for (const line of describePeersDetailed(peers, state.stateId?.id ?? null, state.stateId?.at ?? 0)) {
 					lines.push(line);
@@ -132,7 +132,7 @@ export async function openPeerStatus(
 			}
 		}
 	} catch (error) {
-		lines.push(`读不到同步状态：${error instanceof Error ? error.message : String(error)}`);
+		lines.push(`无法读取同步状态。原因：${error instanceof Error ? error.message : String(error)}。`);
 	}
 	new GitStatusModal(plugin.app, lines, onSync, '各台电脑同步状态').open();
 }

@@ -2,31 +2,31 @@ import { DEFAULT_SETTINGS, SAVE_DELAY_OPTIONS, SYNC_INTERVAL_OPTIONS, coerceBool
 import type { FieldSection } from './types';
 
 /**
- * 「自动留包」一页：什么时候自己动手、留哪种。
+ * 「自动导出」一页：什么时候自己动手、留哪种。
  *
- * 默认全是关的 —— 留包会往磁盘写文件，得让用户明确打开。
+ * 默认全是关的 —— 导出会往磁盘写文件，得让用户明确打开。
  * 两个「留哪种包」开关都在这一页，跟触发时机关在一起；
- * 「立即同步」不看这两个开关（它自己按"有基准导更新包、没基准导完整包"来）。
+ * 「立即同步」不看这两个开关（它自己按"有基准导更新包、没基准导完整备份"来）。
  */
 export const AUTO_SECTION: FieldSection = {
 	type: 'page',
-	heading: '自动留包',
-	desc: '自动留包的时机与类型，默认全关。',
+	heading: '自动导出',
+	desc: '自动导出的时机与类型，默认全关。',
 	groups: [
 		{
 			heading: '触发时机',
 			fields: [
 				{
 					key: 'syncOnStartup',
-					name: '启动后留包一次',
-					desc: 'Obsidian 启动并加载完工作区后自动留一次包',
+					name: '启动后导出一次',
+					desc: 'Obsidian 启动并加载工作区后自动留一次包',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.syncOnStartup),
 				},
 				{
 					key: 'autoSyncInterval',
-					name: '定时同步（留包 + git）',
-					desc: '每隔一段时间：留一次包（如果开了自动留包），并把货架和 git 远程推拉一遍；0 ＝ 只手动。',
+					name: '定时同步（导出 + git）',
+					desc: '每隔一段时间留一次包（若已开启自动导出），并与 Git 远程推送、拉取一次；0 表示只手动触发。',
 					control: { type: 'dropdown', options: SYNC_INTERVAL_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,
@@ -36,8 +36,8 @@ export const AUTO_SECTION: FieldSection = {
 				},
 				{
 					key: 'syncAfterSaveDelay',
-					name: '保存后留包',
-					desc: '笔记保存后停顿一会儿再留包。编辑时保存很频繁，停顿能少写几次盘。',
+					name: '保存后导出',
+					desc: '笔记保存后延迟一段时间再导出。编辑时保存频繁，延迟可减少写入次数。',
 					control: { type: 'dropdown', options: SAVE_DELAY_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,
@@ -53,15 +53,15 @@ export const AUTO_SECTION: FieldSection = {
 			fields: [
 				{
 					key: 'autoExportChanges',
-					name: '留更新包',
-					desc: '只装自起点那份完整副本以来变过的文件。第一次要先导一份完整副本。',
+					name: '导出更新包',
+					desc: '仅包含自起点完整备份以来发生变更的文件。首次使用需先导出一份完整备份。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
 				{
 					key: 'autoExportFull',
-					name: '留完整包',
-					desc: '整个仓库重写一遍，大库会明显变慢。它同时是基准点和还原点。',
+					name: '导出完整备份',
+					desc: '重写整个仓库，大仓库会明显变慢。它同时是基准和还原点。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
 				},

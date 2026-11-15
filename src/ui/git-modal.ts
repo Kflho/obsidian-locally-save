@@ -2,7 +2,7 @@ import { Modal, Setting } from 'obsidian';
 import type { App } from 'obsidian';
 
 /**
- * 「检查环境」的小窗口：把 git 版本、货架状态、和远程差多少摊开看一眼。
+ * 「检查环境」的小窗口：把 git 版本、远程仓库状态、和远程差多少摊开看一眼。
  *
  * 不在这里直接调 `syncGitNow`（那会让 `ui/git.ts` 与这个文件互相 import）：
  * 抽屉里只放一个按钮，动作由调用方传进来。

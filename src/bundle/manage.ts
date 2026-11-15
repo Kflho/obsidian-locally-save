@@ -16,7 +16,7 @@ import { toNative } from '../utils/paths';
  * 而且不 import obsidian 就能拿临时目录直接测（见 test/bundle.test.ts）。
  *
  * 回收站用 `.lsave` 这个名字是有意的：包目录里混进一个回收站本来就不该被当成笔记，
- * 而且万一用户把包文件夹设在了仓库里，`.lsave` 也在默认排除规则里、不会被装进下一个包。
+ * 而且万一用户把同步包文件夹设在了仓库里，`.lsave` 也在默认排除规则里、不会被装进下一个包。
  * 具体放在哪个 `.lsave` 里见 `bundleTrashRoot`。
  */
 
@@ -29,7 +29,7 @@ export const BUNDLE_TRASH_DIR = 'bundles-trash';
  * 再往里放会把 `.lsave` 套两层（`.lsave/bundles/.lsave/bundles-trash`），
  * 翻起来又乱又难找（用户报过）。所以：
  * - `<x>/.lsave/bundles`（0.8.0 之前副本通道的默认布局）→ `<x>/.lsave/bundles-trash`，跟 `bundles` 平级；
- * - `<x>/.lsave`（用户直接把包文件夹指到了 `.lsave`）→ `<x>/.lsave/bundles-trash`；
+ * - `<x>/.lsave`（用户直接把同步包文件夹指到了 `.lsave`）→ `<x>/.lsave/bundles-trash`；
  * - 用户自己填的文件夹（那儿压根没有 `.lsave`）→ `<自定义>/.lsave/bundles-trash`。
  *
  * 根目录没配就返回空串（调用方要提示先去填）。
@@ -39,7 +39,7 @@ export function bundleTrashRoot(baseDir: string): string {
 	const parent = path.dirname(baseDir);
 	// 包目录的上一级已经是 .lsave 了：回收站直接跟它做邻居
 	if (path.basename(parent) === BUNDLE_ROOT_DIR) return toNative(parent, BUNDLE_TRASH_DIR);
-	// 包文件夹本身就指到了 .lsave：那就放在它里面
+	// 同步包文件夹本身就指到了 .lsave：那就放在它里面
 	if (path.basename(baseDir) === BUNDLE_ROOT_DIR) return toNative(baseDir, BUNDLE_TRASH_DIR);
 	return toNative(baseDir, `${BUNDLE_ROOT_DIR}/${BUNDLE_TRASH_DIR}`);
 }
@@ -75,7 +75,7 @@ export interface ManagedBundle {
 	error?: string;
 	size: number;
 	/**
-	 * 文件修改时间：本机写的包≈导出时间；**从 git 拉下来的包是拉取时间**，只能当兜底。
+	 * 文件修改时间：本机写的包≈导出时间；**从 git 拉下来的包是拉取时间**，只能当保底。
 	 */
 	mtime: number;
 	/** 包头部记的导出时间（`header.created`）：列表排序与显示都该用它 */
@@ -149,11 +149,11 @@ export interface BundleGroup {
  * 列表分组：**先分来源，再分类，组内从新到老**。
  *
  * 用户提的："包管理直接分栏区分自己产生的包和拉下来的包" —— 两类包长得很像
- * （文件名里都有世代/状态编号），混在一起时很容易把对方发来的当成自己导的，
+ * （文件名里都有版本/内容校验值），混在一起时很容易把对方发来的当成自己导的，
  * 或者反过来。来源就看头部 `source.copyId`：跟本机一样＝我导出的，不一样＝收下来的。
  *
  * 顺序：我导出的 → 收下来的 → 来源不明；每块里更新包在前（天天要传的那一份），
- * 完整副本在后（平时只是还原点），读不出头部的不跟正经包混在一起。
+ * 完整备份在后（平时只是还原点），读不出头部的不跟正经包混在一起。
  *
  * 不知道本机 copyId 时（状态文件还没建）退回"只按类型分"。
  */
@@ -165,7 +165,7 @@ export function groupBundles(items: ManagedBundle[], mine?: string | null): Bund
 	if (!mine) {
 		return [
 			{ title: '更新包', items: pick(items, 'changes') },
-			{ title: '完整副本', items: pick(items, 'full') },
+			{ title: '完整备份', items: pick(items, 'full') },
 			{ title: '类型未知（读不出包信息）', items: pick(items, null) },
 		];
 	}
@@ -180,9 +180,9 @@ export function groupBundles(items: ManagedBundle[], mine?: string | null): Bund
 	});
 	return [
 		{ title: '我导出的 · 更新包', items: pick(mineItems, 'changes') },
-		{ title: '我导出的 · 完整副本', items: pick(mineItems, 'full') },
+		{ title: '我导出的 · 完整备份', items: pick(mineItems, 'full') },
 		{ title: '收下来的 · 更新包', items: pick(otherItems, 'changes') },
-		{ title: '收下来的 · 完整副本', items: pick(otherItems, 'full') },
+		{ title: '收下来的 · 完整备份', items: pick(otherItems, 'full') },
 		{ title: '来源不明 / 读不出包信息', items: sortTime(unknown) },
 	];
 }
@@ -191,12 +191,12 @@ export interface TrashOutcome {
 	/** 移走的包（文件名，已排序） */
 	moved: string[];
 	failed: { path: string; error: string }[];
-	/** 进回收站里的目录（一个时间戳一个，界面上告诉用户去哪儿捞） */
+	/** 进回收站里的目录（一个时间戳一个，界面上告诉用户去哪儿恢复） */
 	target: string;
 }
 
 /**
- * 删包 = 移到回收站（同一次操作用同一个时间戳，捞的时候好认）。
+ * 删包 = 移到回收站（同一次操作用同一个时间戳，恢复的时候好认）。
  *
  * 为什么不真删：同步包是"改动唯一的备份"，点错一下整份改动就没了。
  * 回收站占地方，所以界面上另给一个"清空回收站"，让用户自己决定什么时候真删。
@@ -246,7 +246,7 @@ export async function readBundleTrash(baseDir: string): Promise<TrashContents> {
 	return { count, bytes };
 }
 
-/** 清空回收站：**真删**，删完捞不回来（界面上必须先确认） */
+/** 清空回收站：**真删**，删完无法恢复（界面上必须先确认） */
 export async function emptyBundleTrash(baseDir: string): Promise<void> {
 	for (const root of trashRoots(baseDir)) await removeDirRecursive(root);
 	// 老位置的回收停在 `<base>/.lsave/` 底下，清完会剩一个空壳 —— 顺手收掉，
@@ -265,10 +265,10 @@ export interface DeleteOutcome {
  * **彻底删除**这些包（不进回收站）。
  *
  * 为什么除了"移到回收站"还要有它：同步包往往是"改动唯一的备份"，所以默认那条路是先移走、
- * 还能捞回来；但某一个包你确认没用了、又不想为它把整个回收站清空时，就该能单独真删
+ * 还能恢复；但某一个包你确认没用了、又不想为它把整个回收站清空时，就该能单独真删
  * （用户提的：只有"移到回收站"不方便）。
  *
- * 界面上必须**单独确认一次**，措辞也别跟"移到回收站"混 —— 这一步之后真的捞不回来。
+ * 界面上必须**单独确认一次**，措辞也别跟"移到回收站"混 —— 这一步之后真的无法恢复。
  */
 export async function deleteBundles(files: string[], baseDir?: string): Promise<DeleteOutcome> {
 	const outcome: DeleteOutcome = { deleted: [], failed: [] };

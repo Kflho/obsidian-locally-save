@@ -25,12 +25,12 @@ import { openFolderInExplorer } from './reveal';
 import { peerStatusText, refreshStatusBar } from './status';
 
 /**
- * 「Git 远程」那一套动作：接入、同步、检查环境、打开货架。
+ * 「Git 远程」那一套动作：接入、同步、检查环境、打开远程仓库。
  *
- * 边界（方案里定死的，改之前先读 `bin/reference_docs/technical_solution_docs/git远程货架-实施计划.md`）：
+ * 边界（方案里定死的，改之前先读 `bin/reference_docs/technical_solution_docs/git远程远程仓库-实施计划.md`）：
  * - **git 只搬包**：工作区就是同步包文件夹，仓库里只有 `.lsave`；
  * - **不自动 init / 不自动改远程**：那两件事只在「接入」动作里做，别的路径只读不写；
- * - **完整包不推**：`.git/info/exclude` 里常驻 `/full/`（见 `git/shelf.ts`）；
+ * - **完整备份不推**：`.git/info/exclude` 里常驻 `/full/`（见 `git/shelf.ts`）；
  * - 拉取到的包不在这里应用 —— 交给 `main.tick()` 后面那条 `checkIncomingBundles`，
  *   安全边界（只自动应用不会动本地东西的更新包）仍然只有一份。
  */
@@ -50,7 +50,7 @@ export interface GitSyncOptions {
 	background?: boolean;
 }
 
-/** 从设置拼出引擎要的货架参数；没填全就返回 null */
+/** 从设置拼出引擎要的远程仓库参数；没填全就返回 null */
 function shelfOptions(plugin: LocallySavePlugin): ShelfOptions | null {
 	const base = bundleBaseDir(plugin.settings);
 	const remote = plugin.settings.gitRemote.trim();
@@ -70,7 +70,7 @@ function shelfOptions(plugin: LocallySavePlugin): ShelfOptions | null {
 /**
  * 和远程对一遍（提交 → 拉 → 推）。
  *
- * 同一时间只允许一次：留包 / 收包 / 应用进行中也会让路 —— 同步会动包文件夹里的文件，
+ * 同一时间只允许一次：导出 / 接收 / 应用进行中也会让路 —— 同步会动同步包文件夹里的文件，
  * 应用正读着某个包时把它移走就麻烦了。
  */
 export async function syncGitNow(
@@ -79,7 +79,7 @@ export async function syncGitNow(
 ): Promise<boolean> {
 	if (!plugin.settings.enabled) return false;
 	if (!plugin.settings.gitEnabled) {
-		if (options.manual) new Notice('还没打开「启用 git 传输」：设置 → Git 远程');
+		if (options.manual) new Notice('「启用 Git 传输」尚未开启：设置 → Git 远程');
 		return false;
 	}
 	const shelf = shelfOptions(plugin);
@@ -90,16 +90,16 @@ export async function syncGitNow(
 		return false;
 	}
 	if (plugin.gitBusy) {
-		if (options.manual) new Notice('上一次 git 同步还没跑完');
+		if (options.manual) new Notice('上一次 Git 同步尚未完成');
 		return false;
 	}
 	if (plugin.bundleBusy || plugin.incomingBusy || isApplying()) {
-		if (options.manual) new Notice('正在留包、收包或应用，等这一轮跑完再同步');
+		if (options.manual) new Notice('正在导出、接收或应用，请等本轮完成后再同步');
 		return false;
 	}
-	// **不自动 init**：写 `.git` 是「接入」那个动作的事；这里只跟已经接上的货架说话
+	// **不自动 init**：写 `.git` 是「接入」那个动作的事；这里只跟已经接上的远程仓库说话
 	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) {
-		if (options.manual) new Notice('这个文件夹还没接上 git：设置 → Git 远程 →「接入这个远程…」', 9000);
+		if (options.manual) new Notice('同步包文件夹尚未连接 Git：设置 → Git 远程 →「接入这个远程…」', 9000);
 		return false;
 	}
 
@@ -115,9 +115,9 @@ export async function syncGitNow(
 	const narrate = options.manual === true;
 	if (narrate) plugin.statusBar.showActivity('正在同步…');
 	try {
-		// 先把自己的状态写进货架（别人拉下来就知道我在哪一步），再提交 / 拉 / 推
+		// 先把自己的状态写进远程仓库（别人拉下来就知道我在哪一步），再提交 / 拉 / 推
 		const state = await loadState(plugin.stateFile());
-		// 状态文件还没建时，`loadState` 每次都会给一个新的 copyId —— 先落盘，别让状态文件在货架上"换名字"
+		// 状态文件还没建时，`loadState` 每次都会给一个新的 copyId —— 先落盘，别让状态文件在远程仓库上"换名字"
 		if (!fs.existsSync(plugin.stateFile())) await saveState(plugin.stateFile(), state);
 		const peer = await writePeer(shelf.dir, state, plugin.vaultName());
 		if (peer.error) plugin.log.debug(`写本机状态失败：${peer.error}`);
@@ -143,18 +143,18 @@ export async function syncGitNow(
 			new Notice(describeReport(report, peer), 9000);
 		} else if (report.pulled.length > 0) {
 			/**
-			 * **拉下来的包不在这里报数**（0.16.14）：拉下来只说明"货架上多了个文件"，
-			 * 真正要用户知道的是"它被应用了没有、动了什么" —— 那由收包那条路说
-			 * （`reportIncomingSweep`：只有删 / 覆盖 / 兜底回退才弹）。两句一起弹，
+			 * **拉下来的包不在这里报数**（0.16.14）：拉下来只说明"远程仓库上多了个文件"，
+			 * 真正要用户知道的是"它被应用了没有、动了什么" —— 那由接收那条路说
+			 * （`reportIncomingSweep`：只有删 / 覆盖 / 保底回退才弹）。两句一起弹，
 			 * 用户看到的就是"同步成功 + 收到 1 个包 + 已应用 3 个文件"三连，
 			 * 每 5 分钟一轮（用户报的"右上角不断显示信息"）。
 			 *
-			 * **仅推例外**：那个方向根本不看收件箱（`wantsIncoming` 为 false），
-			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在货架上。
+			 * **仅推例外**：那个方向根本不看接收文件夹（`wantsIncoming` 为 false），
+			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在远程仓库上。
 			 */
 			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包`);
 			if (plugin.settings.syncDirection === 'upload') {
-				new Notice(`从 git 远程收到 ${report.pulled.length} 个包（仅推：不会自动应用）`, 9000);
+				new Notice(`已从 Git 远程接收 ${report.pulled.length} 个同步包（仅推：不会自动应用）`, 9000);
 			}
 		}
 		return true;
@@ -176,7 +176,7 @@ export async function syncGitNow(
 		});
 		await refreshStatusBar(plugin);
 		plugin.log.error('git 同步失败', error);
-		if (options.manual) new Notice(`git 同步失败：${brief(message)}`, 8000);
+		if (options.manual) new Notice(`Git 同步失败。原因：${brief(message)}。`, 8000);
 		return false;
 	} finally {
 		plugin.gitBusy = false;
@@ -190,7 +190,7 @@ export async function syncGitNow(
  *
  * 什么时候真的干活：
  * - 到了统一同步间隔（`autoSyncInterval`，0 ＝ 不自动拉）；
- * - 或者货架里**有还没提交的包**（刚留过包 → 30 秒内推上去，不等拉取间隔）；
+ * - 或者远程仓库里**有还没提交的包**（刚留过包 → 30 秒内推上去，不等拉取间隔）；
  * - 或者上一次没推上去（`state.git.ahead > 0`）。
  * 没接上（还不是 git 仓库）就安静地跳过 —— **不自动 init**。
  */
@@ -209,7 +209,7 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 	const last = state.git;
 	const pendingPush = (last?.ahead ?? 0) > 0;
 	/**
-	 * 状态变了（刚应用 / 刚导出）就把"我现在在哪一步"写回货架 —— 不等拉取间隔。
+	 * 状态变了（刚应用 / 刚导出）就把"我现在在哪一步"写回远程仓库 —— 不等拉取间隔。
 	 * 这一步不联网；写出来之后 `shelfIsDirty` 会让下面的同步把它提交推送上去，
 	 * 对面下一次拉取就能看到"我已经应用完了"。
 	 */
@@ -237,10 +237,10 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
 }
 
 /**
- * **对方停在别的基准上时，导出前提醒一句**（0.15.9）。
+ * **对方仍使用别的基准时，导出前提醒一句**（0.15.9）。
  *
- * 导出默认从"我站的那份完整副本"算起；对方若还停在更老（或另一份）完整副本上，
- * 这份包它接不上。这里直接说清"从哪一份开始它才接得上"、以及本机有没有那份副本。
+ * 导出默认从"本机当前使用的那份完整备份"算起；对方若仍在使用更老（或另一份）完整备份上，
+ * 这份包它无法应用。这里直接说清"从哪一份开始它才接得上"、以及本机有没有那份副本。
  *
  * 只读 peer 文件；包目录没填 / 状态读不出 / peers 读不出都返回 null ——
  * 提示是加分项，不能反过来把导出拦住。
@@ -271,7 +271,7 @@ export function peerBaselineHint(plugin: LocallySavePlugin): string | null {
 		if (anchors.some(anchor => anchor.hash === peer.baselineHash)) {
 			return `${who} 以基准为准 ${short}：导出前把「更新包：从哪个状态开始」选成它，对方才接得上`;
 		}
-		return `${who} 以基准为准 ${short}，本机没有它的完整副本：让它发一份完整副本过来，或把本机这份基准发给它`;
+		return `${who} 以基准为准 ${short}，本机没有它的完整备份：让它发一份完整备份过来，或把本机这份基准发给它`;
 	});
 	return lines.join('；');
 }
@@ -287,22 +287,22 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 		return 'git 传输关着。打开上面的开关，再填地址。';
 	}
 	const base = bundleBaseDir(plugin.settings);
-	if (base === '') return '还没填「同步包文件夹」。去「同步包」那一页填一个仓库之外的目录。';
+	if (base === '') return '尚未填写「同步包文件夹」。请在「同步包」页填写一个仓库之外的目录。';
 	const remote = plugin.settings.gitRemote.trim();
-	if (remote === '') return '还没填「远程地址」。填一个私有仓库的 HTTPS 或 SSH 地址。';
+	if (remote === '') return '尚未填写「远程地址」。请填写一个私有仓库的 HTTPS 或 SSH 地址。';
 	const layout = detectGitLayoutSync(base);
 	if (!layout) {
-		return '还没接入。点下面「接入这个远程…」把同步包文件夹变成 git 仓库；'
+		return '尚未接入。请点击下方「接入这个远程…」将同步包文件夹初始化为 Git 仓库；'
 			+ '或者把它放进一个已有仓库的子目录（比如 kf-personal-data），插件会跟着那个仓库同步。';
 	}
 	const current = readOriginUrl(layout.repo);
 	if (!current) {
 		return layout.hosted
 			? `这个文件夹在仓库 ${layout.repo} 里，但那个仓库没有远程地址。先在仓库里配好 origin。`
-			: '还没接入。点下面「接入这个远程…」补上远程地址。';
+			: '尚未接入。请点击下方「接入这个远程…」补上远程地址。';
 	}
 	if (current !== remote) {
-		return `git 远程是 ${redactRemote(current)}，和设置里的地址不同。先改回来，或重新接入。`;
+		return `Git 远程为 ${redactRemote(current)}，与设置中的地址不同。请先改回，或重新接入。`;
 	}
 	const where = layout.hosted ? `${redactRemote(remote)}（子目录 ${layout.rel}）` : redactRemote(remote);
 
@@ -313,15 +313,15 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 		state = null;
 	}
 	const git = state?.git;
-	if (!git) return `已接上 ${where} · 还没同步过（点「现在同步一次」）`;
+	if (!git) return `已连接 ${where}，尚未同步（请点击「现在同步一次」）。`;
 	if (!git.ok) {
-		return `已接上 ${where} · 上次同步失败：${git.error ?? '看日志'}（点「测试连通性」查）`;
+		return `已连接 ${where}，上次同步失败。原因：${git.error ?? '详情见日志'}（请点击「测试连通性」排查）。`;
 	}
-	const bits = [`已接上 ${where}`, `${hhmm(git.at)} 推拉过`];
-	if (git.pulled > 0) bits.push(`收到 ${git.pulled} 个包`);
-	if (git.ahead > 0) bits.push(`${git.ahead} 个没推上去`);
-	if (git.behind > 0) bits.push(`落后 ${git.behind} 个提交`);
-	return bits.join(' · ');
+	const parts = [`已连接 ${where}，并在 ${hhmm(git.at)} 完成一次推送与拉取`];
+	if (git.pulled > 0) parts.push(`收到 ${git.pulled} 个同步包`);
+	if (git.ahead > 0) parts.push(`还有 ${git.ahead} 项未推送`);
+	if (git.behind > 0) parts.push(`还有 ${git.behind} 个提交待拉取`);
+	return `${parts.join('；')}。`;
 }
 
 /**
@@ -338,12 +338,12 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 	const lines: string[] = [];
 
 	if (base === '') {
-		lines.push('还没填「同步包文件夹」：去「同步包」那一页填一个仓库之外的目录');
+		lines.push('尚未填写「同步包文件夹」：请在「同步包」页填写一个仓库之外的目录');
 		new GitStatusModal(plugin.app, lines).open();
 		return;
 	}
 	if (remote === '') {
-		lines.push('还没填「远程地址」：填一个私有仓库的 HTTPS 或 SSH 地址');
+		lines.push('尚未填写「远程地址」：请填写一个私有仓库的 HTTPS 或 SSH 地址');
 		new GitStatusModal(plugin.app, lines).open();
 		return;
 	}
@@ -356,7 +356,7 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 	const version = await run(['--version'])
 		.catch(error => ({ code: -1, stdout: '', stderr: describe(error), timedOut: false }));
 	if (version.code !== 0) {
-		lines.push('git：没找到。装一个 Git（Windows 上是 Git for Windows），或在这一页填 git.exe 的路径。');
+		lines.push('Git：未找到。请安装 Git（Windows 上为 Git for Windows），或在本页填写 git.exe 的路径。');
 		new GitStatusModal(plugin.app, lines).open();
 		return;
 	}
@@ -373,18 +373,18 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 	const top = await run(['rev-parse', '--show-toplevel'])
 		.catch(() => ({ code: -1, stdout: '', stderr: '', timedOut: false }));
 	if (top.code === 0 && samePathText(top.stdout.trim(), base)) {
-		lines.push('接入状态：已经是 git 仓库（「接入这个远程…」会补上远程与排除规则）');
+		lines.push('接入状态：已是 Git 仓库（「接入这个远程…」会补上远程与排除规则）');
 	} else if (top.code === 0) {
 		lines.push(`接入状态：在仓库 ${top.stdout.trim()} 里的子目录（提交只涉及这一段，推的是那个仓库当前的分支）`);
 	} else {
-		lines.push('接入状态：还没接入（点「接入这个远程…」；也可以把它放进一个已有仓库的子目录）');
+		lines.push('接入状态：尚未接入（点击「接入这个远程…」；也可以将它放入已有仓库的子目录）');
 	}
 
 	// 真正联网的一步：ls-remote 会走 SSH / 凭据，把"连不上 / 没权限"当场暴露出来
 	const ls = await run(['ls-remote', '--heads', remote, branch], 60_000)
 		.catch(error => ({ code: -1, stdout: '', stderr: describe(error), timedOut: false }));
 	if (ls.timedOut) {
-		lines.push('连通性：超时。网络或凭据卡住了；SSH 可能停在问口令或确认主机指纹。');
+		lines.push('连通性：超时。网络或凭据阻塞；SSH 可能在等待口令或确认主机校验值。');
 	} else if (ls.code === 0) {
 		lines.push(ls.stdout.trim() !== ''
 			? `连通性：正常，远程有分支 ${branch}`
@@ -398,7 +398,7 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 	new GitStatusModal(plugin.app, lines, () => { void syncGitNow(plugin, { manual: true }); }).open();
 }
 
-/** 货架 `.git/config` 里 `origin` 的地址（读不到返回 null） */
+/** 远程仓库 `.git/config` 里 `origin` 的地址（读不到返回 null） */
 function readOriginUrl(repo: string): string | null {
 	try {
 		const text = fs.readFileSync(path.join(repo, '.git', 'config'), 'utf8');
@@ -412,7 +412,7 @@ function readOriginUrl(repo: string): string | null {
 /**
  * 同步读一眼这个文件夹在 git 里的身份（设置页是同步渲染的，等不了 `readShelfLayout`）。
  *
- * 往上找第一个带 `.git` 的目录：就是它 → 独立货架；在它上面 → 别人仓库的子目录。
+ * 往上找第一个带 `.git` 的目录：就是它 → 独立远程仓库；在它上面 → 别人仓库的子目录。
  */
 function detectGitLayoutSync(base: string): { repo: string; rel: string; hosted: boolean } | null {
 	const target = path.resolve(base);
@@ -455,13 +455,13 @@ function hhmm(ms: number): string {
 }
 
 /**
- * 首次接入：把包文件夹初始化成 git 仓库、接上远程（只做这一次）。
+ * 首次接入：把同步包文件夹初始化成 git 仓库、接上远程（只做这一次）。
  *
  * 之后所有同步都走 `syncGitNow` —— 用户不点这个按钮，插件不会自己往文件夹里写 `.git`。
  */
 export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void> {
 	if (!plugin.settings.gitEnabled) {
-		new Notice('先打开「启用 git 传输」');
+		new Notice('请先开启「启用 Git 传输」');
 		return;
 	}
 	const shelf = shelfOptions(plugin);
@@ -485,7 +485,7 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 		plugin.gitBackoffUntil = 0;
 	} catch (error) {
 		const message = describe(error);
-		new Notice(`接入失败：${brief(message)}`, 8000);
+		new Notice(`接入失败。原因：${brief(message)}。`, 8000);
 		plugin.log.error('接入 git 远程失败', error);
 		return;
 	} finally {
@@ -497,9 +497,9 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 	if (synced) {
 		new Notice(
 			created
-				? '已接入 git：之后留包会自动提交并推送'
+				? '已接入 Git：此后导出会自动提交并推送'
 				: hosted
-					? '这个文件夹已经在仓库里：不新建仓库，跟着那个仓库当前的分支走（提交只涉及这一段）'
+					? '该文件夹已在远程仓库中：不新建仓库，使用该仓库当前分支（仅提交这一段）'
 					: '已经接入过，这一轮也同步完了',
 			8000,
 		);
@@ -515,7 +515,7 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 	if (!plugin.settings.enabled) return;
 	if (!plugin.settings.gitEnabled) {
-		new Notice('先打开「启用 git 传输」：设置 → Git 远程');
+		new Notice('请先开启「启用 Git 传输」：设置 → Git 远程');
 		return;
 	}
 	const shelf = shelfOptions(plugin);
@@ -524,13 +524,13 @@ export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 		return;
 	}
 	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) {
-		new Notice('这个文件夹还没接上 git：先点「接入这个远程…」', 9000);
+		new Notice('同步包文件夹尚未连接 Git：请先点击「接入这个远程…」', 9000);
 		return;
 	}
 
 	let exported: string | null = null;
 	try {
-		// 不管自动留包开没开：用户明确点了"推"，有改动就导一份（引擎在没变化时返回 file: null）
+		// 不管自动导出开没开：用户明确点了"推"，有改动就导一份（引擎在没变化时返回 file: null）
 		const result = await exportBundle({
 			settings: plugin.settings,
 			log: plugin.log,
@@ -543,14 +543,14 @@ export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 		});
 		exported = result.file;
 	} catch (error) {
-		new Notice(`导出失败：${brief(describe(error))}`, 8000);
+		new Notice(`导出失败。原因：${brief(describe(error))}。`, 8000);
 		return;
 	}
 
 	// 只留一句总结：`syncGitNow` 手动模式自己也会弹一条，两条叠在一起用户要读两遍
 	const synced = await syncGitNow(plugin, { quiet: true });
 	if (!synced) {
-		new Notice('推拉失败：看状态栏或日志。已经导出的包会在下次同步时再推', 9000);
+		new Notice('推送或拉取失败：详情见状态栏或日志；已导出的包会在下次同步时重试', 9000);
 		return;
 	}
 	new Notice(exported ? '已推送，等对方拉取并应用' : '没有新改动，远程已是最新', 6000);
@@ -560,13 +560,13 @@ export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
  * 「让我和对面一致」：拉下来，然后用对方最新的更新包**严格对齐**到它那一份状态。
  *
  * 对齐全走引擎的严格镜像：本机改过的、多出来的文件先移到回收目录（备份），
- * 目标状态 ＝ 我站的基准 ＋ 包里的条目 − 包点名的删除 —— 正好是对方那一点，做完状态编号一致。
+ * 目标状态 ＝ 本机的基准 ＋ 包里的条目 − 包点名的删除 —— 正好是对方那一点，做完内容校验值一致。
  * 会覆盖本机内容，所以先弹一句确认。
  */
 export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 	if (!plugin.settings.enabled) return;
 	if (!plugin.settings.gitEnabled) {
-		new Notice('先打开「启用 git 传输」：设置 → Git 远程');
+		new Notice('请先开启「启用 Git 传输」：设置 → Git 远程');
 		return;
 	}
 	const shelf = shelfOptions(plugin);
@@ -575,7 +575,7 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 		return;
 	}
 	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) {
-		new Notice('这个文件夹还没接上 git：先点「接入这个远程…」', 9000);
+		new Notice('同步包文件夹尚未连接 Git：请先点击「接入这个远程…」', 9000);
 		return;
 	}
 
@@ -608,8 +608,8 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 		title: '让我和对面一致',
 		lines: [
 			`会用对方的更新包「${target.name}」把本机改成对面那一份状态。`,
-			'本机改过或多出来的文件会先移到回收目录（.trash/locally-save），能捞回来。',
-			'做完两边状态编号应当一致；你的新改动之后靠「让对面和我一致」推回去。',
+			'本机改动或新增的文件会先移入回收目录，可从回收目录恢复。',
+			'做完两边内容校验值应当一致；你的新改动之后靠「让对面和我一致」推回去。',
 		],
 		confirmText: '以对面为准',
 		onConfirm: () => { void applyAlign(plugin, target.file); },
@@ -617,16 +617,16 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 }
 
 /**
- * **刷新包：把货架对齐到远程**（用户点的动作）。
+ * **刷新包：把远程仓库对齐到远程**（用户点的动作）。
  *
  * 用户现场："包弄乱了我会删，这时候要从远程重新拉最新的……现在删了他就不会拉了，
  * 一直拉不下来。" 自动同步碰上"本地有提交 + 远程也有提交"必须停下（不能替用户 rebase 仓库），
- * 于是给一个明确的出口：丢掉货架那一段的本地提交/改动，整段对齐远程，再把新包捡起来。
+ * 于是给一个明确的出口：丢掉远程仓库那一段的本地提交/改动，整段对齐远程，再把新包捡起来。
  */
 export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<void> {
 	if (!plugin.settings.enabled) return;
 	if (!plugin.settings.gitEnabled) {
-		new Notice('先打开「启用 git 传输」：设置 → Git 远程');
+		new Notice('请先开启「启用 Git 传输」：设置 → Git 远程');
 		return;
 	}
 	const shelf = shelfOptions(plugin);
@@ -635,7 +635,7 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 		return;
 	}
 	if (!(await isShelf(shelf.dir, { gitPath: shelf.gitPath }))) {
-		new Notice('这个文件夹还没接上 git：先点「接入这个远程…」', 9000);
+		new Notice('同步包文件夹尚未连接 Git：请先点击「接入这个远程…」', 9000);
 		return;
 	}
 	if (plugin.gitBusy || plugin.bundleBusy || plugin.incomingBusy || isApplying()) {
@@ -658,13 +658,13 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 				'刷新是「整段对齐远程」：本地还没推上去的东西会被丢掉，远程还留着的包会重新拉下来。',
 			];
 			if (pending > 0) {
-				lines.push(`有 ${pending} 处删除还没推上去 —— 刷完之后那些包会回来。`);
+				lines.push(`有 ${pending} 处删除尚未推送：刷新后那些包会重新出现。`);
 			}
-			if (ahead > 0) lines.push(`本地还有 ${ahead} 笔提交没推上去（可能含刚导的包 / 刚删的包）。`);
+			if (ahead > 0) lines.push(`本地还有 ${ahead} 次提交未推送（可能包含刚导出的包或刚删除的包）。`);
 			lines.push('确定要丢吗？只想把删除推走，先点一次「立即同步」。');
 			const ok = await new Promise<boolean>(resolve => {
 				const modal = new ConfirmModal(plugin.app, {
-					title: '刷新会丢掉本地没推上去的改动',
+					title: '刷新将丢弃本地未推送的改动',
 					lines,
 					confirmText: '仍然刷新',
 					onResolve: value => { resolve(value); void modal; },
@@ -691,18 +691,18 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 			`刷新包：丢掉本地 ${report.dropped} 笔提交，新到 ${report.pulled.length} 个包（HEAD ${report.head ?? '?'}）`,
 		);
 		new Notice(
-			`货架已对齐远程 · 丢掉本地 ${report.dropped} 笔货架提交`
+			`已与远程仓库对齐，丢弃本地 ${report.dropped} 次提交。`
 				+ `，新到 ${report.pulled.length} 个包`,
 			8000,
 		);
 		await refreshStatusBar(plugin);
-		// 新到的包可能就是要应用的那一份：按当前方向再走一遍收包
+		// 新到的包可能就是要应用的那一份：按当前方向再走一遍接收
 		if (report.pulled.length > 0) await syncGitNow(plugin, { quiet: true });
 	} catch (error) {
 		plugin.reportProgress(null);
 		const message = error instanceof Error ? error.message : String(error);
-		new Notice(`刷新失败：${message}`, 9000);
-		plugin.log.error('刷新货架失败', error);
+		new Notice(`刷新失败。原因：${message}。`, 9000);
+		plugin.log.error('刷新远程仓库失败', error);
 	} finally {
 		plugin.gitBusy = false;
 	}
@@ -725,19 +725,19 @@ async function applyAlign(plugin: LocallySavePlugin, file: string): Promise<void
 	try {
 		const plan = await planBundleApply(options);
 		const result = await executeBundlePlan(plan, options);
-		// 状态变了：赶紧把"我现在的状态"写进货架，别让对面看到旧的那份
+		// 状态变了：赶紧把"我现在的状态"写进远程仓库，别让对面看到旧的那份
 		const state = await loadState(plugin.stateFile());
 		const peer = await writePeer(bundleBaseDir(plugin.settings), state, plugin.vaultName());
 		if (peer.error) plugin.log.debug(`写本机状态失败：${peer.error}`);
 		await syncGitNow(plugin, { quiet: true });
 		new Notice(
 			result.stateIdCompare === 'match'
-				? '已和对面一致'
-				: '应用完了，编号还差一点（看更新记录）',
+				? '已与对方一致'
+				: '应用完成，但内容校验值尚未完全一致（详情见更新记录）',
 			6000,
 		);
 	} catch (error) {
-		new Notice(`应用失败：${brief(describe(error))}`, 8000);
+		new Notice(`应用失败。原因：${brief(describe(error))}。`, 8000);
 		plugin.log.error('按对方对齐失败', error);
 	}
 }
@@ -755,7 +755,7 @@ export async function checkGitEnvironment(plugin: LocallySavePlugin): Promise<vo
 	const lines: string[] = [];
 	lines.push(version.code === 0
 		? `git：${version.stdout.trim()}`
-		: 'git：没找到。装一个 Git（Windows 上是 Git for Windows），或在这一页填 git.exe 的路径。');
+		: 'Git：未找到。请安装 Git（Windows 上为 Git for Windows），或在本页填写 git.exe 的路径。');
 
 	if (!shelf) {
 		lines.push('还没填全：「同步包文件夹」与「远程地址」');
@@ -771,14 +771,14 @@ export async function checkGitEnvironment(plugin: LocallySavePlugin): Promise<vo
 				+ ` · ${status.dirty ? '有包还没提交' : '干净'}`);
 			lines.push(`与远程：领先 ${status.ahead}、落后 ${status.behind}`);
 			lines.push(`方向：${DIRECTION_OPTIONS[plugin.settings.syncDirection]}`);
-			// 对表：对方现在在哪一步（货架里的 `.lsave-peers/*.json`）
+			// 对表：对方现在在哪一步（远程仓库里的 `.lsave-peers/*.json`）
 			try {
 				const state = await loadState(plugin.stateFile());
-				lines.push(`我这台：状态 ${state.stateId?.id ?? '还没算过'} · 第 ${state.generation} 代`
+				lines.push(`我这台的内容校验值是 ${state.stateId?.id ?? '尚未计算'}，当前是第 ${state.generation} 版。`
 					+ ` · 基准 ${state.bundle?.fullGeneration ?? '?'} 代 ${state.bundle?.fullHash ?? '未记'}`);
 				const peers = readPeers(shelf.dir, state.copyId);
 				if (peers.length === 0) {
-					lines.push('另一台：还没上报状态（它同步过一次之后才有）');
+					lines.push('另一台尚未上报状态（它完成一次同步后才会出现）。');
 				} else {
 					for (const peer of peers) {
 						lines.push(describePeerDetail(peer, state.stateId?.id ?? null, state.stateId?.at ?? 0));
@@ -793,7 +793,7 @@ export async function checkGitEnvironment(plugin: LocallySavePlugin): Promise<vo
 	new GitStatusModal(plugin.app, lines, () => { void syncGitNow(plugin, { manual: true }); }).open();
 }
 
-/** 在系统文件管理器里打开货架（包文件夹不存在时说明一句） */
+/** 在系统文件管理器里打开远程仓库（同步包文件夹不存在时说明一句） */
 export function openShelfFolder(plugin: LocallySavePlugin): void {
 	const base = bundleBaseDir(plugin.settings);
 	if (base === '') {
@@ -801,7 +801,7 @@ export function openShelfFolder(plugin: LocallySavePlugin): void {
 		return;
 	}
 	if (!fs.existsSync(base)) {
-		new Notice(`这个文件夹还不存在：${base}（先在「导出同步包…」里导一次）`, 9000);
+		new Notice(`同步包文件夹还不存在：${base}（请先在「导出同步包…」里导出一次）`, 9000);
 		return;
 	}
 	openFolderInExplorer(base, plugin.app as unknown as { openWithDefaultApp?: (path: string) => void });
@@ -820,7 +820,7 @@ async function rememberGit(plugin: LocallySavePlugin, record: GitSyncRecord): Pr
 }
 
 /**
- * 手动推拉那一句：**git 这一层**干了什么 + **内容这一层**各台机器对不对得上。
+ * 手动推送和拉取那一句：**git 这一层**干了什么 + **内容这一层**各台机器对不对得上。
  *
  * 不再只写"同步完成"：推上去不等于对方应用了，更不等于两边内容一样；
  * `peer` 那半句来自 `.lsave-peers`（状态栏同一套判据），会明确说"一致 / 待上报 / 不同步"。
@@ -829,7 +829,7 @@ function describeReport(report: GitSyncReport, peer?: string | null): string {
 	const parts: string[] = [];
 	if (report.pulled.length > 0) parts.push(`收到 ${report.pulled.length} 个包`);
 	const action = report.pushed
-		? (report.pulled.length > 0 ? '已推拉' : '已推送')
+		? (report.pulled.length > 0 ? '已完成推送和拉取' : '已推送')
 		: (report.pulled.length > 0 ? '已拉取' : '远程已是最新');
 	parts.push(action);
 	if (report.committed && !report.pushed) parts.push('本地已提交、还没推');

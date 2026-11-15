@@ -21,9 +21,9 @@ import { formatStamp } from '../utils/format';
  * 顺序不能换：**先提交再拉**。倒过来的话，本地刚写出来、还没提交的包会让 rebase 拒绝开工；
  * 而先提交的那一笔要是推送失败，下一次同步会原样再试（提交本身不联网，失败了也不丢东西）。
  *
- * 0.16 起货架可能是**别人仓库里的一个子目录**（比如 `kf-personal-data/locally-save`）。
+ * 0.16 起远程仓库可能是**别人仓库里的一个子目录**（比如 `kf-personal-data/locally-save`）。
  * 那种形态下这个模块的纪律更紧（细节见 `shelf.ts`）：
- * - 提交只认货架自己那一段（`git add -A -- .`，cwd 就在货架里），绝不整仓 `add -A`；
+ * - 提交只认远程仓库自己那一段（`git add -A -- .`，cwd 就在远程仓库里），绝不整仓 `add -A`；
  * - **绝不 rebase、绝不 abort** 外层仓库的合并 —— 那里可能有用户的提交和正在做的事；
  *   对不齐就报错停下，让人来处理；
  * - 推的是外层仓库当前的**整个分支**（git 只能推分支），这一点界面上会写明。
@@ -44,13 +44,13 @@ export interface GitSyncReport {
 	behind: number;
 	/** 现在的 HEAD（空仓库是 null） */
 	head: string | null;
-	/** 这一趟是不是刚建了货架（界面上要说一句"接上了"） */
+	/** 这一趟是不是刚建了远程仓库（界面上要说一句"接上了"） */
 	createdShelf: boolean;
-	/** 货架是外层仓库的子目录（提交/推送只涉及货架那一段，但推的是整个分支） */
+	/** 远程仓库是外层仓库的子目录（提交/推送只涉及远程仓库那一段，但推的是整个分支） */
 	hosted: boolean;
 }
 
-/** 把货架和远程对一遍（幂等：没有变化时只花几条本地 git 命令） */
+/** 把远程仓库和远程对一遍（幂等：没有变化时只花几条本地 git 命令） */
 export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	/**
 	 * **同步是五个步骤**，步骤号在这里定，别在界面那边另编一套。
@@ -178,7 +178,7 @@ export async function pushWithRetry(
  *
  * 现在分成两件事：
  * 1. **先把 HEAD 里那份取回来、移到本机回收站**（`bundles-trash/<时间戳>/`）——
- *    误删也捞得回来，回收站不进仓库、不占货架；
+ *    误删也可以恢复，回收站不进仓库、不占远程仓库；
  * 2. **记一笔"撤下"记号**，这一轮就会把删除提交并推走：远程和别的机器一起没掉。
  *
  * 唯一例外：`.lsave-peers/*.json` 是各台机器的对表文件，不是包 —— 少一个只说明
@@ -239,14 +239,14 @@ export interface ShelfRefreshReport {
 }
 
 /**
- * **刷新包：把货架对齐到远程**（用户点的动作，不是自动的）。
+ * **刷新包：把远程仓库对齐到远程**（用户点的动作，不是自动的）。
  *
  * 用户现场："包弄乱了我会删，这时候要从远程重新拉最新的……现在删了他就不会拉了"。
  * 自动同步遇到"本地有提交 + 远程也有提交"时会停下（绝不能悄悄 rebase 用户的仓库），
  * 所以给它一个**明确的**出口：
  *
  * 1. `fetch` 远程；
- * 2. 子目录形态下先确认"本地多出来的提交只动货架那一段、货架之外没有未提交改动"
+ * 2. 子目录形态下先确认"本地多出来的提交只动远程仓库那一段、远程仓库之外没有未提交改动"
  *    —— 不满足就报错，绝不动用户的其它文件；
  * 3. `reset --hard origin/<分支>`（只重置，不合并、不留冲突），清掉"主动撤下"记号；
  * 4. 返回新出现哪些包（界面接着说"新到 N 个包"）。
@@ -278,10 +278,10 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
 		await assertCleanOutsideShelf(git, layout);
 		await assertOnlyShelfCommits(git, layout, branch);
 	}
-	stage(2, '把货架对齐到远程…');
+	stage(2, '把远程仓库对齐到远程…');
 	const before = await listBundlePaths(dir, options.trashDir);
 	const reset = await git(['reset', '--hard', `origin/${branch}`]);
-	if (reset.code !== 0) throw gitFailure('把货架对齐到远程', reset);
+	if (reset.code !== 0) throw gitFailure('把远程仓库对齐到远程', reset);
 	clearRemovals(dir);
 	const after = await listBundlePaths(dir, options.trashDir);
 	const pulled = [...after].filter(item => !before.has(item)).sort();
@@ -294,13 +294,13 @@ export async function refreshShelf(options: ShelfOptions): Promise<ShelfRefreshR
 }
 
 /**
- * 子目录货架刷新前的闸门：**只同意丢掉"货架那一段"的本地提交/改动**。
+ * 子目录远程仓库刷新前的闸门：**只同意丢掉"远程仓库那一段"的本地提交/改动**。
  *
  * 外层是用户的仓库（可能还有别的项目在里面），`reset --hard` 会把整棵工作树对齐远程 ——
- * 只要有一笔提交或一处改动落在货架之外，就不能替用户决定（报错，让他自己处理）。
+ * 只要有一笔提交或一处改动落在远程仓库之外，就不能替用户决定（报错，让他自己处理）。
  */
 /**
- * 闸门之一：**货架之外不许有未提交的改动**（合并 / rebase 都要一棵能动的树）。
+ * 闸门之一：**远程仓库之外不许有未提交的改动**（合并 / rebase 都要一棵能动的树）。
  *
  * 只看工作区与暂存区（`git diff HEAD`），**不看已提交的历史** —— 已提交的东西 rebase 会接着演，
  * 冲突就 abort，用户不会丢活；把它也算成"越界"会让正常分叉永远同步不过去（0.16.8 改的）。
@@ -315,16 +315,16 @@ async function assertCleanOutsideShelf(git: GitRunner, layout: ShelfLayout): Pro
 		.filter(item => prefix === '' || !item.startsWith(prefix));
 	if (dirty.length > 0) {
 		throw new Error(
-			`仓库里还有货架之外的未提交改动（${dirty[0]}…）：先提交或 stash，再来同步`,
+			`仓库里还有远程仓库之外的未提交改动（${dirty[0]}…）：先提交或 stash，再来同步`,
 		);
 	}
 }
 
 /**
- * 闸门之二（**只有「刷新包」用**）：本地没推的提交**每一笔都只动货架那一段**。
+ * 闸门之二（**只有「刷新包」用**）：本地没推的提交**每一笔都只动远程仓库那一段**。
  *
- * 刷新是 `reset --hard origin/<分支>`：它会**丢掉**那些提交，所以必须确认丢的都是货架上的包；
- * 动过货架之外的一律拒绝（那些活不能替用户丢）。自动 rebase 不走这道闸 —— 它保留提交。
+ * 刷新是 `reset --hard origin/<分支>`：它会**丢掉**那些提交，所以必须确认丢的都是远程仓库上的包；
+ * 动过远程仓库之外的一律拒绝（那些活不能替用户丢）。自动 rebase 不走这道闸 —— 它保留提交。
  */
 async function assertOnlyShelfCommits(
 	git: GitRunner,
@@ -343,7 +343,7 @@ async function assertOnlyShelfCommits(
 			.filter(item => prefix === '' || !item.startsWith(prefix));
 		if (outside.length > 0) {
 			throw new Error(
-				`本地有 ${list.length} 笔提交没推到远程，而且改到了货架之外（${outside[0]}…）：`
+				`本地有 ${list.length} 笔提交没推到远程，而且改到了远程仓库之外（${outside[0]}…）：`
 				+ '先在仓库里把它们处理掉，再来刷新（插件不会替你的仓库做 reset）',
 			);
 		}
@@ -352,7 +352,7 @@ async function assertOnlyShelfCommits(
 
 /** 本机的包 → 一笔提交（没有变化就跳过，不产生空提交） */
 async function commitPending(git: GitRunner): Promise<{ commit: string; files: string[] } | null> {	// `git add -A` 只加得进 `.git/info/exclude` 放行的那几类（见 shelf.ts）：包，以及已跟踪文件的增删
-	// （完整包与回收站都被挡在外面 —— 完整包不推，回收站不进仓库）
+	// （完整备份与回收站都被挡在外面 —— 完整备份不推，回收站不进仓库）
 	const add = await git(['add', '-A']);
 	if (add.code !== 0) throw gitFailure('把包加进仓库', add);
 
@@ -372,9 +372,9 @@ async function commitPending(git: GitRunner): Promise<{ commit: string; files: s
 }
 
 /**
- * 子目录形态的提交：**只提交货架自己那一段**。
+ * 子目录形态的提交：**只提交远程仓库自己那一段**。
  *
- * cwd 就在货架里，所以 `-- .` 正好圈住它；`commit` 也带同一个 pathspec，
+ * cwd 就在远程仓库里，所以 `-- .` 正好圈住它；`commit` 也带同一个 pathspec，
  * 外层仓库里用户自己暂存的文件不会被顺手提交进去。
  */
 async function commitScoped(
@@ -422,13 +422,13 @@ async function fetchRemote(git: GitRunner, branch: string): Promise<FetchOutcome
 /**
  * 把 `FETCH_HEAD` 变成本地。
  *
- * 独立货架：能快进就快进 → 不行就 rebase（线性、不留合并提交）→ 再不行 merge。
+ * 独立远程仓库：能快进就快进 → 不行就 rebase（线性、不留合并提交）→ 再不行 merge。
  *
  * **子目录形态（0.16.6 起）**：快进不行时，先过一道闸 ——
- * 本地没推的提交**全都在货架那一段**、而且货架之外没有未提交改动 → 做一次**限定范围的 rebase**；
- * 撞上"两边改了同一个文件"或者动了货架之外的东西，一律**报错不动**（那是用户的仓库，
+ * 本地没推的提交**全都在远程仓库那一段**、而且远程仓库之外没有未提交改动 → 做一次**限定范围的 rebase**；
+ * 撞上"两边改了同一个文件"或者动了远程仓库之外的东西，一律**报错不动**（那是用户的仓库，
  * 插件不替他 reset / 合并）。用户的原话："两边同时改，改完就推不过去，一直卡着" ——
- * 货架上两边各写各的包、各写各的对表文件，本来就不该卡死。
+ * 远程仓库上两边各写各的包、各写各的对表文件，本来就不该卡死。
  */
 async function mergeFetched(git: GitRunner, layout: ShelfLayout | null): Promise<void> {
 	const hosted = layout?.hosted === true;
@@ -462,14 +462,14 @@ async function mergeFetched(git: GitRunner, layout: ShelfLayout | null): Promise
 }
 
 /**
- * 子目录货架的"限定范围对齐"：闸门过了才 rebase，否则把原因原样报出去。
+ * 子目录远程仓库的"限定范围对齐"：闸门过了才 rebase，否则把原因原样报出去。
  *
- * 闸门（`assertOnlyShelfLocalChanges`）：本地没推的提交**每一笔都只动货架那一段**，
- * 货架之外没有未提交改动。少一条都说明外层仓库里有用户自己的活，插件不能替他重写历史。
+ * 闸门（`assertOnlyShelfLocalChanges`）：本地没推的提交**每一笔都只动远程仓库那一段**，
+ * 远程仓库之外没有未提交改动。少一条都说明外层仓库里有用户自己的活，插件不能替他重写历史。
  */
 async function alignHostedShelf(git: GitRunner, layout: ShelfLayout): Promise<void> {
-	// 只要求"货架之外没有**未提交**的改动"：rebase 要一棵能动的树。
-	// **已提交**的改动（哪怕在货架之外）不拦 —— rebase 会把它们接着演下去，冲突就 abort，
+	// 只要求"远程仓库之外没有**未提交**的改动"：rebase 要一棵能动的树。
+	// **已提交**的改动（哪怕在远程仓库之外）不拦 —— rebase 会把它们接着演下去，冲突就 abort，
 	// 用户的活不会丢。0.16.8 之前这条收得太窄，把"两台机器各改各的其它文件"也判成越界，
 	// 结果正常分叉永远同步不过去（对面报的就是这个）。
 	await assertCleanOutsideShelf(git, layout);
@@ -478,7 +478,7 @@ async function alignHostedShelf(git: GitRunner, layout: ShelfLayout): Promise<vo
 	await git(['rebase', '--abort']);
 	throw new Error(
 		'远程有新提交，本地也有没推的提交，而且**同一批文件两边都动了**（rebase 冲突）。\n'
-		+ '插件不替你合并冲突：可以先用「刷新包（对齐远程）」丢掉本地货架那几笔提交再拉一遍，'
+		+ '插件不替你合并冲突：可以先用「刷新包（对齐远程）」丢掉本地远程仓库那几笔提交再拉一遍，'
 		+ '或者手工在仓库里处理。',
 	);
 }
@@ -536,7 +536,7 @@ function pushOnce(git: GitRunner, branch: string): Promise<GitResult> {
 }
 
 /**
- * 货架上现在有哪些包（相对路径，正斜杠；给"这一趟拉下来哪些"对账用）。
+ * 远程仓库上现在有哪些包（相对路径，正斜杠；给"这一趟拉下来哪些"对账用）。
  *
  * 跳过 `.git`、回收站与符号链接 —— 它们都不该出现在账里。
  */
@@ -574,11 +574,11 @@ async function listBundlePaths(dir: string, trashDir?: string | null): Promise<S
 }
 
 /**
- * 货架里有没有"还没提交的东西"（只看本地，不联网）。
+ * 远程仓库里有没有"还没提交的东西"（只看本地，不联网）。
  *
  * 节拍靠它判断"要不要现在跑一次同步"：本机刚留了包 → 脏 → 下一个 30 秒就提交 + 推送。
- * 独立货架用整仓 `status`（被 `.git/info/exclude` 挡住的完整包、回收站不会让它变脏）；
- * 子目录形态只看货架自己那一段 —— 外层仓库里用户改了别的文件，不该让插件一直"以为有活干"。
+ * 独立远程仓库用整仓 `status`（被 `.git/info/exclude` 挡住的完整备份、回收站不会让它变脏）；
+ * 子目录形态只看远程仓库自己那一段 —— 外层仓库里用户改了别的文件，不该让插件一直"以为有活干"。
  */
 export async function shelfIsDirty(options: ShelfOptions): Promise<boolean> {
 	const dir = path.resolve(options.dir);
@@ -600,11 +600,11 @@ export interface ShelfStatus {
 	dirty: boolean;
 	ahead: number;
 	behind: number;
-	/** 货架是外层仓库的子目录（界面上要说清"推的是整个分支"） */
+	/** 远程仓库是外层仓库的子目录（界面上要说清"推的是整个分支"） */
 	hosted: boolean;
 }
 
-/** 读一眼货架现状（"检查环境"用；不会 fetch、不会 init） */
+/** 读一眼远程仓库现状（"检查环境"用；不会 fetch、不会 init） */
 export async function readShelfStatus(options: ShelfOptions): Promise<ShelfStatus> {
 	const dir = path.resolve(options.dir);
 	const git = gitRunner(options);

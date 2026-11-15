@@ -98,7 +98,7 @@ export async function testSshHost(host: string): Promise<{ ok: boolean; text: st
 	const hint = ok
 		? null
 		: /host key verification failed/i.test(text)
-			? '这台机器还没确认过远程主机的指纹：先在终端跑一次 ssh -T git@' + host
+			? '这台机器还没确认过远程主机的校验值：先在终端跑一次 ssh -T git@' + host
 				+ '，看到 "successfully authenticated" 之后再点测试'
 			: null;
 	return { ok, text: text || `ssh 退出码 ${result.code}`, ...(hint ? { hint } : {}) };
@@ -173,7 +173,7 @@ function runTool(file: string, args: string[], timeoutMs: number): Promise<ToolR
 			encoding: 'utf8',
 			env: {
 				...process.env,
-				// SSH 要能问到主机指纹 / 口令时，宁可失败也别把插件挂住
+				// SSH 要能问到主机校验值 / 口令时，宁可失败也别把插件挂住
 				GIT_TERMINAL_PROMPT: '0',
 			},
 		}, (error, stdout, stderr) => {

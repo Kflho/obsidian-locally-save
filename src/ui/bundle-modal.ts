@@ -30,7 +30,7 @@ const MAX_LISTED = 50;
  * 导出同步包。
  *
  * 两个选项都能在这里临时改：设置里的默认值只是"平时用哪个"，
- * 偶尔导一份完整包给别人时不该被迫先去改设置。
+ * 偶尔导一份完整备份给别人时不该被迫先去改设置。
  */
 export class ExportBundleModal extends Modal {
 	private plugin: LocallySavePlugin;
@@ -42,10 +42,10 @@ export class ExportBundleModal extends Modal {
 	/** 设置里那个包目录：显示成灰底提示，而不是预先填进输入框 */
 	private defaultDir: string;
 	/**
-	 * 更新包的起点与终点（`''` ＝ 最新，其余是**基准指纹**）。
+	 * 更新包的起点与终点（`''` ＝ 最新，其余是**基准校验值**）。
 	 *
 	 * 与设置里那两个下拉是**同一项设置**：这里改了会记住（设置面板里也变了）——
-	 * "给哪台机器导"是件延续的事，今天选的起点，明天自动留包时也该照它算。
+	 * "给哪台机器导"是件延续的事，今天选的起点，明天自动导出时也该照它算。
 	 */
 	private fromState: string;
 	private toState: string;
@@ -59,7 +59,7 @@ export class ExportBundleModal extends Modal {
 	constructor(app: App, plugin: LocallySavePlugin, options: { wantChanges?: boolean; wantFull?: boolean } = {}) {
 		super(app);
 		this.plugin = plugin;
-		// 允许调用方预置勾选（比如"基准对不上 → 导一份完整副本发过去"那条路）
+		// 允许调用方预置勾选（比如"基准不一致 → 导一份完整备份发过去"那条路）
 		if (options.wantChanges !== undefined) this.wantChanges = options.wantChanges;
 		if (options.wantFull !== undefined) this.wantFull = options.wantFull;
 		// 只显示"用户自己填的"；留空就是留空，别把默认值预先填进去 ——
@@ -76,11 +76,11 @@ export class ExportBundleModal extends Modal {
 	}
 
 	/**
-	 * 把"本地有哪些状态"填进两个下拉：**有几份完整包就有几个状态**，外加「最新」。
+	 * 把"本地有哪些状态"填进两个下拉：**有几份完整备份就有几个状态**，外加「最新」。
 	 *
-	 * 0.14 起候选**只有完整副本**（`listFullAnchorsSync`）：更新包只有"完整包 → 另一份完整包"
-	 * 与"完整包 → 最新状态"两种，任何一端都不是"链条上的某个中间点"
-	 * （那种点随链条模型一起删掉了，见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）。
+	 * 0.14 起候选**只有完整备份**（`listFullAnchorsSync`）：更新包只有"完整备份 → 另一份完整备份"
+	 * 与"完整备份 → 最新状态"两种，任何一端都不是"链条上的某个中间点"
+	 * （那种点随链条模型一起删掉了，见 `bin/reference_docs/technical_solution_docs/只有完整备份才算基准-实施计划.md`）。
 	 *
 	 * 用同步那套读法（设置面板里那两个下拉也是它），当场就能列出来 ——
 	 * 在窗口里换了包目录也会重新列一遍。读不出来时至少留着「最新」，
@@ -109,7 +109,7 @@ export class ExportBundleModal extends Modal {
 			// 选中的那份包已经不在目录里了：照样列出来并标一下 ——
 			// 悄悄跳回「最新」的话，用户会以为选的还是那一份
 			if (value !== '' && !(value in options)) {
-				dropdown.addOption(value, `基准 ${value}（这个目录里找不到这一个完整副本）`);
+				dropdown.addOption(value, `基准 ${value}（这个目录里找不到这一个完整备份）`);
 			}
 			dropdown.setValue(value);
 		};
@@ -117,7 +117,7 @@ export class ExportBundleModal extends Modal {
 		fill(this.toDropdown, 'to', this.toState);
 	}
 
-	/** 这两个选择**写回设置**：留包（含自动留包）以后都按它算 */
+	/** 这两个选择**写回设置**：导出（含自动导出）以后都按它算 */
 	private async persistStates(): Promise<void> {
 		this.plugin.settings.changesFromState = this.fromState;
 		this.plugin.settings.changesToState = this.toState;
@@ -128,7 +128,7 @@ export class ExportBundleModal extends Modal {
 		}
 	}
 
-	/** 我站的那一份完整副本是第几代（`state.bundle`）：默认起点就是它，还没有时返回 null */
+	/** 本机当前使用的这一份完整备份是第几代（`state.bundle`）：默认起点就是它，还没有时返回 null */
 	private mineGeneration(): number | null {
 		try {
 			const state = loadStateSync(this.plugin.stateFile());
@@ -139,7 +139,7 @@ export class ExportBundleModal extends Modal {
 		}
 	}
 
-	/** 选中的那一份完整副本，找不到就是 null —— 只用来显示第几代 */
+	/** 选中的那一份完整备份，找不到就是 null —— 只用来显示第几代 */
 	private pickedAnchor(fingerprint: string): AnchorRef | null {
 		if (fingerprint === '') return null;
 		try {
@@ -154,8 +154,8 @@ export class ExportBundleModal extends Modal {
 	/**
 	 * 这次更新包「从哪一份到哪一份」那句话（没勾更新包时不显示）。
 	 *
-	 * 0.14 起起点只有两种：**你站的那一份完整副本**（默认），或者你在这个窗口里明确选的那一份；
-	 * 终点默认是**最新**（当前仓库），也可以是另一份完整副本（那样导的是"完整包 → 完整包"的差量包，
+	 * 0.14 起起点只有两种：**本机当前使用的那一份完整备份**（默认），或者你在这个窗口里明确选的那一份；
+	 * 终点默认是**最新**（当前仓库），也可以是另一份完整备份（那样导的是"完整备份 → 完整备份"的差分更新包，
 	 * 内容取自那份包，不是你现在的仓库）。没有"接在这条线的最新点后面"这回事了。
 	 */
 	private describeRange(): string {
@@ -163,19 +163,19 @@ export class ExportBundleModal extends Modal {
 		const to = this.pickedAnchor(this.toState);
 		const toText = this.toState === ''
 			? '最新'
-			: `第 ${to?.generation ?? '?'} 代`;
-		/** 终点选了另一份完整副本时要说清：内容取自那份包，不是你现在的仓库 */
+			: `第 ${to?.generation ?? '?'} 版`;
+		/** 终点选了另一份完整备份时要说清：内容取自那份包，不是你现在的仓库 */
 		const tail = this.toState === '' ? '' : '，内容取自终点那份';
 		if (this.fromState === '') {
 			const generation = this.mineGeneration();
 			if (generation === null) {
-				return '本次：还没有起点。更新包要从一份完整副本算起，先导一份完整副本';
+				return '本次：还没有起点。更新包要从一份完整备份算起，先导一份完整备份';
 			}
-			return `本次：第 ${generation} 代 → ${toText}（从你站的那份完整副本算起${tail}）`;
+			return `本次：第 ${generation} 版 → ${toText}（从本机当前使用的那份完整备份算起${tail}）`;
 		}
 		const from = this.pickedAnchor(this.fromState);
-		const fromText = `第 ${from?.generation ?? '?'} 代`;
-		return `本次：${fromText} → ${toText}（起点是你指定的那一份完整副本${tail}）`;
+		const fromText = `第 ${from?.generation ?? '?'} 版`;
+		return `本次：${fromText} → ${toText}（起点是你指定的那一份完整备份${tail}）`;
 	}
 
 	onOpen(): void {
@@ -184,14 +184,14 @@ export class ExportBundleModal extends Modal {
 		contentEl.addClass('locally-save-modal');
 		contentEl.createEl('h2', { text: '导出同步包' });
 		contentEl.createEl('p', {
-			text: '把仓库打包成 .lsave 文件，拷到别的机器上应用。',
+			text: '把仓库打包成 .lsave 文件，复制到别的机器上应用。',
 			cls: 'locally-save-hint',
 		});
 
-		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整副本、再导更新包**）
+		// 两个独立选项，不是互斥的：都要就都勾上（导出时**先导完整备份、再导更新包**）
 		new Setting(contentEl)
 			.setName('导出更新包')
-			.setDesc('只装自起点那份完整副本以来变过的文件。对方以同一份完整副本为基准就能收下')
+			.setDesc('仅包含自起点完整备份以来发生变更的文件；对方以同一份完整备份为基准即可接收。')
 			.addToggle(toggle => toggle
 				.setValue(this.wantChanges)
 				.onChange(value => {
@@ -200,8 +200,8 @@ export class ExportBundleModal extends Modal {
 				}));
 
 		new Setting(contentEl)
-			.setName('导出完整副本')
-			.setDesc('整个仓库，也是更新包的起点。体积大，每次都重写一遍')
+			.setName('导出完整备份')
+			.setDesc('包含整个仓库，也是更新包的起点。体积较大，每次都会重写。')
 			.addToggle(toggle => toggle
 				.setValue(this.wantFull)
 				.onChange(value => {
@@ -211,23 +211,23 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('默认用设置里那个；在这里改只影响这一次导出')
+			.setDesc('默认使用设置中的路径；此处修改仅影响本次导出')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.outDir)
 				.onChange(value => {
 					this.outDir = value.trim();
 					this.renderWhere();
-					// 换了目录 → 可选的"状态"（＝那个目录里的完整包）也跟着换
+					// 换了目录 → 可选的"状态"（＝那个目录里的完整备份）也跟着换
 					this.fillStateOptions();
 					this.list?.schedule();
 				}));
 
 		// ---------------------------------------------------------- 更新包的起点与终点
-		// 两个下拉的选项＝那个目录里的完整副本（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
+		// 两个下拉的选项＝那个目录里的完整备份（外加「最新」）。与设置里那两个是同一项设置：改了会记住。
 		new Setting(contentEl)
 			.setName('更新包：从哪个状态')
-			.setDesc('默认从你站的那份完整副本算起。对方还停在更老的一份上时，选它那一份')
+			.setDesc('默认从本机当前基准的完整备份算起。对方仍在使用更旧的完整备份时，请选择对方那一份。')
 			.addDropdown(dropdown => {
 				this.fromDropdown = dropdown;
 				dropdown.onChange(value => {
@@ -239,7 +239,7 @@ export class ExportBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('更新包：到哪个状态')
-			.setDesc('默认到最新（当前仓库）。选一份完整副本，则导出到那份为止，内容取自它')
+			.setDesc('默认到最新（当前仓库）。选一份完整备份，则导出到那份为止，内容取自它')
 			.addDropdown(dropdown => {
 				this.toDropdown = dropdown;
 				dropdown.onChange(value => {
@@ -260,12 +260,12 @@ export class ExportBundleModal extends Modal {
 			baseDir: () => this.effectiveDir(),
 			// 回收站那一行也显示：在**这个**弹窗里删掉的包，得能在这儿看到它去哪了
 			showTrash: true,
-			// 本机现在那一行：选"从哪个状态"时要拿它跟对方报的指纹对
+			// 本机现在那一行：选"从哪个状态"时要拿它跟对方报的校验值对
 			showPosition: true,
 			emptyText: '这个文件夹里还没有 .lsave 文件',
 		});
 		void this.list.refresh();
-		// 货架那两个动作（刷新包 / 合并相邻的更新包）**直接放在这个窗口里**：
+		// 远程仓库那两个动作（刷新包 / 合并相邻的更新包）**直接放在这个窗口里**：
 		// 用户提的"管理同步包那个窗口我根本不会打开，功能都移动到导出包和导入包界面"
 		renderShelfTools(contentEl, this.app, this.plugin, () => this.effectiveDir(), () => {
 			void this.list?.refresh();
@@ -286,21 +286,21 @@ export class ExportBundleModal extends Modal {
 		const modes = this.wantedModes();
 		const base = this.effectiveDir();
 		if (!base) {
-			this.whereEl.setText('还没确定位置：先去设置里填「同步包文件夹」，或在这里填一个路径。');
+			this.whereEl.setText('尚未确定位置：请先在设置中填写「同步包文件夹」，或在此填写一个路径。');
 			return;
 		}
 		if (modes.length === 0) {
-			this.whereEl.setText('两种都没勾：至少勾一个（更新包或完整副本）。');
+			this.whereEl.setText('两种均未勾选：请至少选择一项（更新包或完整备份）。');
 			return;
 		}
 		const targets = modes
-			.map(mode => `${mode === 'full' ? '完整副本' : '更新包'} → ${bundleDirForMode(base, mode)}`)
+			.map(mode => `${mode === 'full' ? '完整备份' : '更新包'} → ${bundleDirForMode(base, mode)}`)
 			.join('；');
 		const range = this.describeRange();
 		this.whereEl.setText(`会写到：${targets}${range ? ` ｜ ${range}` : ''}`);
 	}
 
-	/** 勾了哪几种，以及导出顺序：**先完整副本、后更新包**（见 plannedExportModes） */
+	/** 勾了哪几种，以及导出顺序：**先完整备份、后更新包**（见 plannedExportModes） */
 	private wantedModes(): BundleMode[] {
 		return plannedExportModes({ changes: this.wantChanges, full: this.wantFull });
 	}
@@ -309,28 +309,28 @@ export class ExportBundleModal extends Modal {
 		// 这个窗口里没填就用设置里那个，不是"没填路径"
 		const outDir = this.effectiveDir();
 		if (!outDir) {
-			new Notice('还没确定位置：先去设置里填「同步包文件夹」，或在这里填一个');
+			new Notice('尚未确定位置：请先在设置中填写「同步包文件夹」，或在此填写一个');
 			return;
 		}
 		const modes = this.wantedModes();
 		if (modes.length === 0) {
-			new Notice('至少勾一个：更新包或完整副本');
+			new Notice('请至少选择一项：更新包或完整备份');
 			return;
 		}
 
 		const notes: string[] = [];
 		let anySuccess = false;
 		/** 导出的更新包（变大了要问"要不要换基准"） */
-		/** 这一轮已经导出来的包：导完整包时别把它们当成"被取代的旧包"清掉 */
+		/** 这一轮已经导出来的包：导完整备份时别把它们当成"被取代的旧包"清掉 */
 		const written: string[] = [];
-		/** 这一轮导过完整副本了（紧随其后的更新包必然是空的） */
+		/** 这一轮导过完整备份了（紧随其后的更新包必然是空的） */
 		let fullWritten = false;
 
 		for (const mode of modes) {
-			const label = mode === 'full' ? '完整副本' : '更新包';
+			const label = mode === 'full' ? '完整备份' : '更新包';
 			this.statusEl.setText(`正在导出${label}…`);
 			// 一种失败不影响另一种：第一次用的人往往两个都勾，而"更新包"会因为
-			// 还没有基准而失败 —— 不该把"完整副本"也一起带崩
+			// 还没有基准而失败 —— 不该把"完整备份"也一起带崩
 			try {
 				const outcome = await exportBundle({
 					settings: this.plugin.settings,
@@ -355,11 +355,11 @@ export class ExportBundleModal extends Modal {
 				this.plugin.reportProgress(null);
 
 				if (!outcome.file) {
-					// 没生成时把原因说清：两个都勾时更新包必然是空的（完整副本刚导过，
-					// 它自己就是最新基准）；差量包则可能是"这一份已经导过了"
+					// 没生成时把原因说清：两个都勾时更新包必然是空的（完整备份刚导过，
+					// 它自己就是最新基准）；差分更新包则可能是"这一份已经导过了"
 					notes.push(`${label}没有生成：${outcome.reason ?? '没有需要导出的内容'}`
 						+ (mode === 'changes' && fullWritten && outcome.anchor?.checkpoint !== true
-							? '（刚导出的完整副本已包含全部内容，更新包自然是空的）'
+							? '（刚导出的完整备份已包含全部内容，更新包自然是空的）'
 							: ''));
 					continue;
 				}
@@ -367,9 +367,9 @@ export class ExportBundleModal extends Modal {
 				if (mode === 'full') fullWritten = true;
 				anySuccess = true;
 				/**
-				 * 完整副本不进 git：导出之后顺手给**还停在旧完整副本上**的那几台各导一份差量包
-				 * （一台都没上报过就什么都不做 —— 那种情况本来就把完整副本整份拷过去）。
-				 * 得在算下一种包之前跑：`keepPaths` 才不会把刚生成的差量包当成被取代的旧包。
+				 * 完整备份不进 git：导出之后顺手给**还仍使用旧的完整备份**的那几台各导一份差分更新包
+				 * （一台都没上报过就什么都不做 —— 那种情况本来就把完整备份整份复制过去）。
+				 * 得在算下一种包之前跑：`keepPaths` 才不会把刚生成的差分更新包当成被取代的旧包。
 				 */
 				if (mode === 'full') {
 					const detail = await runRebaselineDiffs(this.plugin, outDir);
@@ -381,7 +381,7 @@ export class ExportBundleModal extends Modal {
 					? `；changes 里另有 ${outcome.keptChanges.length} 个包保留（`
 						+ `${[...new Set(outcome.keptChanges.map(item => item.why))].join('；')}）`
 					: '';
-				// 起点平时就是你站的那份完整副本：说明一句，用户拿着那个号就能跟对方手里的对上
+				// 起点平时就是本机当前使用的那份完整备份：说明一句，用户拿着那个号就能跟对方手里的对上
 				const startNote = describeExportStart(outcome.anchor?.start);
 				notes.push(
 					`${label}：${outcome.entryCount} 个文件、${outcome.dirCount} 个文件夹`
@@ -398,12 +398,12 @@ export class ExportBundleModal extends Modal {
 						: '')
 					+ keptNote,
 				);
-				// 「该立新完整包了」：引擎按这一份自起点以来要搬的字节数算好，到阈值才给一句
+				// 「该立新完整备份了」：引擎按这一份自起点以来要搬的字节数算好，到阈值才给一句
 				if (outcome.advice) notes.push(outcome.advice);
 			} catch (error) {
 				this.plugin.reportProgress(null);
 				const message = describe(error);
-				notes.push(`${label}失败：${message}`);
+				notes.push(`${label}失败。原因：${message}`);
 				this.plugin.log.error(`导出${label}失败`, error);
 			}
 		}
@@ -415,10 +415,10 @@ export class ExportBundleModal extends Modal {
 		/**
 		 * **不关这个窗口**（用户要的）。
 		 *
-		 * 包刚导出来，接下来十有八九就是"对它做点什么"：打开所在文件夹、复制路径拷走、
-		 * 觉得不对移到回收站、或者彻底删掉重导。列表就在下面，一行行都有这些按钮 ——
+		 * 包刚导出来，接下来十有八九就是"对它做点什么"：打开所在文件夹、复制路径复制走、
+		 * 觉得不对移到回收站、或者彻底删掉重新导出。列表就在下面，一行行都有这些按钮 ——
 		 * 以前一导完就关窗，用户还得重新打开一遍、再找那个刚生成的包。
-		 * 要接着再导一份（比如完整副本 + 更新包分两次参数导）也直接点「导出」。
+		 * 要接着再导一份（比如完整备份 + 更新包分两次参数导）也直接点「导出」。
 		 */
 		if (written.length > 0) this.list?.markSelected(written[written.length - 1] as string);
 	}
@@ -445,11 +445,11 @@ export class ApplyBundleModal extends Modal {
 	private current: string | null = null;
 	private plan: ApplyPlan | null = null;
 	/**
-	 * **应用方式没得选**（0.11 起）：完整副本与更新包都走**严格同步** ——
+	 * **应用方式没得选**（0.11 起）：完整备份与更新包都走**严格同步** ——
 	 * 包里点名的文件一律用包里的版本、`header.deleted` 点名的照删、
 	 * 本地多出来的文件也移到回收目录，应用完**仓库 == 包送到的状态**。
 	 * 想"合着来"的旧档位（按设置 / 以我为准 / 两边都留）只会合出一个
-	 * 谁都不是的状态，界面不再提供（引擎里还剩 `normal` 给自动收包那条保守的路用）。
+	 * 谁都不是的状态，界面不再提供（引擎里还剩 `normal` 给自动接收那条保守的路用）。
 	 */
 	private pathInput: TextComponent | null = null;
 	/** 拖放的监听：Modal 不继承 Component，得自己挂、自己摘 */
@@ -492,7 +492,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('默认用设置里那个；会列出它的 full 与 changes 两个子目录')
+			.setDesc('默认使用设置中的路径；将列出其中的完整备份与更新包')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
@@ -507,7 +507,7 @@ export class ApplyBundleModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('包文件路径')
-			.setDesc('也可以直接粘贴完整路径')
+			.setDesc('也可在此粘贴完整的包文件路径')
 			.addText(text => {
 				this.pathInput = text;
 				text
@@ -519,8 +519,8 @@ export class ApplyBundleModal extends Modal {
 			});
 
 		// ---------------------------------------------------------- 应用方式
-		// **没有可选项**（0.11 起）：完整副本与更新包都走严格同步 ——
-		// "应用完这个仓库就是包里的样子"是唯一一条能保证两边状态编号当场一致的语义，
+		// **没有可选项**（0.11 起）：完整备份与更新包都走严格同步 ——
+		// "应用完这个仓库就是包里的样子"是唯一一条能保证两边内容校验值当场一致的语义，
 		// 所以这一段只是一个说明，不是控件。
 		contentEl.createEl('p', {
 			text: '应用方式：严格同步。包里的版本覆盖本地，包里没有的本地文件移到回收目录，'
@@ -540,17 +540,17 @@ export class ApplyBundleModal extends Modal {
 				this.current = null;
 				this.plan = null;
 				this.applyButton?.setDisabled(true);
-				this.reportEl.setText('选中的包已被移到回收站，重新选一个。');
+				this.reportEl.setText('选中的同步包已移入回收站，请重新选择。');
 			},
 			// 回收站那一行也显示：在这里删掉的包，得能在这儿看见、也能在这儿清掉
 			showTrash: true,
-			// 「本机现在基于第几代、状态编号是什么」：判断"这个包该不该应用"要拿它跟包里的编号对
+			// 「本机现在基于第几代、内容校验值是什么」：判断"这个包该不该应用"要拿它跟包里的编号对
 			showPosition: true,
 			emptyText: '这个文件夹里没有 .lsave 文件',
 		});
 		this.reportEl = contentEl.createDiv({ cls: 'locally-save-report' });
-		this.reportEl.setText('还没有选择同步包。');
-		// 货架那两个动作（刷新包 / 合并相邻的更新包）也放这儿：不用再开「管理同步包」
+		this.reportEl.setText('尚未选择同步包。');
+		// 远程仓库那两个动作（刷新包 / 合并相邻的更新包）也放这儿：不用再开「管理同步包」
 		renderShelfTools(contentEl, this.app, this.plugin, () => this.effectiveDir(), () => {
 			void this.list?.refresh();
 		});
@@ -602,7 +602,7 @@ export class ApplyBundleModal extends Modal {
 	 */
 	private async selectThenApply(file: string): Promise<void> {
 		await this.select(file);
-		if (!this.plan) return; // 算不出来：窗口里已经写着原因与兜底按钮
+		if (!this.plan) return; // 算不出来：窗口里已经写着原因与保底按钮
 		await this.apply();
 	}
 
@@ -664,8 +664,8 @@ export class ApplyBundleModal extends Modal {
 	 * 应用这个包要的参数（只算 / 真应用两处共用，免得"报告按只拉算、执行按双向跑"）。
 	 *
 	 * **只拉不推**时多带三样：`alignToPeer`（目标是对方那一点）、`bundleDir`
-	 * （恢复本机误改时要找到基准完整副本）、`receiveOnly`（本机没有要回传的那一半 ——
-	 * 完整副本走完全镜像，`alignToPeer` 对它不生效，得靠这个标记把 "欠账" 记成 0）。
+	 * （恢复本机误改时要找到基准完整备份）、`receiveOnly`（本机没有要回传的那一半 ——
+	 * 完整备份走完全镜像，`alignToPeer` 对它不生效，得靠这个标记把 "欠账" 记成 0）。
 	 * 其余方向保持普通语义：本机改动是我这一半。
 	 */
 	private optionsFor(file: string): ApplyOptions {
@@ -699,13 +699,13 @@ export class ApplyBundleModal extends Modal {
 			this.applyButton?.setDisabled(false);
 		} catch (error) {
 			this.reportEl.empty();
-			this.reportEl.setText(`打不开这个包：${describe(error)}`);
+			this.reportEl.setText(`无法打开该同步包。原因：${describe(error)}。`);
 			/**
-			 * **兜底**：算不出计划（本机被改乱 / 移动的源缺了 / 目标被占…）时不要只剩一句报错。
-			 * 有基准完整副本 + 这份包，信息就是全的：强制回退到基准、再应用一遍一定能落
+			 * **保底**：算不出计划（本机被改乱 / 移动的源缺了 / 目标被占…）时不要只剩一句报错。
+			 * 有基准完整备份 + 这份包，信息就是全的：强制回退到基准、再应用一遍一定能落
 			 * （`recoverToBaselineAndApply`）。基准包不在本机时它自己会报错并指路。
 			 *
-			 * **"包的起点在本机、但接不上"**（0.16.1）走另一个按钮：那份完整包就在包目录里，
+			 * **"包的起点在本机、但无法应用"**（0.16.1）走另一个按钮：那份完整备份就在包目录里，
 			 * 按它镜像对齐再应用（`baselineOverride`）—— 现场是"我记的基准是老遗留，
 			 * 包里写的那个起点才是对的"。
 			 */
@@ -713,20 +713,20 @@ export class ApplyBundleModal extends Modal {
 			const hint = baselineResetHint(error);
 			if (hint) {
 				const tip = this.reportEl.createEl('p', {
-					text: `这个包从第 ${hint.generation ?? '?'} 代那份完整副本出发，那份包就在本机（${hint.file.split(/[\\/]/).pop() ?? hint.file}）：`
-						+ `${hint.reason}。按它镜像对齐再应用，会把仓库整到那份副本上（本机多出来的进回收目录，能捞回来）。`,
+					text: `这个包从第 ${hint.generation ?? '?'} 版那份完整备份出发，那份包就在本机（${hint.file.split(/[\\/]/).pop() ?? hint.file}）：`
+						+ `${hint.reason}。按它镜像对齐再应用，会把仓库整到那份副本上（本机多出来的进回收目录，能恢复）。`,
 				});
 				tip.addClass('locally-save-hint');
-				const align = this.reportEl.createEl('button', { text: `按第 ${hint.generation ?? '?'} 代镜像对齐再应用` });
+				const align = this.reportEl.createEl('button', { text: `按第 ${hint.generation ?? '?'} 版镜像对齐再应用` });
 				align.addEventListener('click', () => { void this.forceRecover(file, hint.file); });
 			}
-			const button = this.reportEl.createEl('button', { text: '强制回退到基准包再应用' });
+			const button = this.reportEl.createEl('button', { text: '回退到完整备份后重新应用' });
 			button.addEventListener('click', () => { void this.forceRecover(file); });
 		}
 	}
 
 	/**
-	 * 打不开 / 对不上时的兜底入口：强制回退到基准完整副本，再把这一份应用一遍。
+	 * 打不开 / 不一致时的保底入口：强制回退到基准完整备份，再把这一份应用一遍。
 	 *
 	 * 这是用户拍板的路线："有基准包和对应更新包，信息就是全的，不管本机怎么改过都要能成功。"
 	 *
@@ -748,9 +748,9 @@ export class ApplyBundleModal extends Modal {
 			await refreshStatusBar(this.plugin);
 			const matched = again.result.recovered?.matched === true;
 			new Notice(
-				`已强制回退到第 ${again.baselineGeneration ?? '?'} 代基准再应用 · `
+				`已强制回退到第 ${again.baselineGeneration ?? '?'} 版基准再应用 · `
 					+ `${matched ? '现在与包里那一点严格对齐' : '仍然没对上（看报告 / 日志）'}`
-					+ '（本机多出来 / 改过的都进了回收目录，能捞回来）',
+					+ '（本机多出来 / 改过的都进了回收目录，能恢复）',
 				matched ? 8000 : 9000,
 			);
 			this.close();
@@ -758,8 +758,8 @@ export class ApplyBundleModal extends Modal {
 		} catch (error) {
 			this.plugin.reportProgress(null);
 			const message = error instanceof Error ? error.message : String(error);
-			this.reportEl.setText(`强制回退也没成功：${message}`);
-			new Notice(`强制回退失败：${message}`, 9000);
+			this.reportEl.setText(`回退后应用仍未成功。原因：${message}。`);
+			new Notice(`回退失败。原因：${message}。`, 9000);
 			this.plugin.log.error('强制回退应用失败', error);
 		}
 	}
@@ -767,12 +767,12 @@ export class ApplyBundleModal extends Modal {
 	private renderReport(plan: ApplyPlan): void {
 		const { report } = plan;
 		this.reportEl.empty();
-		this.reportEl.createEl('h3', { text: '这个包里有什么' });
+		this.reportEl.createEl('h3', { text: '同步包内容' });
 
 		const info = this.reportEl.createEl('ul', { cls: 'locally-save-facts' });
 		const add = (text: string) => info.createEl('li', { text });
 		add(`来源：${report.bundle.vault}，导出于 ${formatTime(report.bundle.created)}`);
-		add(`类型：${report.bundle.mode === 'full' ? '完整副本' : '更新包'}`
+		add(`类型：${report.bundle.mode === 'full' ? '完整备份' : '更新包'}`
 			+ `，${report.bundle.entryCount} 个文件、${formatBytes(report.bundle.payloadBytes)}`);
 		if (report.bundle.deletedCount > 0) add(`包里标记了 ${report.bundle.deletedCount} 个删除`);
 		if (report.moves > 0) add(`包里带了 ${report.moves} 处移动/改名`);
@@ -796,59 +796,59 @@ export class ApplyBundleModal extends Modal {
 			});
 		}
 
-		// 基准：两台机器互相发包时，"是不是从同一份完整副本算起"决定了这次应用确不确定。
+		// 基准：两台机器互相发包时，"是不是从同一份完整备份算起"决定了这次应用确不确定。
 		const baseGen = plan.info.header.baseGeneration;
-		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 代`;
+		const baseGenText = baseGen === null ? '第 ? 代' : `第 ${baseGen} 版`;
 		if (report.bundle.mode !== 'full') {
 			if (plan.baselineAnchor) {
 				/**
-				 * **接上后续基准**（0.16.1）：包的起点比本机站的基准靠后、那份完整包又在本机。
+				 * **接上后续基准**（0.16.1）：包的起点比本机当前使用的基准靠后、那份完整备份又在本机。
 				 * 用户拍板的原话："对面有 320 代的，112 代只是之前遗留，明显可以同步。"
 				 */
 				const anchor = plan.baselineAnchor;
 				this.reportEl.createEl('p', {
-					text: `接上后续基准：这个包从第 ${anchor.generation ?? '?'} 代那份完整副本出发，`
-						+ '你站的是更早的一份。应用时按那份完整包对齐 —— 中间那一段会补上，'
+					text: `接上后续基准：这个包从第 ${anchor.generation ?? '?'} 版那份完整备份出发，`
+						+ '本机当前使用的是更早的一份。应用时按那份完整备份对齐 —— 中间那一段会补上，'
 						+ `你自己相对本机基准的 ${anchor.localChanges.length} 处改动会留着。`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.viaMine) {
-				// 合并过历史遗留的小包之后常见：我停在被并掉的那个状态上，而这个包正好从那儿经过
+				// 合并过历史遗留的小包之后常见：我仍使用被并掉的那个状态，而这个包正好从那儿经过
 				this.reportEl.createEl('p', {
-					text: `这个包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 代，`
-						+ '你站的那份完整副本正好在它的路线上：应用后直接变成它送到的状态。',
+					text: `这份更新包从第 ${baseGenText} 送到第 ${plan.info.header.targetGeneration} 版，`
+						+ '本机当前使用的那份完整备份正好在它的路线上：应用后直接变成它送到的状态。',
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'match') {
 				this.reportEl.createEl('p', {
-					text: `基准：与这个包同一份完整副本（${baseGenText}），应用结果是确定的。`,
+					text: `基准：与这个包同一份完整备份（${baseGenText}），应用结果是确定的。`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.targetIsMine) {
-				// 这个包要送到的地方正好就是我站的那份完整副本：它点名要送的东西我全都有。
+				// 这个包要送到的地方正好就是本机当前使用的那份完整备份：它点名要送的东西我全都有。
 				this.reportEl.createEl('p', {
-					text: `这个包要送到的那份完整副本（第 ${plan.info.header.targetGeneration} 代 · 基准 ${report.targetBaseline}）`
-						+ '就是你站的那一份：包里没有你缺的内容，应用它不会改动文件。'
-						+ `要拿对方后来的改动，请对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份。`,
+					text: `这份更新包要送到的完整备份（第 ${plan.info.header.targetGeneration} 版 · 基准 ${report.targetBaseline}）`
+						+ '就是本机当前的那一份：包中没有本机缺少的内容，应用它不会改动文件。'
+						+ `如需获取对方后来的改动，请对方按本机当前的基准编号 ${report.myBaseline ?? '未知'} 重新导出一份。`,
 					cls: 'locally-save-hint',
 				});
 			} else if (report.baselineMatch === 'mismatch') {
 				this.reportEl.createEl('p', {
-					text: `⚠ 基准对不上：这个包从「${report.bundleBaseline}」算起，你站的是「${report.myBaseline}」。`
+					text: `⚠ 基准不一致：这个包从「${report.bundleBaseline}」算起，本机当前使用的是「${report.myBaseline}」。`
 						+ '应用完会变成包送到的状态，不是从你这份往外延伸的结果。'
-						+ `请对方按你这边的基准指纹 ${report.myBaseline ?? '未知'} 重导一份。`,
+						+ `请对方按你这边的基准校验值 ${report.myBaseline ?? '未知'} 重新导出一份。`,
 					cls: 'locally-save-warn',
 				});
 				const actions = this.reportEl.createDiv({ cls: 'locally-save-bundle-actions' });
-				const copy = actions.createEl('button', { text: '复制指纹发给对方', cls: 'locally-save-mini' });
+				const copy = actions.createEl('button', { text: '复制基准编号发给对方', cls: 'locally-save-mini' });
 				copy.addEventListener('click', () => {
 					void copyLine(
-						`我这边的基准指纹是 ${report.myBaseline ?? '未知'}（仓库「${this.plugin.vaultName()}」）。`
-						+ '你导更新包时把「从哪个状态开始」选成这个指纹那一项。',
+						`我这边的基准校验值是 ${report.myBaseline ?? '未知'}（仓库「${this.plugin.vaultName()}」）。`
+						+ '你导更新包时把「从哪个状态开始」选成这个校验值那一项。',
 					);
 				});
 				const align = actions.createEl('button', {
-					text: '导出一份完整副本发过去…',
+					text: '导出一份完整备份发过去…',
 					cls: 'locally-save-mini',
 				});
 				align.addEventListener('click', () => {
@@ -856,14 +856,14 @@ export class ApplyBundleModal extends Modal {
 				});
 			} else {
 				this.reportEl.createEl('p', {
-					text: '这个包没记基准指纹（旧版本导的），应用时按它送到的状态严格同步。',
+					text: '这份更新包没有记录基准编号（旧版本导出），应用时按它送到的状态严格同步。',
 					cls: 'locally-save-hint',
 				});
 			}
 		} else {
 			this.reportEl.createEl('p', {
-				text: `应用之后，你这台就基准是第 ${plan.info.header.targetGeneration} 代那份完整副本上。`
-					+ '完整副本是完全镜像：包里没有的本地文件、被覆盖的本地版本都会进回收目录。',
+				text: `应用之后，本机的基准会变成第 ${plan.info.header.targetGeneration} 版那份完整备份。`
+					+ '完整备份是完全镜像：包里没有的本地文件、被覆盖的本地版本都会进回收目录。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -874,22 +874,22 @@ export class ApplyBundleModal extends Modal {
 			this.reportEl.createEl('p', {
 				text: report.restored > 0
 					? `仅拉：会把本机误改的 ${report.restored} 个文件恢复成基准那一版，你改的那份进回收目录。`
-					: '仅拉：应用完与对方严格相等。包外的本机改动会从基准完整副本恢复，不会当成“我这一半”留着。',
+					: '仅拉：应用完与对方严格相等。包外的本机改动会从基准完整备份恢复，不会当成“我这一半”留着。',
 				cls: 'locally-save-hint',
 			});
 		}
 
-		// 状态编号：包里记着"导出方导完那一刻整个仓库长什么样"。应用完这边会算一个自己的跟它比，
-		// **一样就是两边文件内容一致** —— 世代号（只说第几版）和基准指纹（只说明祖先是同一份）
+		// 内容校验值：包里记着"导出方导完那一刻整个仓库长什么样"。应用完这边会算一个自己的跟它比，
+		// **一样就是两边文件内容一致** —— 版本号（只说第几版）和基准校验值（只说明祖先是同一份）
 		// 都回答不了这句话，用户专门提过要这么个编号。
 		if (report.peerStateId) {
 			this.reportEl.createEl('p', {
-				text: `包里的状态编号：${describeStateId(report.peerStateId)}。应用完会再算一个跟它比，一样就说明两边内容一致。`,
+				text: `包里的内容校验值：${describeStateId(report.peerStateId)}。应用完会再算一个跟它比，一样就说明两边内容一致。`,
 				cls: 'locally-save-hint',
 			});
 		} else {
 			this.reportEl.createEl('p', {
-				text: '旧版包没记状态编号，应用完没法对账。',
+				text: '旧版包没记内容校验值，应用完没法对账。',
 				cls: 'locally-save-hint',
 			});
 		}
@@ -933,7 +933,7 @@ export class ApplyBundleModal extends Modal {
 		}
 
 		// 同步程度：接收方最关心的一个数（文件与文件夹分开说，别只报文件）
-		this.reportEl.createEl('h3', { text: `同步程度 ${report.syncPercent}%` });
+		this.reportEl.createEl('h3', { text: `与该包一致的文件占比 ${report.syncPercent}%` });
 		this.reportEl.createEl('p', {
 			text: `${report.synchronized} / ${report.bundle.entryCount} 个文件已一致`
 				+ `；文件夹 ${report.foldersInSync} / ${report.bundleDirCount} 个两边都有`,
@@ -948,7 +948,7 @@ export class ApplyBundleModal extends Modal {
 			line(`其中 ${report.forcedOverwrites} 个本地也改过：用包里的版本覆盖，旧版进回收目录`);
 		}
 		if (report.historyMatches > 0) {
-			line(`其中 ${report.historyMatches} 个：本地停在对方发过的中间版本上，直接覆盖`);
+			line(`其中 ${report.historyMatches} 个：本地仍使用对方发过的中间版本，直接覆盖`);
 		}
 		if (report.conflicts > 0) line(`本地也改过、会留冲突副本的：${report.conflicts} 个`);
 		if (report.deletes > 0) line(`删除 ${report.deletes} 个（本地未改动过的）`);
@@ -958,7 +958,7 @@ export class ApplyBundleModal extends Modal {
 		if (report.foldersToCreate > 0) line(`补建 ${report.foldersToCreate} 个文件夹`);
 		if (report.foldersToRemove > 0) line(`删掉 ${report.foldersToRemove} 个本地空文件夹`);
 		if (report.foldersKept > 0) {
-			// **把路径写出来**：这几个文件夹就是"应用完编号还对不上"的全部线索，
+			// **把路径写出来**：这几个文件夹就是"应用完编号还不一致"的全部线索，
 			// 只说"留着 N 个"用户没法处理（里面被排除规则挡住的东西删不掉，得他自己清）
 			const shown = plan.foldersKept.slice(0, 5);
 			const more = plan.foldersKept.length > shown.length ? ` … 等 ${plan.foldersKept.length} 个` : '';
@@ -972,29 +972,29 @@ export class ApplyBundleModal extends Modal {
 				+ `${(report.pendingDeletes ?? 0) > 0 ? `、${report.pendingDeletes} 个删除` : ''}`
 				+ '是对方没有的，下次导出更新包会带上');
 		}
-		// 这个包的起点不是我站的那一份（但内容上我正好在它的路线上）：应用完我就接在它那份起点上
+		// 这个包的起点不是本机当前使用的这一份（但内容上我正好在它的路线上）：应用完我就接在它那份起点上
 		if (report.baselineAdopted) {
-			line(`应用完你会基准是第 ${report.baselineAdopted.generation} 代那份完整副本上`
+			line(`应用完你会基准是第 ${report.baselineAdopted.generation} 版那份完整备份上`
 				+ `（${report.baselineAdopted.hash}）；这个包就是从它算起的`);
 		}
 
 		if (!report.sameLineage) {
 			this.reportEl.createEl('p', {
-				text: '这个包不是从你站的那份完整副本分出来的，应用后以它送到的状态为准。',
+				text: '这份更新包不是以本机当前的完整备份为基准导出的，应用后以它送到的状态为准。',
 				cls: 'locally-save-warn',
 			});
 		}
 		/**
 		 * **不再拿 `parentBundleId` 判"漏了中间那份包"**：它是导出方"上一次导出的是哪一份"，
-		 * 不是"我上一次应用的是哪一份"。基准点模型里两边都以同一份完整副本为基准往外长，
-		 * 这两个 ID 对不上是常态 —— 提示只会在正常现场误报（用户报的：回退到第 112 代
-		 * 完整副本、内容严格等于 112，再应用「112 → 最新」却被说"中间可能还有一份没到"）。
+		 * 不是"我上一次应用的是哪一份"。基准模型里两边都以同一份完整备份为基准往外长，
+		 * 这两个 ID 不一致是常态 —— 提示只会在正常现场误报（用户报的：回退到第 112 版
+		 * 完整备份、内容严格等于 112，再应用「112 → 最新」却被说"中间可能还有一份没到"）。
 		 * 真该拦的（基准不是同一份）由 `checkAncestor` 在前面拦下并指路。
 		 */
 		if (report.generationGap !== null && report.generationGap > 0) {
 			this.reportEl.createEl('p', {
-				text: `⚠ 你还没站到这个包所基于的那份完整副本上（差 ${report.generationGap} 代）。`
-					+ '请对方从你站的那份完整副本重导一份，或者把那份完整副本发过来（应用它会镜像覆盖本机内容）。',
+				text: `⚠ 你还没以这个包所基于的那份完整备份为基准（差 ${report.generationGap} 代）。`
+					+ '请对方从本机当前使用的那份完整备份重新导出一份，或者把那份完整备份发过来（应用它会镜像覆盖本机内容）。',
 				cls: 'locally-save-warn',
 			});
 		}
@@ -1019,7 +1019,7 @@ export class ApplyBundleModal extends Modal {
 	 * 引擎那边负责起点与内容（`export.ts` 的 `parkLocalChangesFor`）：
 	 * 起点＝**这份包送到的状态**，内容＝我现在的仓库，并且不推进我这边 ——
 	 * 于是这一份就是「**送到的状态 → 送到的状态 ＋ 我的东西**」：本地改过/删过/新建而在包里
-	 * 没提到的那些，全在里面。我自己应用它＝把东西加回来，发给对方（他停在同一状态上）＝同理。
+	 * 没提到的那些，全在里面。我自己应用它＝把东西加回来，发给对方（他仍使用同一状态）＝同理。
 	 *
 	 * **返回 null ＝ 我这边跟那份状态没有任何差别，没什么可存的**（不是失败）。
 	 */
@@ -1047,14 +1047,14 @@ export class ApplyBundleModal extends Modal {
 			/**
 			 * 严格档会覆盖 / 移走我这边的东西 → 先把"我这一半"存成一个包。
 			 *
-			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己站的完整副本"算的，
-			 * 完整副本那一趟会漏（见 `parkLocalChanges`）；真没什么可存时这一趟只是白扫一遍，
+			 * **每次都试着存**（不再看 `pendingChanges` 那个数）：那个数是"相对我自己使用的完整备份"算的，
+			 * 完整备份那一趟会漏（见 `parkLocalChanges`）；真没什么可存时这一趟只是白扫一遍，
 			 * 会直接告诉我们"没有差别"（返回 null），不写空包。
 			 *
 			 * **只拉不推不存"我这一半"**：目标是跟对面严格相等，本机误改会被 `restore`
-			 * 从基准完整副本恢复进回收目录；再存一份回传包等于把误改当成要发出去的东西。
-			 * 完整副本也走这条路（`alignToPeer` 对它是 false），所以判据在 `shouldParkLocalChanges` 里
-			 * 一并带上方向 —— 用户报的现场：仅拉的机器回退到第 112 代完整副本，
+			 * 从基准完整备份恢复进回收目录；再存一份回传包等于把误改当成要发出去的东西。
+			 * 完整备份也走这条路（`alignToPeer` 对它是 false），所以判据在 `shouldParkLocalChanges` 里
+			 * 一并带上方向 —— 用户报的现场：仅拉的机器回退到第 112 版完整备份，
 			 * 只同步了一下，却冒出一个包被 git 推了上去。
 			 */
 			const wantedPark = shouldParkLocalChanges(plan, this.receiveOnly());
@@ -1071,16 +1071,16 @@ export class ApplyBundleModal extends Modal {
 			});
 			this.plugin.reportProgress(null);
 			/**
-			 * **兜底：应用完没对上，就强制回退到基准再应用一遍。**
+			 * **保底：应用完没对上，就强制回退到基准再应用一遍。**
 			 *
 			 * 用户的原话："有基准包和对应更新包的情况下，是包括了所有信息，一定能更新成功的。"
 			 * 所以不再把"编号还差一点"当成终态：
 			 * - 计划里说会到位的路径没到位（`effects`）/ 有动作失败 → 回退；
 			 * - 「仅拉」时严格相等是承诺，编号不一致 → 也回退。
 			 *
-			 * 回退 = 把我站的那份完整副本按完全镜像应用一遍，再把这份更新包重新应用 ——
+			 * 回退 = 把本机当前使用的那份完整备份按完全镜像应用一遍，再把这份更新包重新应用 ——
 			 * 本机多出来 / 改过的进回收目录（`parked` 那一份里也有一整套）。
-			 * 基准完整副本不在本机时报错并指路，绝不悄悄换一份。
+			 * 基准完整备份不在本机时报错并指路，绝不悄悄换一份。
 			 */
 			let recoveryError: string | null = null;
 			let recovered = false;
@@ -1088,7 +1088,7 @@ export class ApplyBundleModal extends Modal {
 				|| result.effects?.ok === false
 				|| (plan.alignToPeer && result.stateIdCompare !== 'match');
 			if (broken && plan.info.header.mode === 'changes') {
-				this.reportEl.setText('对不上，正在强制回退到基准再应用…');
+				this.reportEl.setText('内容不一致，正在回退到基准后重新应用…');
 				try {
 					const again = await recoverToBaselineAndApply({
 						...this.optionsFor(file),
@@ -1103,14 +1103,14 @@ export class ApplyBundleModal extends Modal {
 				}
 			}
 			/**
-			 * 状态栏重新按"统一的那一套"算：git 推拉结果 + 每台电脑的内容状态。
+			 * 状态栏重新按"统一的那一套"算：git 推送和拉取结果 + 每台电脑的内容状态。
 			 * 以前这里手写一句"同步包已应用（写入 N）"，把"对方：…"整段盖掉了 ——
 			 * 用户应用完只看到自己写入了几个文件，看不到对面到底同没同步。
 			 */
 			await refreshStatusBar(this.plugin);
 
 			const parts = recovered
-				? [`强制回退到第 ${result.recovered?.baselineGeneration ?? '?'} 代基准再应用`]
+				? [`强制回退到第 ${result.recovered?.baselineGeneration ?? '?'} 版基准再应用`]
 				: [`写入 ${result.written}`, `跳过 ${result.skipped}`];
 			if (recovered) {
 				parts.push(result.recovered?.matched ? '现在与包里那一点严格对齐' : '回退后仍然没对上（看报告）');
@@ -1135,16 +1135,16 @@ export class ApplyBundleModal extends Modal {
 				parts.push(`失败 ${result.failed.length}：${shown.join('；')}${more}`);
 			}
 
-			// 欠账式回传：**不立刻生成回礼包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
+			// 欠账式回传：**不立刻生成回传包**（对方收到又生成一个，两边互相套娃 —— 用户报过）。
 			// 只在通知里提一句"你这边还有 N 个改动没发出去"，它们会随下次导出更新包一起带过去。
 			// （`parked` 那条路例外：改动已经进包了，说"没发出去"没意义）
 			/**
-			 * **完整副本 / 差量包没落准**：有文件没写成、或者有文件夹删不掉。
+			 * **完整备份 / 差分更新包没落准**：有文件没写成、或者有文件夹删不掉。
 			 * 这时**基准不会换过去**（见 `apply.ts` 里 `landedOnBaseline` 那段）——
 			 * 必须当面说，否则用户会以为"已经回到 100 代了"（用户报的现场）。
 			 * 删不掉的文件夹就是下一趟要处理的全部线索，直接列出来。
 			 *
-			 * 注意判据**不是**"状态编号不一致"：停在一个点上的机器允许有本地改动
+			 * 注意判据**不是**"内容校验值不一致"：仍使用一个点的机器允许有本地改动
 			 * （检查点走合并档时会留着），那不算没写成。
 			 */
 			const wantsBaseline = plan.info.header.mode === 'full' || plan.info.header.targetFullBundle === true;
@@ -1165,17 +1165,17 @@ export class ApplyBundleModal extends Modal {
 
 			// 我这一半的去处：存下来的那一份**起点就是这份包送到的状态**，
 			// 所以我自己应用它＝把东西加回来，发给对方（他用同一个状态上）应用＝同理。
-			// 注意别说成"接在刚应用到的基准点上"：**应用更新包不动基准**（0.14 起只有完整包会动它）
+			// 注意别说成"接在刚应用到的基准上"：**应用更新包不动基准**（0.14 起只有完整备份会动它）
 			if (parked) {
 				parts.push(`你这边的改动已存成 ${parked}（从这份包送到的状态算起；自己应用或发给对方都能把改动加回来）`);
 			} else if (wantedPark) {
 				parts.push('你这边跟那份状态没有差别，没有另存包');
 			}
 			if (recoveryError !== null) {
-				parts.push(`⚠ 对不上，强制回退也没成功：${recoveryError}`);
+				parts.push(`⚠ 不一致，强制回退也没成功：${recoveryError}`);
 			}
 
-			// 状态编号那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
+			// 内容校验值那句话必须进通知：应用完这个窗口就关了，报告里的字用户看不到 ——
 			// "两边到底一不一样"就是他最想知道的那句。
 			// 什么都没写 / 没删 / 没建：说明本来就已经是包里那一版了，
 			// 别报成"写入 0、跳过 N"那样让人以为应用失败了
@@ -1202,12 +1202,12 @@ export class ApplyBundleModal extends Modal {
 				if (sample.length > 0) gapParts.push(`例：${sample.join('、')}`);
 				if (gapParts.length > 0) parts.push(`编号差在：${gapParts.join('；')}`);
 			}
-			// **没写任何东西 ≠ 两边一样**：可能正是"删不掉的文件夹 / 写不进去的文件"让编号对不上
+			// **没写任何东西 ≠ 两边一样**：可能正是"删不掉的文件夹 / 写不进去的文件"让编号不一致
 			if (didNothing && result.failed.length === 0 && matched && landedCleanly && recoveryError === null) {
 				new Notice('没有改动 · 本地已经是最新', 5000);
 			} else {
 				const same = recoveryError !== null
-					? '对不上，强制回退失败（看报告）'
+					? '不一致，强制回退失败（看报告）'
 					: result.stateIdCompare === 'match'
 						? (recovered ? '两边一致（强制回退到基准后）' : '两边一致')
 						: (wantsBaseline && !landedCleanly
@@ -1218,7 +1218,7 @@ export class ApplyBundleModal extends Modal {
 			if (parts.length > 0) this.plugin.log.debug(`应用报告：${parts.join(' · ')}`);
 			this.close();
 			/**
-			 * **应用完马上把新状态写回货架并推上去**（只拉那台尤其要紧）：
+			 * **应用完马上把新状态写回远程仓库并推上去**（只拉那台尤其要紧）：
 			 * 对面一直看不到"我应用完了 / 我回到哪一个状态"，只能靠它下次自己同步 ——
 			 * 用户报的"应用完了两边还是各说各话"有一半是这一步没做。
 			 * 失败不挡应用本身：状态文件已经落盘了，下一轮 30 秒节拍还会再试。
@@ -1234,12 +1234,12 @@ export class ApplyBundleModal extends Modal {
 	}
 
 	/**
-	 * 应用完了收尾：先把新状态报到货架，再**看看本机缺不缺这个基准的完整副本**。
+	 * 应用完了收尾：先把新状态报到远程仓库，再**看看本机缺不缺这个基准的完整备份**。
 	 *
-	 * 第二条是 0.18.1 加的（用户拍板："接受后也要导出一个完整包，保证两边完整包相同，
-	 * 然后才继续更新"）：应用**差量包**之后本机手里只有那份更新包，`fullFile` 是空的 ——
+	 * 第二条是 0.18.1 加的（用户拍板："接受后也要导出一个完整备份，保证两边完整备份相同，
+	 * 然后才继续更新"）：应用**差分更新包**之后本机手里只有那份更新包，`fullFile` 是空的 ——
 	 * 补一份之后两台机器各持一份同一份基准，「恢复本机误改」「强制回退」才有东西可读，
-	 * 也才能给第三台机器导差量包。应用的是**完整副本**时它自己就有包文件，这一步立刻返回。
+	 * 也才能给第三台机器导差分更新包。应用的是**完整备份**时它自己就有包文件，这一步立刻返回。
 	 *
 	 * 顺序固定：先报状态（快、且对面等着看），再写几百 MB。两件事都失败不影响应用本身。
 	 */
@@ -1249,15 +1249,15 @@ export class ApplyBundleModal extends Modal {
 			const sentence = await ensureLocalBaselineBundle(this.plugin, this.effectiveDir());
 			if (sentence) new Notice(sentence, 15000);
 		} catch (error) {
-			this.plugin.log.error('给基准留一份完整副本失败', error);
-			new Notice(`没能给这个基准留一份完整副本（看日志）：${describe(error)}`, 10000);
+			this.plugin.log.error('给基准留一份完整备份失败', error);
+			new Notice(`没能给这个基准留一份完整备份（看日志）：${describe(error)}`, 10000);
 		}
 	}
 
 	/**
-	 * 应用完把"我现在在哪一步"写进货架并推上去（`syncGitNow` 里会写 `.lsave-peers`）。
+	 * 应用完把"我现在在哪一步"写进远程仓库并推上去（`syncGitNow` 里会写 `.lsave-peers`）。
 	 *
-	 * 只在那台机器**开了 git、而且货架已经接上**时才有意义；失败只记日志 ——
+	 * 只在那台机器**开了 git、而且远程仓库已经接上**时才有意义；失败只记日志 ——
 	 * 应用本身已经成功，不该让一次网络失败看起来像应用失败。
 	 */
 	private async reportToShelf(): Promise<void> {
@@ -1282,7 +1282,7 @@ function describe(error: unknown): string {
 
 /**
  * 复制一句话到剪贴板（**只写不读**，跟列表里那个「复制路径」同一条路子）。
- * 用途：基准对不上时，把这边的指纹原样发给对方 —— 让他照着选起点，比来回描述省事。
+ * 用途：基准不一致时，把这边的校验值原样发给对方 —— 让他照着选起点，比来回描述省事。
  */
 async function copyLine(text: string): Promise<void> {
 	try {
@@ -1348,7 +1348,7 @@ class ConfirmApplyModal extends Modal {
 		}
 		facts.createEl('li', {
 			text: report.keepBackup
-				? '被覆盖、删掉或冲突的本地版本都会进回收目录（仓库/.trash/locally-save），能捞回来。'
+				? '被覆盖、删掉或冲突的本地版本都会进回收目录（仓库/.trash/locally-save），能恢复。'
 				: '⚠ 回收目录已关：被覆盖或删掉的本地版本会直接消失。',
 		});
 

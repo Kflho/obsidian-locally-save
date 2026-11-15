@@ -24,7 +24,7 @@ export function focusWindow(): void {
  * 新版 Obsidian（1.13+）用 `setDestructive()` 上红样式；它比本插件声明的
  * `minAppVersion`（1.7.0）新，**不该为了一个按钮颜色把最低版本抬上去** ——
  * 升级门槛留给真正需要的 API。老版本上就拿它当普通按钮（按钮文字与确认框里那句
- * "这一步之后就捞不回来了"已经把风险说清了），不去调已废弃的 `setWarning()`。
+ * "这一步之后就无法恢复了"已经把风险说清了），不去调已废弃的 `setWarning()`。
  */
 export function markDestructive(button: { setDestructive?: () => unknown }): void {
 	try {

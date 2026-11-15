@@ -15,22 +15,22 @@ import { cleanupStaleFullBundlesAction, rebaselineDiffAction, baselineHealthActi
 import { mergeAdjacentBundles } from './shelf-tools';
 
 /**
- * 管理同步包：一个窗口把包文件夹里的东西全摊开 ——
- * 哪个是完整副本、哪个是更新包、多大、什么时候导的，选中就能打开所在文件夹、
- * 复制路径、删掉（移到回收站），底下还有回收站的计数与「清空」。
+ * 管理同步包：一个窗口把同步包文件夹里的东西全摊开 ——
+ * 哪个是完整备份、哪个是更新包、多大、什么时候导的，选中就能打开所在文件夹、
+ * 复制路径、删掉（移到回收站），底下还有回收使用的计数与「清空」。
  *
  * 为什么单独一个窗口，而不是只在导入弹窗里加按钮：
  * 导入弹窗的主线是"选一个包、看懂它、应用它"，管理是另一件事
  * （比如攒了七八个包要清一清、上个月那个包到底放哪儿了）；
  * 但两边**共用同一个列表组件**，不会出现"这边能删、那边不能"的错位。
  *
- * 这里还剩一件跟"基准"有关的事：**把某一份完整副本应用成本机的基准**（完整副本那一行的按钮）——
- * 拿到别人发来的完整副本时用它，走的是应用那条路（先算报告再动手），
+ * 这里还剩一件跟"基准"有关的事：**把某一份完整备份应用成本机的基准**（完整备份那一行的按钮）——
+ * 拿到别人发来的完整备份时用它，走的是应用那条路（先算报告再动手），
  * 本机已有的改动会先存成一个包，之后自己应用或发给对方都行。
  *
- * （0.11 删掉了原来的「立新基准…」按钮，0.14 起只有完整包会改变你站的那一份：
- * 导出 / 应用完整包之后你站到它上面，更新包怎么导怎么应用都不动它。
- * 想留一个还原点就走「导出同步包…」勾「完整副本」—— 同一件事，不必两个入口。）
+ * （0.11 删掉了原来的「立新基准…」按钮，0.14 起只有完整备份会改变本机当前使用的那一份：
+ * 导出 / 应用完整备份之后你以它为基准面，更新包怎么导怎么应用都不动它。
+ * 想留一个还原点就走「导出同步包…」勾「完整备份」—— 同一件事，不必两个入口。）
  */
 export class BundleManagerModal extends Modal {
 	private plugin: LocallySavePlugin;
@@ -60,7 +60,7 @@ export class BundleManagerModal extends Modal {
 
 		new Setting(contentEl)
 			.setName('同步包文件夹')
-			.setDesc('只影响这个窗口，不动设置')
+			.setDesc('只影响「管理同步包」窗口中浏览的目录，不改动设置')
 			.addText(text => text
 				.setPlaceholder(this.defaultDir || '先去设置里填「同步包文件夹」')
 				.setValue(this.dir)
@@ -82,35 +82,35 @@ export class BundleManagerModal extends Modal {
 		this.positionEl = contentEl.createDiv({ cls: 'locally-save-hint' });
 		new Setting(contentEl)
 			.setName('换基准之后')
-			.setDesc('完整副本不进 git：还停在旧那台上的电脑要靠差量包才接得上；已经没人站的旧完整副本可以清掉。')
+			.setDesc('完整备份不通过 Git 传输：仍以旧完整备份为基准的电脑需要先接收一份差分更新包；确认没有电脑再用旧完整备份后，可以清理。')
 			.addButton(button => button
-				.setButtonText('导出差量包…')
-				.setTooltip('两端都是完整副本，只装两者之间的差异，收下应用完就变成你现在这份上')
+				.setButtonText('导出差分更新包…')
+				.setTooltip('两端都是完整备份，只装两者之间的差异，收下应用完就变成你现在这份上')
 				.onClick(() => {
 					void rebaselineDiffAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
 				}))
 			.addButton(button => button
-				.setButtonText('清理旧完整副本…')
-				.setTooltip('只列没有任何电脑还停在上面的那些；会移到回收站，能捞回来')
+				.setButtonText('清理旧完整备份…')
+				.setTooltip('只列出没有任何电脑仍在使用的完整备份；移入回收站后可从回收站恢复')
 				.onClick(() => {
 					void cleanupStaleFullBundlesAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
 				}));
 		new Setting(contentEl)
 			.setName('想留一个还原点？')
-			.setDesc('在「导出同步包…」里勾上「完整副本」：整个仓库写成一份包，你也会站到它上面，仓库文件不动。');
+			.setDesc('在「导出同步包…」里勾上「完整备份」：整个仓库写成一份包，你也会以它为基准，仓库文件不动。');
 		this.list = new BundleListView(this.plugin, contentEl, {
 			baseDir: () => this.effectiveDir(),
 			actionLabel: '应用…',
 			// 管理界面里"应用"是把包丢给导入弹窗：那边会先算一份报告让人看清再动手
 			onAction: item => new ApplyBundleModal(this.app, this.plugin, item.file).open(),
-			// 完整副本那一行多一个「以这一份为基准」：点它会走**应用**那条路
-			// （先出报告、再动手）—— 完整副本是**镜像**应用，应用完这个仓库就是那个包
+			// 完整备份那一行多一个「以这一份为基准」：点它会走**应用**那条路
+			// （先出报告、再动手）—— 完整备份是**镜像**应用，应用完这个仓库就是那个包
 			baselineLabel: '以这一份为基准…',
 			onBaseline: item => new ApplyBundleModal(this.app, this.plugin, item.file).open(),
 			showTrash: true,
-			// 「我现在基于第几代、状态编号是什么」——管包的时候最需要对上号
+			// 「我现在基于第几代、内容校验值是什么」——管包的时候最需要对上号
 			showPosition: true,
-			emptyText: '这个文件夹里还没有 .lsave 文件（先用「导出同步包」导一个）',
+			emptyText: '该文件夹中尚无 .lsave 文件（请先用「导出同步包」导出一份）',
 		});
 		void this.list.refresh();
 		void this.renderPosition();
@@ -118,21 +118,21 @@ export class BundleManagerModal extends Modal {
 		new Setting(contentEl)
 			.addButton(button => button
 				.setButtonText('刷新包（对齐远程）')
-				.setTooltip('丢掉本地货架那一段没推的提交，整段对齐远程，把新包拉下来')
+				.setTooltip('丢弃本地未推送的提交，与远程仓库对齐，并拉取新的同步包')
 				.onClick(() => { void refreshBundlesAction(this.plugin); }))
 			.addButton(button => button
 				.setButtonText('整理更新包…')
-				.setTooltip('首尾相接的几份并成一份；同一份起点的旧包只留最新那一份（都移到回收站，能捞回来）')
+				.setTooltip('把首尾相接的几份合并为一份；同一基准的旧包只保留最新一份（均移入回收站，可从回收站恢复）')
 				.onClick(() => { void this.mergeAdjacent(); }))
 			.addButton(button => button
-				.setButtonText('完整副本体检…')
-				.setTooltip('本机基准 / 盘上的完整副本 / 各台电脑报的基准，对不对得上一眼看清')
+				.setButtonText('完整备份体检…')
+				.setTooltip('本机基准 / 盘上的完整备份 / 各台电脑报的基准，对不对得上一眼看清')
 				.onClick(() => {
 					void baselineHealthAction(this.app, this.plugin, this.effectiveDir(), () => this.refreshAll());
 				}))
 			.addButton(button => button
 				.setButtonText('更新记录…')
-				.setTooltip('从哪份完整副本开始、中间收发过哪些更新包')
+				.setTooltip('从哪份完整备份开始、中间收发过哪些更新包')
 				.onClick(() => new BundleLogModal(this.app, this.plugin).open()))
 			.addButton(button => button
 				.setButtonText('关闭')
@@ -140,7 +140,7 @@ export class BundleManagerModal extends Modal {
 	}
 
 	/**
-	 * 列表与顶部那句一起刷新（导完差量包 / 清完旧完整副本之后）。
+	 * 列表与顶部那句一起刷新（导完差分更新包 / 清完旧完整备份之后）。
 	 * 别只刷列表：顶部那句写的是"我现在用哪一份上"，包一移就过时了。
 	 */
 	private async refreshAll(): Promise<void> {
@@ -161,10 +161,10 @@ export class BundleManagerModal extends Modal {
 	}
 
 	/**
-	 * 顶部那句：**本机现在有多少改动是完整副本里没有的**。
+	 * 顶部那句：**本机现在有多少改动是完整备份里没有的**。
 	 *
-	 * 这句话是"下次留包会装多少"的依据 —— 也就是"我现在站的那一份是哪一个"。
-	 * 还没有完整副本时如实说"算不出来"，不硬凑一个数。
+	 * 这句话是"下次导出会装多少"的依据 —— 也就是"我现在使用的那一份是哪一个"。
+	 * 还没有完整备份时如实说"算不出来"，不硬凑一个数。
 	 */
 	private async renderPosition(): Promise<void> {
 		if (!this.positionEl) return;
@@ -176,11 +176,11 @@ export class BundleManagerModal extends Modal {
 			});
 			const changes = describeLocalChanges(state, inventory);
 			if (!changes) {
-				this.positionEl.setText('本机还没有完整副本（没导过、也没应用过）：先导一份完整副本，更新包才有起点。');
+				this.positionEl.setText('本机尚无完整备份（既未导出过，也未应用过）：请先导出一份完整备份，更新包才有起点。');
 				return;
 			}
-			this.positionEl.setText(`本机：第 ${state.generation} 代。`
-				+ `自你站的那份完整副本以来改了 ${changes.changed} 个文件`
+			this.positionEl.setText(`本机：第 ${state.generation} 版。`
+				+ `自本机当前基准的完整备份以来修改了 ${changes.changed} 个文件`
 				+ `${changes.deleted > 0 ? `、删了 ${changes.deleted} 个` : ''}`
 				+ '，这些就是下次更新包会装的内容。');
 		} catch (error) {

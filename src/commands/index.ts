@@ -37,7 +37,7 @@ function register(
 					await run();
 				} catch (error) {
 					debugEvent('command.error', { id }, error);
-					new Notice(`命令出错（${id}）：${error instanceof Error ? error.message : String(error)}`, 8000);
+					new Notice(`命令执行出错（${id}）。原因：${error instanceof Error ? error.message : String(error)}。`, 8000);
 				}
 			})();
 		},
@@ -49,37 +49,37 @@ function register(
  *
  * **命令 ID 一旦发布就是稳定接口**，改名会让用户的快捷键失效 —— 别改。
  * 所以 0.8.0 砍掉「同步到本地副本」通道时：
- * - `sync-now` / `sync-preview` 这两个 ID **留着，改指留包**（立即留一次 / 先预览会装什么），
+ * - `sync-now` / `sync-preview` 这两个 ID **留着，改指导出**（立即留一次 / 先预览会装什么），
  *   快捷键照旧能用，做的正好是最接近的那件事；
  * - `upload-to-copy` / `download-from-copy` 也留一版，只弹一句指路通知 ——
  *   直接删掉的话，用户的快捷键会静默失效，他只会觉得"插件坏了"。
  */
 export function registerCommands(plugin: LocallySavePlugin): void {
-	register(plugin, 'sync-now', '立即同步（导出包并推拉）', () => syncNow(plugin));
+	register(plugin, 'sync-now', '立即同步（导出、推送与拉取）', () => syncNow(plugin));
 	register(plugin, 'sync-preview', '预览这次会导出什么', () => previewBundleExport(plugin));
 
 	// 下面两条是 0.8.0 砍掉的副本通道留下的 ID：**ID 不变**（用户的快捷键还认它们），
-	// 现在接到 git 货架的"推 / 拉"上 —— 语义正好是当年那两个方向。
-	register(plugin, 'upload-to-copy', '让对面和我一致（推上去）', () => uploadNow(plugin));
-	register(plugin, 'download-from-copy', '让我和对面一致（拉下来）', () => downloadNow(plugin));
+	// 现在接到 git 远程仓库的"推 / 拉"上 —— 语义正好是当年那两个方向。
+	register(plugin, 'upload-to-copy', '使对方与本机一致（推送）', () => uploadNow(plugin));
+	register(plugin, 'download-from-copy', '使本机与对方一致（拉取）', () => downloadNow(plugin));
 
 	register(plugin, 'export-bundle', '导出同步包…', () => exportBundleAction(plugin));
 	register(plugin, 'apply-bundle', '打开同步包并应用…', () => applyBundleAction(plugin));
 	register(plugin, 'manage-bundles', '管理同步包…', () => manageBundlesAction(plugin));
 	register(plugin, 'bundle-log', '同步包更新记录…', () => bundleLogAction(plugin));
-	register(plugin, 'git-sync', '与 git 远程同步一次', () => syncGitNow(plugin, { manual: true }));
-	register(plugin, 'refresh-bundles', '刷新包（丢掉本地货架提交，对齐远程重新拉）', () =>
+	register(plugin, 'git-sync', '与 Git 远程同步一次', () => syncGitNow(plugin, { manual: true }));
+	register(plugin, 'refresh-bundles', '刷新同步包（丢弃本地未推送的提交，与远程仓库对齐）', () =>
 		refreshBundlesAction(plugin));
 	register(plugin, 'sync-status', '查看各台电脑同步状态…', () =>
 		openPeerStatus(plugin, () => { void syncGitNow(plugin, { manual: true }); }));
-	// 换基准之后：还停在旧完整副本上的电脑靠这一份差量包一次变成新基准
-	register(plugin, 'export-rebaseline-diff', '导出换基准的差量包…', () =>
+	// 换基准之后：还仍使用旧的完整备份的电脑靠这一份差分更新包一次变成新基准
+	register(plugin, 'export-rebaseline-diff', '导出换基准的差分更新包…', () =>
 		rebaselineDiffAction(plugin.app, plugin, defaultBundleDir(plugin)));
-	// 应用差量包之后本机没有这个基准的包文件：补一份（自动收包那条路已经自动做，这里手动补漏）
-	register(plugin, 'copy-baseline-bundle', '给现在的基准留一份完整副本…', () =>
+	// 应用差分更新包之后本机没有这个基准的包文件：补一份（自动接收那条路已经自动做，这里手动补漏）
+	register(plugin, 'copy-baseline-bundle', '给现在的基准留一份完整备份…', () =>
 		baselineCopyAction(plugin));
-	// 换过几次基准之后"到底哪份对得上"：本机基准 / 盘上的完整副本 / 各台电脑报的基准
-	register(plugin, 'check-baseline', '检查两边的完整副本…', () =>
+	// 换过几次基准之后"到底哪份对得上"：本机基准 / 盘上的完整备份 / 各台电脑报的基准
+	register(plugin, 'check-baseline', '检查两边的完整备份…', () =>
 		baselineHealthAction(plugin.app, plugin, defaultBundleDir(plugin)));
 
 	// 这条不受总开关限制 —— 它就是用来把插件重新打开的

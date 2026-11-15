@@ -55,8 +55,8 @@ export class AssociateModal extends Modal {
 		contentEl.createEl('h3', { text: '会改什么' });
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
 		facts.createEl('li', { text: '只写当前用户的注册表（HKCU\\Software\\Classes），不需要管理员权限' });
-		facts.createEl('li', { text: '会覆盖你现有的 .lsave 关联；解除时可以再拆掉' });
-		facts.createEl('li', { text: '不碰系统级设置，也不影响别的文件类型' });
+		facts.createEl('li', { text: '将覆盖现有的 .lsave 关联；可随时解除' });
+		facts.createEl('li', { text: '不修改系统级设置，也不影响其他文件类型' });
 
 		contentEl.createEl('h3', { text: '要跑的命令' });
 		const list = contentEl.createDiv({ cls: 'locally-save-list' });
@@ -86,12 +86,12 @@ export class AssociateModal extends Modal {
 		this.statusEl?.setText('正在写注册表…');
 		try {
 			await applyFileAssociation(this.vaultName);
-			this.statusEl?.setText('设置完成：现在双击 .lsave 就会用 Obsidian 打开并弹出应用对话框');
+			this.statusEl?.setText('设置完成：双击 .lsave 将由 Obsidian 打开并显示应用对话框');
 			new Notice('已把 .lsave 关联到 Obsidian：双击即可打开同步包', 8000);
 		} catch (error) {
 			const message = describeCommandError(error);
-			this.statusEl?.setText(`设置失败：${message}`);
-			new Notice(`设置关联失败：${message}`, 9000);
+			this.statusEl?.setText(`设置失败。原因：${message}。`);
+			new Notice(`设置关联失败。原因：${message}。`, 9000);
 		}
 	}
 
@@ -99,12 +99,12 @@ export class AssociateModal extends Modal {
 		this.statusEl?.setText('正在解除关联…');
 		try {
 			await removeFileAssociation();
-			this.statusEl?.setText('已解除：.lsave 现在没有关联程序了');
+			this.statusEl?.setText('已解除：.lsave 当前没有关联程序');
 			new Notice('已解除 .lsave 的文件关联', 6000);
 		} catch (error) {
 			const message = describeCommandError(error);
-			this.statusEl?.setText(`解除失败：${message}`);
-			new Notice(`解除关联失败：${message}`, 9000);
+			this.statusEl?.setText(`解除失败。原因：${message}。`);
+			new Notice(`解除关联失败。原因：${message}。`, 9000);
 		}
 	}
 

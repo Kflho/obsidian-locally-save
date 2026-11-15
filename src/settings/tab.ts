@@ -117,7 +117,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 
 		switch (field.control.type) {
 			case 'dropdown': {
-				// 选项可能是函数（"本地有哪些完整包"这种要当场算）：见 fields/types.ts 的 dropdownOptions
+				// 选项可能是函数（"本地有哪些完整备份"这种要当场算）：见 fields/types.ts 的 dropdownOptions
 				const options = dropdownOptions(field.control, this.plugin);
 				setting.addDropdown(dropdown => dropdown
 					.addOptions(options)
@@ -192,7 +192,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 			type: field.control.type,
 			key: field.key,
 			defaultValue: DEFAULT_SETTINGS[field.key],
-			// 选项可能是函数（按当前插件算，例如"本地有哪些完整包"）：声明式定义是同步构造的，
+			// 选项可能是函数（按当前插件算，例如"本地有哪些完整备份"）：声明式定义是同步构造的，
 			// 所以在这里就把结果算出来 —— 面板每次打开都会重新走一遍 getSettingDefinitions
 			...(field.control.type === 'dropdown'
 				? { options: dropdownOptions(field.control, this.plugin) }
