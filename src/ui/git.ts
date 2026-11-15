@@ -27,7 +27,7 @@ import { peerStatusText, refreshStatusBar } from './status';
 /**
  * 「Git 远程」那一套动作：接入、同步、检查环境、打开货架。
  *
- * 边界（方案里定死的，改之前先读 `docs/git远程货架-实施计划.md`）：
+ * 边界（方案里定死的，改之前先读 `bin/reference_docs/technical_solution_docs/git远程货架-实施计划.md`）：
  * - **git 只搬包**：工作区就是同步包文件夹，仓库里只有 `.lsave`；
  * - **不自动 init / 不自动改远程**：那两件事只在「接入」动作里做，别的路径只读不写；
  * - **完整包不推**：`.git/info/exclude` 里常驻 `/full/`（见 `git/shelf.ts`）；

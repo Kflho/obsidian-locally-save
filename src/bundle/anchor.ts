@@ -12,7 +12,7 @@ import type { FileRecord } from '../sync/types';
  * 「状态」＝**一份完整副本**（或者"最新"＝当前仓库）。
  *
  * 更新包只有两种形态，两个端点都从这份清单出发（用户拍板，见
- * `docs/只有完整包才算基准点-实施计划.md`）：
+ * `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
  *
  * - **从**：一份**完整副本** —— 默认是"我站的那一份"（`state.bundle.fullHash`），
  *   也可以指定硬盘上更老的那一份。为什么需要：我立了新基准（第 36 代那份），

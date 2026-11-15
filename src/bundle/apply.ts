@@ -3018,7 +3018,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	const sortedDirs = [...keepDirs].sort();
 	/**
 	 * **只有变成一份真基准点上时，"我站的那一份完整包"才往前走**（0.14，用户拍板，
-	 * 见 `docs/只有完整包才算基准点-实施计划.md`）：
+	 * 见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
 	 *
 	 * - **完整副本**：它自己就是一份新基准（`freshAnchor` ＝ 真的写成了一致的那些条目）；
 	 * - **差量包**（头部 `targetFullBundle`）：它送到的是**另一份完整副本** ——

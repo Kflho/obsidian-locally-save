@@ -242,7 +242,7 @@ export interface SupersededReport {
  * **起点是怎么定下来的** —— 界面上要说清"这一份为什么从这一点往外导"。
  *
  * 0.14 起只有两种来路（"自动接线头"那套随链条模型一起去掉了，
- * 见 `docs/只有完整包才算基准点-实施计划.md`）：
+ * 见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
  * - `self`：**我站的那一份完整包**（`state.bundle.fullHash`）—— 默认，也是绝大多数情况；
  * - `override`：调用方合成的那一点（"应用前先把本机改动存成包"那一趟）。
  * 用户在下拉里明确指定起点时，`anchor` 里那份就是指定的那一份（`picked` 记 `explicit`）。
@@ -511,7 +511,7 @@ interface StartResolution {
  * "自动接在这条线的最新点后面"（0.13 那条"严格顺序"）随链条模型一起去掉了：
  * 点只有完整包了，没有"线头"可接 —— 从那份完整副本往外导时，
  * 新号仍然从高水位往后发（回退之后也不会撞历史上用过的号），
- * 见 `docs/只有完整包才算基准点-实施计划.md`。
+ * 见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`。
  */
 async function resolveStart(options: ExportOptions, state: PluginState): Promise<StartResolution> {
 	const mine = state.bundle?.fullHash
@@ -1589,7 +1589,7 @@ export async function exportBundle(options: ExportOptions): Promise<ExportOutcom
 	 */
 	if (!frozen) {
 		/**
-		 * **点只在完整包上动**（0.14 的硬规矩，见 `docs/只有完整包才算基准点-实施计划.md`）：
+		 * **点只在完整包上动**（0.14 的硬规矩，见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）：
 		 * 更新包**不产生新点** —— 导完它，我照样停在起点那份完整包上，
 		 * 下一份包还是从那份完整包往外算（所以它是累积的：想整理就导一份新完整包）。
 		 *

@@ -80,7 +80,7 @@ export class ExportBundleModal extends Modal {
 	 *
 	 * 0.14 起候选**只有完整副本**（`listFullAnchorsSync`）：更新包只有"完整包 → 另一份完整包"
 	 * 与"完整包 → 最新状态"两种，任何一端都不是"链条上的某个中间点"
-	 * （那种点随链条模型一起删掉了，见 `docs/只有完整包才算基准点-实施计划.md`）。
+	 * （那种点随链条模型一起删掉了，见 `bin/reference_docs/technical_solution_docs/只有完整包才算基准点-实施计划.md`）。
 	 *
 	 * 用同步那套读法（设置面板里那两个下拉也是它），当场就能列出来 ——
 	 * 在窗口里换了包目录也会重新列一遍。读不出来时至少留着「最新」，
