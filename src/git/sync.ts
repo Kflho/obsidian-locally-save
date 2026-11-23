@@ -736,6 +736,8 @@ async function adoptTree(
 			fs.rmSync(abs, { force: true });
 		}
 	}
+	// 报数：远程撤下了哪几份（界面不显示，排障时从 debug.log 能查到）
+	if (removed.length > 0) debugEvent('git.deleted', { files: removed });
 	return added;
 }
 
