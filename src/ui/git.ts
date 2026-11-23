@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Notice } from 'obsidian';
+import { debugEvent } from '../debugLog';
 import { isApplying, executeBundlePlan, planBundleApply } from '../bundle/apply';
 import type { ApplyOptions } from '../bundle/apply';
 import { baselineOfBundle } from '../bundle/baseline';
@@ -153,6 +154,11 @@ export async function syncGitNow(
 			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在远程仓库上。
 			 */
 			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包`);
+			// 排障要能回答「到底拉下来哪几个」：只有文件名时，分不清是对方的包还是自己的
+			debugEvent('git.pulled', {
+				files: report.pulled,
+				direction: plugin.settings.syncDirection,
+			});
 			if (plugin.settings.syncDirection === 'upload') {
 				new Notice(`已从 Git 远程接收 ${report.pulled.length} 个同步包（仅推：不会自动应用）`, 9000);
 			}

@@ -317,7 +317,26 @@ export class ExportBundleModal extends Modal {
 			new Notice('请至少选择一项：更新包或完整备份');
 			return;
 		}
+		if (this.plugin.bundleBusy || this.plugin.gitBusy || this.plugin.incomingBusy) {
+			new Notice('上一次导出或同步尚未完成');
+			return;
+		}
+		/**
+		 * **占住"正在写包"这把锁**（0.18.3）：手动导出过去不占，后台那趟 git 同步可以正好
+		 * 在它写包的时候跑。`writeBundle` 是**直接写最终路径**的，同步里的 `git add -A`
+		 * 会把写到一半的包提交上去 —— 对端拉到就是一个坏包，而且会一直躺在远程仓库上。
+		 * 自动导出（`exportBundlesNow`）一直占着这把锁，手动这条路补齐。
+		 */
+		this.plugin.bundleBusy = true;
+		try {
+			await this.runExport(modes, outDir);
+		} finally {
+			this.plugin.bundleBusy = false;
+		}
+	}
 
+	/** 真的写包（`run` 负责校验、占锁） */
+	private async runExport(modes: BundleMode[], outDir: string): Promise<void> {
 		const notes: string[] = [];
 		let anySuccess = false;
 		/** 导出的更新包（变大了要问"要不要换基准"） */
