@@ -65,7 +65,7 @@ export class SshKeyModal extends Modal {
 		contentEl.createEl('p', { text: `远程主机：${host}` });
 
 		if (!this.key) {
-			contentEl.createEl('p', { text: '没有找到 SSH 密钥（~/.ssh/id_ed25519 等）。' });
+			contentEl.createEl('p', { text: '没有找到 SSH 密钥（默认在用户目录的 .ssh 里）。' });
 			new Setting(contentEl)
 				.setName('生成一把密钥')
 				.setDesc('ed25519、无口令。插件在后台同步，不能每次问口令。')

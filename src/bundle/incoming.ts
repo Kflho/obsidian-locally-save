@@ -495,8 +495,13 @@ async function rememberDecision(
 			...(attempts ? { attempts } : {}),
 		});
 		await saveState(stateFile, state);
-	} catch {
-		// 记不下只是"下次可能再提示一遍"，不该让已经成功的应用看起来失败
+	} catch (error) {
+		/**
+		 * 记不下不该让已经成功的应用看起来失败，但**必须留一条线索**：
+		 * 状态写不进去时同一个包会在下一个节拍（30 秒）重新被挑出来、再提示一遍 ——
+		 * 日志里没有这一条，就没人解释得清「一直提示收到同一个包」。
+		 */
+		debugEvent('incoming.record-failed', { bundleId, note, file }, error);
 	}
 }
 

@@ -60,6 +60,43 @@ export function isReceiveOnly(settings: PluginSettings): boolean {
 	return settings.gitEnabled && settings.syncDirection === 'download';
 }
 
+/**
+ * 「Git 同步失败」那一句：带上落后几个提交。
+ *
+ * 只说"失败"时用户不知道差多少：落后 1 个和落后 20 个要处理的事不一样
+ * （2026-11-23 现场：落后 20 个提交、三个多小时没拉成功，界面上只有一句失败）。
+ * `behind` 是 `state.git.behind`，同步失败时也照样记下来了。
+ */
+export function syncFailureText(behind: number): string {
+	return behind > 0 ? `Git 同步失败（落后 ${behind} 个提交）` : 'Git 同步失败';
+}
+
+/**
+ * 「立即同步」在「仅拉」方向上的那条总结（纯函数，测试直接跑）。
+ *
+ * **拉取失败不能说成「没有新包」**：仅拉这台不导出，远程仓库里有没有新东西全靠这一趟拉取；
+ * 拉取失败时远程仓库里当然什么都没有，报「没有新包」会让人以为对面根本没发东西
+ * （2026-11-23 现场：网络超时的那一拍，界面写的就是「没有新包」）。
+ */
+export function receiveOnlySummary(input: {
+	label: string;
+	acted: boolean;
+	pullOk: boolean;
+	pullError?: string | null;
+	waiting: number;
+	peer?: string | null;
+}): string {
+	if (!input.pullOk) {
+		const why = input.pullError ? `：${brief(input.pullError)}` : '';
+		const waiting = input.waiting > 0 ? ` · 本地还有 ${input.waiting} 个包没应用` : '';
+		return `${input.label}：拉取失败${why}${waiting}`;
+	}
+	const parts = [`${input.acted ? '已应用对方的包' : '没有新包'}（仅拉：不导出）`];
+	if (input.waiting > 0) parts.push(`还有 ${input.waiting} 个包没应用`);
+	if (input.peer) parts.push(input.peer);
+	return `${input.label}：${parts.join(' · ')}`;
+}
+
 /** 一轮导出的结果：给「立即同步」拼一句总结用（不弹通知那条路也拿得到） */
 export interface ExportRunResult {
 	text: string;
@@ -86,7 +123,7 @@ let syncing = false;
 export async function exportBundlesNow(
 	plugin: LocallySavePlugin,
 	label = '导出',
-	options: { quiet?: boolean; silent?: boolean; defaultWhenOff?: boolean } = {},
+	options: { quiet?: boolean; silent?: boolean; defaultWhenOff?: boolean; retried?: boolean } = {},
 ): Promise<ExportRunResult | null> {
 	if (!plugin.isActive()) return null;
 	/**
@@ -105,6 +142,23 @@ export async function exportBundlesNow(
 	}
 	if (plugin.bundleBusy) {
 		if (!options.silent) new Notice('上一次导出尚未完成');
+		return null;
+	}
+	/**
+	 * **正在和远程同步就别开始写包**（0.18.3）。
+	 *
+	 * 同步会在包目录里 `git add -A` 并提交，而 `writeBundle` 是直接写最终路径的 ——
+	 * 正好撞上就会把**写到一半的包**提交上去，对面拉下来是个坏包。
+	 * 反过来的方向已经挡着（`syncGitNow` 遇到 `bundleBusy` 会让路），这里把另一个方向补齐；
+	 * 手动导出那条路由弹窗自己挡（`ExportBundleModal`），自动触发这一条等一下再来。
+	 */
+	if (plugin.gitBusy) {
+		plugin.log.debug(`${label}：正在和远程同步，稍后再导出`);
+		if (options.retried !== true && typeof window !== 'undefined') {
+			window.setTimeout(() => {
+				void exportBundlesNow(plugin, label, { ...options, retried: true });
+			}, 5_000);
+		}
 		return null;
 	}
 	plugin.bundleBusy = true;
@@ -290,9 +344,10 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		 * 就会再发一个同版本包。先 git 同步（只拉/推，不应用），`generationFloor` 才看得到对方的号。
 		 * 这次失败不挡导出：离线时照常导出，后面那次同步再试。
 		 */
+		let pullOk = true;
 		if (connected) {
 			plugin.statusBar.showActivity(`${label}：拉取对方状态…`);
-			await syncGitNow(plugin, { quiet: true });
+			pullOk = await syncGitNow(plugin, { quiet: true });
 		}
 
 		/**
@@ -309,9 +364,14 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 			const waiting = await unappliedCount(plugin, base);
 			const peer = await peerShortFor(plugin, base);
 			new Notice(
-				`${label}：${acted ? '已应用对方的包' : '没有新包'}（仅拉：不导出）`
-					+ `${waiting > 0 ? ` · 还有 ${waiting} 个包没应用` : ''}`
-					+ `${peer ? ` · ${peer}` : ''}`,
+				receiveOnlySummary({
+					label,
+					acted,
+					pullOk,
+					pullError: pullOk ? null : ((await loadState(plugin.stateFile())).git?.error ?? null),
+					waiting,
+					peer,
+				}),
 				6000,
 			);
 			return;
@@ -345,7 +405,8 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 
 		plugin.statusBar.showActivity(`${label}：推送与拉取…`);
 		if (!(await syncGitNow(plugin, { quiet: true }))) {
-			parts.push('Git 同步失败');
+			// 只说"失败"没说差多少：落后几个提交在状态文件里已经算出来了，带上它
+			parts.push(syncFailureText((await loadState(plugin.stateFile())).git?.behind ?? 0));
 			new Notice(`${label}：${parts.join(' · ')}`, 7000);
 			await refreshStatusBar(plugin);
 			return;

@@ -530,7 +530,7 @@ export class ApplyBundleModal extends Modal {
 			.addText(text => {
 				this.pathInput = text;
 				text
-					.setPlaceholder('D:\\传输\\我的笔记-更新-32代到37代-状态3f9a2c1d4e5f6a7b-5f4807.lsave')
+					.setPlaceholder('我的笔记-更新-32代到37代-状态3f9a2c1d4e5f6a7b-5f4807.lsave')
 					.onChange(value => {
 						const path = value.trim();
 						if (path) void this.select(path);
