@@ -717,11 +717,23 @@ async function adoptTree(
 		const checkout = await git(['checkout', toTree, '--', ...batch]);
 		if (checkout.code !== 0) throw gitFailure('取回远程的包', checkout);
 	}
-	for (const rel of removed) {
-		try {
-			fs.rmSync(path.join(dir, ...rel.split('/')), { force: true });
-		} catch {
-			// 本来就不在：无所谓
+	/**
+	 * 远程撤下的包**先移进回收站**（AGENTS 第 3 条：删除前先备份、宁可留着）。
+	 *
+	 * 远端被重建过、或者换了仓库时，这台机器没有重新 clone 的话包会被静默清掉，
+	 * 而那份包可能还没应用。回收站位置与平时一致：`<同步包文件夹>/.lsave/bundles-trash/`。
+	 */
+	if (removed.length > 0) {
+		const trashRoot = bundleTrashRoot(dir);
+		const stamp = formatStamp(Date.now());
+		for (const rel of removed) {
+			const abs = path.join(dir, ...rel.split('/'));
+			if (!fs.existsSync(abs)) continue;
+			if (trashRoot !== '') {
+				await moveToTrash(abs, trashRoot, rel, stamp);
+				continue;
+			}
+			fs.rmSync(abs, { force: true });
 		}
 	}
 	return added;
