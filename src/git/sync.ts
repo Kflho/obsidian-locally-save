@@ -8,6 +8,7 @@ import type { GitRunner, ShelfLayout, ShelfOptions } from './shelf';
 import { clearRemovals, noteBundleRemoved, readRemovals } from './removals';
 import { moveToTrash } from '../sync/disk';
 import { bundleTrashRoot } from '../bundle/manage';
+import { BUNDLE_ROOT_DIR } from '../bundle/paths';
 import { formatStamp } from '../utils/format';
 
 /**
@@ -97,6 +98,15 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	const before = await listBundlePaths(dir, options.trashDir);
 	stage(2, '提交本机的包…');
 	const committed = hosted ? await commitScoped(git, layout) : await commitPending(git);
+	/**
+	 * 记账的起点：**提交之后**的 HEAD。
+	 *
+	 * 为什么取在提交之后：本机刚写进包目录的东西（导出的包、回收站备份、"应用前先把改动存下来"
+	 * 那一份）不算法"从远程拉到"；把它们算进去，界面上就会说一句
+	 * 「已从 Git 远程接收 1 个同步包」—— 而远程那边其实没有本机的包（用户报的现场：
+	 * 一台"没有更新包"，另一台却一直提示"收到你们的更新包"）。
+	 */
+	const baseHead = (await git(['rev-parse', '--verify', '--quiet', 'HEAD'])).stdout.trim() || null;
 
 	// 拉：远程还是空仓库是正常情况（第一次推之前就是）
 	stage(3, '连接远程…');
@@ -111,9 +121,8 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 		throw fetched.error;
 	}
 
-	// 这一趟新出现的包 ＝ 拉下来的（给"自动应用"那条路用）
-	const after = await listBundlePaths(dir, options.trashDir);
-	const pulled = [...after].filter(item => !before.has(item)).sort();
+	// 这一趟**从远程真正落下来**的包 ＝ 合并把哪几个 .lsave 加进了仓库（见 `pulledBundles`）
+	const pulled = await pulledBundles(git, baseHead, layout, dir, before, options.trashDir);
 
 	let counts = await aheadBehind(git, branch);
 	let pushed = false;
@@ -540,9 +549,53 @@ function pushOnce(git: GitRunner, branch: string): Promise<GitResult> {
 }
 
 /**
+ * 这一趟**从远程真正落下来**的包（同步包文件夹里的相对路径）。
+ *
+ * 判据是 git 自己的差异（`baseHead..HEAD` 里新增的 `.lsave`），不是"磁盘上前后多了哪些文件"：
+ * - 磁盘快照会把**本机在同步窗口里自己写下的东西**算成"从远程收到" —— 导出的包、
+ *   回收站备份、`full/` 里刚写的完整备份（它根本不走 git）；读目录偶发失败时更糟：
+ *   `before` 少看见几个，`after` 全算成新拉下来的；
+ * - 界面上那句「已从 Git 远程接收 N 个同步包」就是拿这个数报的。报错了，另一台会以为
+ *   自己发出了包（用户报的"一边没有更新包、另一边一直提示收到"）。
+ *
+ * 兜底：本机还没有提交（第一次同步）、或读不出 HEAD 时，仍按磁盘前后比 —— 那种时候
+ * "哪些是远程带来的"没有 git 记录可查，只能全算新来的。
+ */
+async function pulledBundles(
+	git: GitRunner,
+	baseHead: string | null,
+	layout: ShelfLayout,
+	dir: string,
+	before: Set<string>,
+	trashDir?: string | null,
+): Promise<string[]> {
+	const tip = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+	const head = tip.code === 0 ? tip.stdout.trim() : '';
+	if (baseHead !== null && head !== '') {
+		if (head === baseHead) return [];
+		const diff = await git(['diff', '--name-only', '-z', '--diff-filter=A', '--no-renames', `${baseHead}..${head}`]);
+		if (diff.code === 0) {
+			const prefix = layout.hosted && layout.rel !== '' ? `${layout.rel}/` : '';
+			const out: string[] = [];
+			for (const item of diff.stdout.split('\0')) {
+				if (item === '') continue;
+				if (prefix !== '' && !item.startsWith(prefix)) continue;
+				const rel = prefix === '' ? item : item.slice(prefix.length);
+				if (!rel.toLowerCase().endsWith('.lsave')) continue;
+				if (before.has(rel)) continue;
+				out.push(rel);
+			}
+			return out.sort();
+		}
+	}
+	const after = await listBundlePaths(dir, trashDir);
+	return [...after].filter(item => !before.has(item)).sort();
+}
+
+/**
  * 远程仓库上现在有哪些包（相对路径，正斜杠；给"这一趟拉下来哪些"对账用）。
  *
- * 跳过 `.git`、回收站与符号链接 —— 它们都不该出现在账里。
+ * 跳过 `.git`、回收站、本插件自己的 `.lsave` 目录与符号链接 —— 它们都不该出现在账里。
  */
 async function listBundlePaths(dir: string, trashDir?: string | null): Promise<Set<string>> {
 	const skip = new Set<string>();
@@ -565,7 +618,8 @@ async function listBundlePaths(dir: string, trashDir?: string | null): Promise<S
 			const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
 			if (entry.isSymbolicLink()) continue;
 			if (entry.isDirectory()) {
-				if (entry.name === '.git' || skip.has(rel)) continue;
+				// 本插件自己的目录（回收站 / 本机保管的包）不算"远程仓库上的包"
+				if (entry.name === '.git' || entry.name === BUNDLE_ROOT_DIR || skip.has(rel)) continue;
 				await walk(rel);
 				continue;
 			}
