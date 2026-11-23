@@ -539,6 +539,14 @@ async function aheadBehind(git: GitRunner, branch: string): Promise<{ ahead: num
 		const count = await git(['rev-list', '--count', 'HEAD']);
 		return { ahead: Number.parseInt(count.stdout.trim(), 10) || 0, behind: 0 };
 	}
+	// 单提交模式下两个无父提交没有共同祖先，rev-list 会把两边各算 1；
+	// 内容一样就直接报 0/0，别让界面写「领先 1、落后 1」。
+	const mineTree = await git(['rev-parse', '--verify', '--quiet', 'HEAD^{tree}']);
+	const theirTree = await git(['rev-parse', '--verify', '--quiet', `origin/${branch}^{tree}`]);
+	if (mineTree.code === 0 && theirTree.code === 0
+		&& mineTree.stdout.trim() === theirTree.stdout.trim()) {
+		return { ahead: 0, behind: 0 };
+	}
 	const counts = await git(['rev-list', '--left-right', '--count', `HEAD...origin/${branch}`]);
 	const parts = counts.stdout.trim().split(/\s+/);
 	return {
