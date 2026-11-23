@@ -640,6 +640,8 @@ async function syncSingleCommit(
 
 	stage(5, '推送远程…');
 	const published = await publishSingle(git, dir, branch, remoteTree, prevTree);
+	// 本机也要收拾：每次同步都会留下一个不再引用的旧提交（reflog 还挂着它）
+	await pruneLocal(git);
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
 	return {
 		committed: published.commit ? { commit: published.commit, files: [] } : null,
@@ -652,6 +654,24 @@ async function syncSingleCommit(
 		createdShelf: preparedCreated,
 		hosted: false,
 	};
+}
+
+/** 上一次在本机回收旧对象的时间（单提交模式每次同步都会留下一个不再引用的旧提交） */
+let lastPruneAt = 0;
+
+/**
+ * 本机回收：过期 reflog 再 `gc --prune=now`。
+ *
+ * 单提交模式只压**远端**不够 —— `update-ref` 每次都会往 reflog 里记一条，
+ * 旧提交因此仍然可达，`.git` 会随导出次数变大。半小时一次就够（一次 gc 很快），
+ * 不必每拍都跑。
+ */
+async function pruneLocal(git: GitRunner): Promise<void> {
+	const now = Date.now();
+	if (now - lastPruneAt < 30 * 60_000) return;
+	lastPruneAt = now;
+	await git(['reflog', 'expire', '--expire=now', '--all']);
+	await git(['gc', '--prune=now', '--quiet']);
 }
 
 /** 某个引用的 tree（引用不存在时给空串） */
