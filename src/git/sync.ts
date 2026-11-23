@@ -174,7 +174,7 @@ export async function pushWithRetry(
 
 	for (let attempt = 0; attempt < retries; attempt++) {
 		const before = await remoteTip(git, branch);
-		const fetch = await git(['fetch', 'origin', branch], true);
+		const fetch = await git(['fetch', '--prune', 'origin', branch], true);
 		if (fetch.code !== 0) break; // 连不上：重试没意义，把原始失败报出去
 		await mergeFetched(git, layout ?? null);
 		const after = await remoteTip(git, branch);
@@ -639,7 +639,7 @@ async function syncSingleCommit(
 	}
 
 	stage(5, '推送远程…');
-	const published = await publishSingle(git, dir, branch, remoteTree, prevTree);
+	const published = await publishSingle(git, dir, branch, remoteTree, prevTree, remoteEmpty);
 	// 本机也要收拾：每次同步都会留下一个不再引用的旧提交（reflog 还挂着它）
 	await pruneLocal(git);
 	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
@@ -739,10 +739,16 @@ async function publishSingle(
 	branch: string,
 	remoteTree: string,
 	prevTree: string,
+	remoteEmpty: boolean,
 ): Promise<{ commit: string | null; pushed: boolean }> {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		const tree = (await git(['write-tree'])).stdout.trim();
 		if (tree === '') throw new Error('没有可提交的包');
+		/**
+		 * **内容和本机那个提交一样：什么都不做**（对面实测：无变化时仍会换一个提交，
+		 * 状态栏就显示成「本地已提交、还没推」）。返回 null，让调用方报「没有变化」。
+		 */
+		if (tree === (await treeOf(git, 'HEAD'))) return { commit: null, pushed: false };
 		const files = await git(['ls-tree', '-r', '--name-only', '-z', tree]);
 		const count = files.stdout.split('\0').filter(item => item !== '').length;
 		const commit = await git(['commit-tree', tree, '-m', `同步包：${count} 个`]);
@@ -754,7 +760,12 @@ async function publishSingle(
 			// 内容和远程一样：本地指到同一个根就行，不必推
 			return { commit: sha, pushed: false };
 		}
-		const push = await git(['push', '--porcelain', '--force-with-lease', '-u', 'origin', `HEAD:refs/heads/${branch}`], true);
+		// 远端是空的（新建 / 删掉重建）：显式期望"这个引用还不存在"，
+		// 否则本地残留的 origin/<branch> 会让 --force-with-lease 报 stale info。
+		const lease = remoteEmpty
+			? `--force-with-lease=refs/heads/${branch}:`
+			: '--force-with-lease';
+		const push = await git(['push', '--porcelain', lease, '-u', 'origin', `HEAD:refs/heads/${branch}`], true);
 		if (push.code === 0) return { commit: sha, pushed: true };
 		if (attempt === 1) throw gitFailure('把包推到远程', push);
 		// 被别的机器抢先：取回远程那份，再压一次
