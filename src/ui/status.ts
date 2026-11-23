@@ -106,6 +106,7 @@ export async function openPeerStatus(
 				`${state.git.ok ? '成功' : '失败'} ${hhmm(state.git.at)}`,
 				state.git.pushed ? '推过' : '没推',
 				state.git.pulled > 0 ? `收到 ${state.git.pulled} 个包` : '没收到包',
+				state.git.deleted > 0 ? `撤下 ${state.git.deleted} 个包` : '',
 				state.git.ahead > 0 ? `领先 ${state.git.ahead}` : '',
 				state.git.behind > 0 ? `落后 ${state.git.behind}` : '',
 			].filter(item => item !== '');

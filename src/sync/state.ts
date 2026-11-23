@@ -145,6 +145,8 @@ export interface GitSyncRecord {
 	pushed: boolean;
 	/** 这一趟从远程新落下来几个包 */
 	pulled: number;
+	/** 这一趟按远程的删除撤下几个包（本机跟着删，回收站里留一份） */
+	deleted: number;
 	/** 本地领先远程几个提交（没推上去的） */
 	ahead: number;
 	/** 远程领先本地几个提交（没拉下来的） */
@@ -437,6 +439,7 @@ function normalizeGit(raw: Partial<GitSyncRecord> | null | undefined): GitSyncRe
 		ok: raw.ok === true,
 		pushed: raw.pushed === true,
 		pulled: count(raw.pulled),
+		deleted: count(raw.deleted),
 		ahead: count(raw.ahead),
 		behind: count(raw.behind),
 		...(typeof raw.error === 'string' && raw.error !== '' ? { error: raw.error } : {}),

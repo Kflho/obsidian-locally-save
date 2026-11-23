@@ -134,6 +134,7 @@ export async function syncGitNow(
 			ok: true,
 			pushed: report.pushed,
 			pulled: report.pulled.length,
+			deleted: report.deleted.length,
 			ahead: report.ahead,
 			behind: report.behind,
 		});
@@ -144,7 +145,7 @@ export async function syncGitNow(
 				? peerStatusText(readPeers(shelf.dir, latest.copyId), latest).short
 				: null;
 			new Notice(describeReport(report, peer), 9000);
-		} else if (report.pulled.length > 0) {
+		} else if (report.pulled.length > 0 || report.deleted.length > 0) {
 			/**
 			 * **拉下来的包不在这里报数**（0.16.14）：拉下来只说明"远程仓库上多了个文件"，
 			 * 真正要用户知道的是"它被应用了没有、动了什么" —— 那由接收那条路说
@@ -155,14 +156,28 @@ export async function syncGitNow(
 			 * **仅推例外**：那个方向根本不看接收文件夹（`wantsIncoming` 为 false），
 			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在远程仓库上。
 			 */
-			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包`);
-			// 排障要能回答「到底拉下来哪几个」：只有文件名时，分不清是对方的包还是自己的
-			debugEvent('git.pulled', {
-				files: report.pulled,
-				direction: plugin.settings.syncDirection,
-			});
-			if (plugin.settings.syncDirection === 'upload') {
+			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包，撤下 ${report.deleted.length} 个`);
+			// 排障要能回答「到底拉下来 / 撤下哪几个」：只有文件名时，分不清是对方的包还是自己的
+			if (report.pulled.length > 0) {
+				debugEvent('git.pulled', {
+					files: report.pulled,
+					direction: plugin.settings.syncDirection,
+				});
+			}
+			if (plugin.settings.syncDirection === 'upload' && report.pulled.length > 0) {
 				new Notice(`已从 Git 远程接收 ${report.pulled.length} 个同步包（仅推：不会自动应用）`, 9000);
+			}
+			/**
+			 * **撤下要说一句**：那是删掉本机已有的文件（约定第 10 条：删了本机文件才弹）。
+			 * 只说撤下几个，不说去处：单提交模式会先移进回收站，子目录形态是直接删
+			 * （git 合流删的，插件没经手）；写死一处就等于对另一种形态说谎。
+			 */
+			if (report.deleted.length > 0) {
+				debugEvent('git.deleted', {
+					files: report.deleted,
+					direction: plugin.settings.syncDirection,
+				});
+				new Notice(`远程撤下了 ${report.deleted.length} 个同步包。`, 9000);
 			}
 		}
 		return true;
@@ -178,6 +193,7 @@ export async function syncGitNow(
 			ok: false,
 			pushed: false,
 			pulled: 0,
+			deleted: 0,
 			ahead: status?.ahead ?? 0,
 			behind: status?.behind ?? 0,
 			error: message,
@@ -334,6 +350,7 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 	}
 	const parts = [`已连接 ${where}，并在 ${hhmm(git.at)} 完成一次推送与拉取`];
 	if (git.pulled > 0) parts.push(`收到 ${git.pulled} 个同步包`);
+	if (git.deleted > 0) parts.push(`撤下 ${git.deleted} 个同步包`);
 	if (git.ahead > 0) parts.push(`还有 ${git.ahead} 项未推送`);
 	if (git.behind > 0) parts.push(`还有 ${git.behind} 个提交待拉取`);
 	return `${parts.join('；')}。`;
@@ -843,9 +860,11 @@ async function rememberGit(plugin: LocallySavePlugin, record: GitSyncRecord): Pr
 function describeReport(report: GitSyncReport, peer?: string | null): string {
 	const parts: string[] = [];
 	if (report.pulled.length > 0) parts.push(`收到 ${report.pulled.length} 个包`);
+	if (report.deleted.length > 0) parts.push(`撤下 ${report.deleted.length} 个包`);
+	const incoming = report.pulled.length > 0 || report.deleted.length > 0;
 	const action = report.pushed
-		? (report.pulled.length > 0 ? '已完成推送和拉取' : '已推送')
-		: (report.pulled.length > 0 ? '已拉取' : '远程已是最新');
+		? (incoming ? '已完成推送和拉取' : '已推送')
+		: (incoming ? '已拉取' : '远程已是最新');
 	parts.push(action);
 	if (report.committed && !report.pushed) parts.push('本地已提交、还没推');
 	if (report.ahead > 0) parts.push(`${report.ahead} 个没推`);

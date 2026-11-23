@@ -36,6 +36,8 @@ export interface GitSyncReport {
 	committed: { commit: string; files: string[] } | null;
 	/** 这一趟从远程新落下来的包（相对路径） */
 	pulled: string[];
+	/** 这一趟按远程的删除撤下的包（相对路径；本机跟着删，回收站里留一份） */
+	deleted: string[];
 	/** 这一趟真的推上去了没有 */
 	pushed: boolean;
 	/** 远程还是空仓库（第一次推就是这种情况） */
@@ -131,6 +133,8 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 
 	// 这一趟**从远程真正落下来**的包 ＝ 合并把哪几个 .lsave 加进了仓库（见 `pulledBundles`）
 	const pulled = await pulledBundles(git, baseHead, layout, dir, before, options.trashDir);
+	// 反面：远程撤下的包。删了本机文件，界面要说一句（没有这个数就只剩"包自己消失了"）
+	const deleted = await removedBundles(git, baseHead, layout);
 
 	let counts = await aheadBehind(git, branch);
 	let pushed = false;
@@ -146,6 +150,7 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 	return {
 		committed,
 		pulled,
+		deleted,
 		pushed,
 		remoteEmpty,
 		ahead: counts.ahead,
@@ -609,6 +614,33 @@ async function pulledBundles(
 }
 
 /**
+ * 这一趟**从远程撤下**的包（同步包文件夹里的相对路径）。
+ *
+ * 与 `pulledBundles` 同一套口径：只看 `baseHead..HEAD` 里被删的 `.lsave`，`baseHead` 在**提交之后**读 ——
+ * 本机自己删的包（在文件夹里删、插件里的移到回收站）已经落进那一笔提交，不会被算成"远程撤下的"。
+ * 单提交模式不查这个：它按 tree 差异取回（`adoptTree` 自己知道删了哪几个）。
+ */
+async function removedBundles(
+	git: GitRunner,
+	baseHead: string | null,
+	layout: ShelfLayout,
+): Promise<string[]> {
+	if (baseHead === null) return [];
+	const diff = await git(['diff', '--name-only', '-z', '--diff-filter=D', '--no-renames', `${baseHead}..HEAD`]);
+	if (diff.code !== 0) return [];
+	const prefix = layout.hosted && layout.rel !== '' ? `${layout.rel}/` : '';
+	const out: string[] = [];
+	for (const item of diff.stdout.split('\0')) {
+		if (item === '') continue;
+		if (prefix !== '' && !item.startsWith(prefix)) continue;
+		const rel = prefix === '' ? item : item.slice(prefix.length);
+		if (!rel.toLowerCase().endsWith('.lsave')) continue;
+		out.push(rel);
+	}
+	return out.sort();
+}
+
+/**
  * **单提交模式**的一次同步（`ShelfOptions.singleCommit`，只给独立仓库用）。
  *
  * 远程仓库只用于搬运，历史没有用途：每次同步生成**一个无父提交**再强推，本地也只留一个。
@@ -639,10 +671,13 @@ async function syncSingleCommit(
 	const remoteEmpty = fetched.kind === 'empty';
 
 	let pulled: string[] = [];
+	let deleted: string[] = [];
 	const remoteTree = remoteEmpty ? '' : await treeOf(git, 'FETCH_HEAD');
 	if (remoteTree !== '' && remoteTree !== prevTree) {
 		stage(4, '取回远程的包…');
-		pulled = await adoptTree(git, dir, prevTree, remoteTree);
+		const adopted = await adoptTree(git, dir, prevTree, remoteTree);
+		pulled = adopted.added;
+		deleted = adopted.removed;
 		await stageShelf(git);
 	}
 
@@ -654,6 +689,7 @@ async function syncSingleCommit(
 	return {
 		committed: published.commit ? { commit: published.commit, files: [] } : null,
 		pulled,
+		deleted,
 		pushed: published.pushed,
 		remoteEmpty,
 		ahead: 0,
@@ -698,15 +734,20 @@ async function stageShelf(git: GitRunner): Promise<void> {
  * 把远程那棵树取回工作区：远程新增/改过的覆盖本地，远程删掉的本地也删。
  *
  * 为什么不用 merge：两个单提交没有共同祖先，合并必然冲突；而远程仓库里只有整个文件，
- * 按路径覆盖就是正确语义。返回"远程新增了哪些"（界面要报"收到几个包"）。
+ * 按路径覆盖就是正确语义。
+ *
+ * 返回给界面报数的是**包**（`.lsave`）：`.lsave-peers/*.json` 是各台机器的对表文件，
+ * 跟着一起取回、一起处理，但算成"收到 / 撤下一个包"会让状态栏凭空多一个包。
  */
 async function adoptTree(
 	git: GitRunner,
 	dir: string,
 	fromTree: string,
 	toTree: string,
-): Promise<string[]> {
+): Promise<{ added: string[]; removed: string[] }> {
 	const split = (out: string): string[] => out.split('\0').filter(item => item !== '');
+	const packages = (items: string[]): string[] =>
+		items.filter(item => item.toLowerCase().endsWith('.lsave'));
 	let added: string[];
 	let removed: string[] = [];
 	if (fromTree === '') {
@@ -744,9 +785,7 @@ async function adoptTree(
 			fs.rmSync(abs, { force: true });
 		}
 	}
-	// 报数：远程撤下了哪几份（界面不显示，排障时从 debug.log 能查到）
-	if (removed.length > 0) debugEvent('git.deleted', { files: removed });
-	return added;
+	return { added: packages(added), removed: packages(removed) };
 }
 
 /**
