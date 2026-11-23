@@ -1,3 +1,4 @@
+import { debugEvent } from '../debugLog';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitFailure } from './run';
@@ -473,6 +474,9 @@ async function alignHostedShelf(git: GitRunner, layout: ShelfLayout): Promise<vo
 	// 用户的活不会丢。0.16.8 之前这条收得太窄，把"两台机器各改各的其它文件"也判成越界，
 	// 结果正常分叉永远同步不过去（对面报的就是这个）。
 	await assertCleanOutsideShelf(git, layout);
+	// 快进失败＝两边各自提交过（典型：两边都删过同一个过时的包）。留一条记录，
+	// 下次排查"同步失败"时能直接看到是分叉、而不是网络。
+	debugEvent('git.hosted-diverged', {});
 	const rebase = await git(['rebase', 'FETCH_HEAD']);
 	if (rebase.code === 0) return;
 	await git(['rebase', '--abort']);

@@ -1237,7 +1237,19 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				actions.push({ kind: 'write', path: entry.path, entry });
 				continue;
 			}
-			if (here.size === entry.size && Math.abs(here.mtime - entry.mtime) <= TOLERANCE) continue;
+			if (here.size === entry.size && Math.abs(here.mtime - entry.mtime) <= TOLERANCE) {
+				/**
+				 * **严格档不能只信大小 + 修改时间**。用户实测：应用完整备份后 8054 个文件
+				 * 内容仍与包不同，两边编号永远差一点 —— 那些文件大小一样、mtime 也一样
+				 * （拷来拷去保留时间的仓库很常见），这里判"没变"就跳过了写入。
+				 * 有校验值就比校验值；没有（>64MB / 读失败）就当"没证明相同"，照写。
+				 */
+				if (!(mirrorFull || strict)) continue;
+				const digest = entry.hash
+					? await fingerprint(options.vaultRoot, state, entry.path, here, true)
+					: null;
+				if (digest && entry.hash && digest.slice(0, HASH_KEEP) === entry.hash) continue;
+			}
 
 			const base = baseline[entry.path];
 			/**
@@ -2805,6 +2817,45 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		? null
 		: await describeStateIdGap(options, plan, inventory, state);
 	/**
+	 * **完整备份：落不准就再镜像一遍，直到和包一模一样。**
+	 *
+	 * 这条路对用户的承诺是"应用完仓库 == 包送到的状态"，不能因为计划阶段按
+	 * 大小 + 修改时间判过"没变"、或者某个目录被排除规则挡着，就把几千个不一致
+	 * 留在本机（用户实测过 8054 个文件、2 个目录的偏差，且后续导出会把偏差当成本机改动）。
+	 * 这一步按包里的校验值逐条核：不一致 / 缺失的写回，多出来的文件移走，多余的目录删掉，
+	 * 然后重新算一次编号。修不动（权限 / 被占用）就如实记进 `stateIdGap`，不假装成功。
+	 */
+	if (plan.info.header.mode === 'full' && result.stateIdCompare !== 'match') {
+		const repaired = await repairToBundle(options, plan, state, stamp, keepBackup);
+		/**
+		 * 修好了就别再报"写失败"：第一次写被权限挡住、第二次移走重写成功，
+		 * 对用户来说是**修复过程**，不是残留错误。进度界面只看 `failed`，
+		 * 留着它会把一次成功的镜像说成"有文件没写成"。
+		 */
+		if (repaired.fixed.length > 0) {
+			const fixedSet = new Set(repaired.fixed);
+			result.failed = result.failed.filter(item => !fixedSet.has(item.path));
+		}
+		if (repaired.written || repaired.deleted || repaired.dirsRemoved) {
+			debugEvent('apply.repair-full', { ...repaired, fixed: repaired.fixed.slice(0, 10) });
+			const repairedTree = await scanTree(options.vaultRoot, {
+				exclude: excludePatterns(options.settings.excludePatterns, options.configDir),
+				skipTopLevelDirs: [VAULT_TRASH_DIR],
+			});
+			const repairedId = await computeStateId({
+				vaultRoot: options.vaultRoot,
+				state,
+				files: repairedTree.files,
+				dirs: repairedTree.dirs,
+			});
+			result.stateId = { ...repairedId, at: Date.now() };
+			result.stateIdCompare = compareStateId(repairedId, plan.info.header.stateId ?? null);
+			result.stateIdGap = result.stateIdCompare === 'match'
+				? null
+				: await describeStateIdGap(options, plan, repairedTree, state);
+		}
+	}
+	/**
 	 * **做完之后逐条核对**：计划里说"要到位"的东西真到位了吗？
 	 *
 	 * 只看这个计划**动手的路径**（写 / 改名 / 删 / 补建目录），不看"仓库里有没有别的文件" ——
@@ -3194,6 +3245,71 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
  *   这种编号**永远**不一致，而计划一条失败都不报）；
  * - **内容不一样**：大小相同但内容校验值不同（写了一半 / 被别的程序改回去了）。
  */
+/**
+ * **把仓库拉回"包的样子"**：完整备份落不准时的第二次镜像。
+ *
+ * 只认包里的校验值（`entry.hash`）：对得上才算相同，对不上就重写；没有校验值
+ * （单个 >64MB 或读失败）同样重写。本机多出来的文件进回收目录，多余的目录真删
+ * （只删得掉空目录，删不掉的留给 `stateIdGap` 报）。
+ */
+async function repairToBundle(
+	options: ApplyOptions,
+	plan: ApplyPlan,
+	state: PluginState,
+	stamp: string,
+	keepBackup: boolean,
+): Promise<{ written: number; deleted: number; dirsRemoved: number; fixed: string[] }> {
+	const patterns = excludePatterns(options.settings.excludePatterns, options.configDir);
+	const inventory = await scanTree(options.vaultRoot, {
+		exclude: patterns,
+		skipTopLevelDirs: [VAULT_TRASH_DIR],
+	});
+	const expected = new Map(plan.info.header.entries.map(entry => [entry.path, entry]));
+	const trashRoot = toNative(options.vaultRoot, `.trash/locally-save/${CONFLICT_TRASH_DIR}`);
+	let written = 0;
+	let deleted = 0;
+	let dirsRemoved = 0;
+	const fixed: string[] = [];
+
+	for (const [file, entry] of expected) {
+		if (isExcluded(file, patterns)) continue;
+		const here = inventory.files.get(file);
+		if (here && here.size === entry.size && entry.hash) {
+			const digest = await fingerprint(options.vaultRoot, state, file, here, true);
+			if (digest && digest.slice(0, HASH_KEEP) === entry.hash) continue;
+		}
+		const target = toNative(options.vaultRoot, file);
+		await ensureDir(path.dirname(target));
+		if (keepBackup && await pathExists(target)) await moveToTrash(target, trashRoot, file, stamp);
+		await extractEntry(options.file, plan.info, entry, target);
+		written++;
+		fixed.push(file);
+		if (written % YIELD_EVERY === 0) await yieldToUi();
+	}
+
+	for (const file of inventory.files.keys()) {
+		if (expected.has(file) || isExcluded(file, patterns)) continue;
+		const target = toNative(options.vaultRoot, file);
+		if (keepBackup) await moveToTrash(target, trashRoot, file, stamp);
+		else await fs.promises.rm(target, { force: true });
+		deleted++;
+	}
+
+	/**
+	 * 旧版本导的包头部没有 `emptyDirs`：它说不出"我这边有哪些空目录"，
+	 * 拿它反推"本地多出来的都该删"会删错（对面把一个文件夹里的文件删光、
+	 * 文件夹留着，这边会顺手把空壳收掉）。这条规则和计划阶段一致：只建不删。
+	 */
+	const dirsKnown = plan.report.bundleDirsUnknown !== true;
+	if (dirsKnown) {
+		const keepDirs = new Set(dirsInBundle(plan.info.header));
+		for (const dir of [...inventory.dirs].filter(item => !keepDirs.has(item)).sort(byDepthDesc)) {
+			if (await removeEmptyDir(toNative(options.vaultRoot, dir))) dirsRemoved++;
+		}
+	}
+	return { written, deleted, dirsRemoved, fixed };
+}
+
 async function describeStateIdGap(
 	options: ApplyOptions,
 	plan: ApplyPlan,
