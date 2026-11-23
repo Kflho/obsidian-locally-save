@@ -81,6 +81,14 @@ export async function syncShelf(options: ShelfOptions): Promise<GitSyncReport> {
 		await clearStuckState(dir, git);
 	}
 
+	/**
+	 * **单提交模式**（0.18.3）：远程仓库只用于搬运，不留历史。
+	 * 只对独立仓库生效 —— 子目录形态强推会改写外层仓库的分支，把别人的提交一起带走。
+	 */
+	if (options.singleCommit === true && !hosted) {
+		return syncSingleCommit(prepared.created, git, dir, layout, branch, stage);
+	}
+
 	// 提交本机新写的包（含"撤下"的删除）
 	stage(1, '检查本机的包…');
 	/**
@@ -558,8 +566,8 @@ function pushOnce(git: GitRunner, branch: string): Promise<GitResult> {
  * - 界面上那句「已从 Git 远程接收 N 个同步包」就是拿这个数报的。报错了，另一台会以为
  *   自己发出了包（用户报的"一边没有更新包、另一边一直提示收到"）。
  *
- * 兜底：本机还没有提交（第一次同步）、或读不出 HEAD 时，仍按磁盘前后比 —— 那种时候
- * "哪些是远程带来的"没有 git 记录可查，只能全算新来的。
+ * 本机还没有提交（第一次同步）或读不出 HEAD 时，仍按磁盘前后比对：那种情况下没有 git
+ * 记录可查「哪些是远程带来的」，只能全部算作新来的。
  */
 async function pulledBundles(
 	git: GitRunner,
@@ -590,6 +598,159 @@ async function pulledBundles(
 	}
 	const after = await listBundlePaths(dir, trashDir);
 	return [...after].filter(item => !before.has(item)).sort();
+}
+
+/**
+ * **单提交模式**的一次同步（`ShelfOptions.singleCommit`，只给独立仓库用）。
+ *
+ * 远程仓库只用于搬运，历史没有用途：每次同步生成**一个无父提交**再强推，本地也只留一个。
+ * 拉取不合并也不 rebase —— 按 tree 差异把远程的文件取回工作区（远程删掉的本地也删），
+ * 所以两边永远不会"合不到一起"。
+ */
+async function syncSingleCommit(
+	preparedCreated: boolean,
+	git: GitRunner,
+	dir: string,
+	layout: ShelfLayout,
+	branch: string,
+	stage: (index: number, label: string) => void,
+): Promise<GitSyncReport> {
+	stage(1, '检查本机的包…');
+	const salvaged = await salvageDroppedBundles(git, dir, layout);
+	if (salvaged.length > 0) {
+		stage(1, `本机少掉的 ${salvaged.length} 个包已备份进回收站，删除会同步出去…`);
+	}
+
+	/** 本机"上次同步后的样子"：只有按它才说得清远程改了什么 */
+	const prevTree = await treeOf(git, 'HEAD');
+	await stageShelf(git);
+
+	stage(3, '连接远程…');
+	const fetched = await fetchRemote(git, branch);
+	if (fetched.kind === 'failed') throw fetched.error;
+	const remoteEmpty = fetched.kind === 'empty';
+
+	let pulled: string[] = [];
+	const remoteTree = remoteEmpty ? '' : await treeOf(git, 'FETCH_HEAD');
+	if (remoteTree !== '' && remoteTree !== prevTree) {
+		stage(4, '取回远程的包…');
+		pulled = await adoptTree(git, dir, prevTree, remoteTree);
+		await stageShelf(git);
+	}
+
+	stage(5, '推送远程…');
+	const published = await publishSingle(git, dir, branch, remoteTree, prevTree);
+	const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+	return {
+		committed: published.commit ? { commit: published.commit, files: [] } : null,
+		pulled,
+		pushed: published.pushed,
+		remoteEmpty,
+		ahead: 0,
+		behind: 0,
+		head: head.code === 0 ? head.stdout.trim() : null,
+		createdShelf: preparedCreated,
+		hosted: false,
+	};
+}
+
+/** 某个引用的 tree（引用不存在时给空串） */
+async function treeOf(git: GitRunner, ref: string): Promise<string> {
+	const result = await git(['rev-parse', '--verify', '--quiet', `${ref}^{tree}`]);
+	return result.code === 0 ? result.stdout.trim() : '';
+}
+
+/** 把同步包文件夹的工作区整个暂存（`.git/info/exclude` 已经把非包文件挡住） */
+async function stageShelf(git: GitRunner): Promise<void> {
+	const add = await git(['add', '-A', '--', '.']);
+	if (add.code !== 0) throw gitFailure('把包加进仓库', add);
+}
+
+/**
+ * 把远程那棵树取回工作区：远程新增/改过的覆盖本地，远程删掉的本地也删。
+ *
+ * 为什么不用 merge：两个单提交没有共同祖先，合并必然冲突；而远程仓库里只有整个文件，
+ * 按路径覆盖就是正确语义。返回"远程新增了哪些"（界面要报"收到几个包"）。
+ */
+async function adoptTree(
+	git: GitRunner,
+	dir: string,
+	fromTree: string,
+	toTree: string,
+): Promise<string[]> {
+	const split = (out: string): string[] => out.split('\0').filter(item => item !== '');
+	let added: string[];
+	let removed: string[] = [];
+	if (fromTree === '') {
+		// 本机还没有任何提交：远程那棵树里的全是"新增"
+		const all = await git(['ls-tree', '-r', '--name-only', '-z', toTree]);
+		added = split(all.stdout);
+	} else {
+		const range = ['--no-renames', fromTree, toTree];
+		const adds = await git(['diff-tree', '-r', '--name-only', '-z', '--diff-filter=AM', ...range]);
+		const dels = await git(['diff-tree', '-r', '--name-only', '-z', '--diff-filter=D', ...range]);
+		added = split(adds.stdout);
+		removed = split(dels.stdout);
+	}
+	for (let index = 0; index < added.length; index += 40) {
+		const batch = added.slice(index, index + 40);
+		const checkout = await git(['checkout', toTree, '--', ...batch]);
+		if (checkout.code !== 0) throw gitFailure('取回远程的包', checkout);
+	}
+	for (const rel of removed) {
+		try {
+			fs.rmSync(path.join(dir, ...rel.split('/')), { force: true });
+		} catch {
+			// 本来就不在：无所谓
+		}
+	}
+	return added;
+}
+
+/**
+ * 把当前索引压成一个**无父提交**并强推（单提交模式）。
+ *
+ * `--force-with-lease`：远程在我们 fetch 之后又被人推过就让这次失败，绝不覆盖别人的包；
+ * 失败后取回远程、再压一次（最多两趟）。
+ */
+async function publishSingle(
+	git: GitRunner,
+	dir: string,
+	branch: string,
+	remoteTree: string,
+	prevTree: string,
+): Promise<{ commit: string | null; pushed: boolean }> {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const tree = (await git(['write-tree'])).stdout.trim();
+		if (tree === '') throw new Error('没有可提交的包');
+		const files = await git(['ls-tree', '-r', '--name-only', '-z', tree]);
+		const count = files.stdout.split('\0').filter(item => item !== '').length;
+		const commit = await git(['commit-tree', tree, '-m', `同步包：${count} 个`]);
+		if (commit.code !== 0) throw gitFailure('记录这次的包', commit);
+		const sha = commit.stdout.trim();
+		const update = await git(['update-ref', `refs/heads/${branch}`, sha]);
+		if (update.code !== 0) throw gitFailure('更新本机分支', update);
+		if (tree === remoteTree) {
+			// 内容和远程一样：本地指到同一个根就行，不必推
+			return { commit: sha, pushed: false };
+		}
+		const push = await git(['push', '--porcelain', '--force-with-lease', '-u', 'origin', `HEAD:refs/heads/${branch}`], true);
+		if (push.code === 0) return { commit: sha, pushed: true };
+		if (attempt === 1) throw gitFailure('把包推到远程', push);
+		// 被别的机器抢先：取回远程那份，再压一次
+		const fetched = await fetchRemote(git, branch);
+		if (fetched.kind !== 'fetched') throw gitFailure('把包推到远程', push);
+		const theirs = await treeOf(git, 'FETCH_HEAD');
+		const base = treeOfPrev(prevTree, tree);
+		await adoptTree(git, dir, base, theirs);
+		await stageShelf(git);
+	}
+	throw new Error('把包推到远程失败');
+}
+
+/** 远程那份要按"我们上一次的样子"对齐：优先用本机旧 HEAD，没有就用这次建的树 */
+function treeOfPrev(prevTree: string, fallback: string): string {
+	return prevTree !== '' ? prevTree : fallback;
 }
 
 /**

@@ -39,6 +39,17 @@ export interface ShelfOptions {
 	/** 额外环境变量（测试用） */
 	env?: NodeJS.ProcessEnv;
 	/**
+	 * **单提交模式**（0.18.3）：每次同步把远端压成"一个无父提交"并强推，本地同样只留一个提交。
+	 *
+	 * 为什么要有它：远程仓库只用于搬运，历史没有用途 —— 每次导出提交一个几 MB 的包，
+	 * 攒几天 `.git` 就上 GB，拉包越来越慢。压成单提交之后，仓库只有一个提交，
+	 * 拉取按 tree 差异取回文件，不再 merge / rebase，也就没有冲突。
+	 *
+	 * **只对独立仓库生效**：同步包文件夹放在别人的仓库里（子目录形态）时忽略这个开关 ——
+	 * 强推会改写那个仓库的分支，把人家别的工作一起带走。
+	 */
+	singleCommit?: boolean;
+	/**
 	 * 长活走到哪一步了（状态栏显示"同步 3/5 · 连接远程"）；引擎不关心界面，只回调。
 	 * `step` 给了就是"第几步 / 共几步"，界面按数字显示（用户提的："连接远程这种信息经常闪现，
 	 * 改成步骤进度、用数字表示"）。
@@ -176,6 +187,17 @@ export async function prepareShelf(options: ShelfOptions): Promise<ShelfPrepared
 		// 别人仓库里的子目录：不 init、不加远程，只核对 + 落过滤规则
 		await verifyRemote(dir, remote, options.gitPath);
 		await ensureIgnoreFile(dir, options.trashDir);
+		/**
+		 * **子目录形态也要把包标成二进制**（0.18.3）。
+		 *
+		 * 独立仓库那份写在 `.git/info/attributes`；子目录形态不能去改外层仓库的配置
+		 * （那是用户的仓库，里面还有别的文件），所以写在包目录自己的 `.gitattributes` 里 ——
+		 * 它被上面的 `.gitignore` 挡住、不提交，但 git 照样读它。
+		 *
+		 * 为什么必须有：外层仓库常常开着 `core.autocrlf`（本机就是 true），而纯文本的包
+		 * 被换行转换改过字节后，接收方校验对不上，只会报「文件可能在传输中损坏了」。
+		 */
+		await ensureInfoFile(path.join(dir, '.gitattributes'), ATTRIBUTES);
 		if (layout.branch === '') {
 			throw new Error('这个仓库现在不在任何分支上（detached HEAD）：先切回一个分支再同步');
 		}
@@ -277,6 +299,8 @@ function hostedIgnoreContent(dir: string, trashDir?: string | null): string {
 		'/.lsave/',
 		'# 这个文件自己也不提交。',
 		'/.gitignore',
+		'# 包是二进制：子目录形态改不了外层仓库的 `.git/info/attributes`，规则写在本地这个文件里。',
+		'/.gitattributes',
 	];
 	const trash = insidePath(dir, trashDir);
 	if (trash && !trash.startsWith('.lsave/')) {

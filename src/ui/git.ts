@@ -63,6 +63,8 @@ function shelfOptions(plugin: LocallySavePlugin): ShelfOptions | null {
 		branch: plugin.settings.gitBranch.trim() || 'main',
 		trashDir: bundleTrashRoot(base) || null,
 		...(gitPath !== '' ? { gitPath } : {}),
+		// 远程仓库只用于搬运、不留历史：每次同步生成一个提交（引擎只对独立仓库生效）
+		singleCommit: true,
 		// 网络命令给足时间：GitHub 慢慢推一个几 MB 的包也可能几十秒
 		networkTimeoutMs: 90_000,
 	};
@@ -182,7 +184,14 @@ export async function syncGitNow(
 		});
 		await refreshStatusBar(plugin);
 		plugin.log.error('git 同步失败', error);
-		if (options.manual) new Notice(`Git 同步失败。原因：${brief(message)}。`, 8000);
+		if (options.manual) {
+			// 落后几个提交一并说出来：只报"失败"时用户不知道两边差了多少
+			const behind = status?.behind ?? 0;
+			new Notice(
+				`Git 同步失败${behind > 0 ? `（落后 ${behind} 个提交）` : ''}。原因：${brief(message)}。`,
+				8000,
+			);
+		}
 		return false;
 	} finally {
 		plugin.gitBusy = false;
