@@ -91,7 +91,7 @@ export function receiveOnlySummary(input: {
 		const waiting = input.waiting > 0 ? ` · 本地还有 ${input.waiting} 个包没应用` : '';
 		return `${input.label}：拉取失败${why}${waiting}`;
 	}
-	const parts = [`${input.acted ? '已应用对方的包' : '没有新包'}（仅拉：不导出）`];
+	const parts = [`${input.acted ? '已应用其他电脑的包' : '没有新包'}（仅拉：不导出）`];
 	if (input.waiting > 0) parts.push(`还有 ${input.waiting} 个包没应用`);
 	if (input.peer) parts.push(input.peer);
 	return `${input.label}：${parts.join(' · ')}`;
@@ -103,7 +103,7 @@ export interface ExportRunResult {
 	wrote: boolean;
 	advice: string | null;
 	noChanges: boolean;
-	/** 这一轮写了完整备份（它**不进 git**，要给用户一句"手动复制给对方"） */
+	/** 这一轮写了完整备份（它**不提交到 Git**，要给用户一句"手动复制给其他电脑"） */
 	fullWritten: boolean;
 }
 
@@ -133,12 +133,12 @@ export async function exportBundlesNow(
 	 *
 	 * 为什么要拦在这里：以前只在 `main.tickExport` 与 `syncNow` 里判，任何新入口
 	 * （命令、别的面板按钮）忘了判就会在"只收不发"的机器上写出一份包，
-	 * 下一轮 git 同步顺手把它推上去 —— 用户报过"回退了某一份完整备份之后，
+	 * 下一轮 Git 同步一并把它推上去 —— 用户报过"回退了某一份完整备份之后，
 	 * 只同步没想导出，包却被上传了"。
 	 */
 	if (isReceiveOnly(plugin.settings)) {
 		plugin.log.debug(`${label}：仅拉方向，不写包`);
-		return { text: '仅拉：不导出包', wrote: false, advice: null, noChanges: true, fullWritten: false };
+		return { text: '仅拉：不导出同步包', wrote: false, advice: null, noChanges: true, fullWritten: false };
 	}
 	if (plugin.bundleBusy) {
 		if (!options.silent) new Notice('上一次导出尚未完成');
@@ -201,7 +201,7 @@ async function generationFloor(plugin: LocallySavePlugin, base: string): Promise
 			floor = Math.max(floor, header.targetGeneration ?? 0, header.baseGeneration ?? 0);
 		}
 	} catch (error) {
-		plugin.log.debug('读发号下限失败（按本机高水位发）', error);
+		plugin.log.debug('读发号下限失败（按本电脑高水位发）', error);
 	}
 	return floor;
 }
@@ -210,7 +210,7 @@ async function generationFloor(plugin: LocallySavePlugin, base: string): Promise
 function shortNotice(label: string, wrote: boolean, noChanges: boolean, fullWritten: boolean): string {
 	if (!wrote) return `${label}：${noChanges ? '没有变化' : '没有生成包'}`;
 	return fullWritten
-		? `${label}：已导出完整备份（需手动复制给对方）`
+		? `${label}：已导出完整备份（需手动复制给其他电脑）`
 		: `${label}：已导出更新包`;
 }
 
@@ -223,7 +223,7 @@ async function runExport(
 ): Promise<ExportRunResult | null> {
 	const { autoExportChanges, autoExportFull } = plugin.settings;
 	if (!autoExportChanges && !autoExportFull && options.defaultWhenOff !== true) {
-		if (!options.silent) new Notice('「导出更新包」「导出完整备份」均未开启：请在 设置 → 自动导出 中开启一项', 6000);
+		if (!options.silent) new Notice('「导出更新包」「导出完整备份」均未开启：请在 设置 → 自动导出同步包 中开启一项', 6000);
 		return null;
 	}
 	const base = bundleBaseDir(plugin.settings);
@@ -244,13 +244,13 @@ async function runExport(
 			plugin.log.debug(`${label}：${text}`);
 			return { text, wrote: false, advice: null, noChanges: true, fullWritten: false };
 		}
-		// 「该立新完整备份了」这句提醒：顺手导出（自动触发）时**只写状态栏与日志、不弹通知** ——
+		// 「该立新完整备份了」这句提醒：自动导出时**只写状态栏与日志、不弹通知** ——
 		// 提醒不是"出事了"，没必要在用户眼前闪一条；手动导出时连着结果一起说。
 		const said = !quiet && result.advice ? `${text}、${result.advice}` : text;
 		// 通知只说结果（一句）；文件名、路径、版本这些细节在更新记录 / 日志里
 		/**
 		 * **自动触发（quiet）只在"真需要你动手"时弹**（0.16.14）：
-		 * 完整备份不进 git，得自己复制给对方 —— 这一句必须说；更新包写完会自己推上去，
+		 * 完整备份不提交到 Git，得自己复制给对方 —— 这一句必须说；更新包写完会自己推上去，
 		 * 属例行结果，只写状态栏与日志（用户报的"右上角不断显示信息"：
 		 * 每 5 分钟一条"定时同步：已导出更新包"，其实没人需要看）。
 		 */
@@ -346,7 +346,7 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		 */
 		let pullOk = true;
 		if (connected) {
-			plugin.statusBar.showActivity(`${label}：拉取对方状态…`);
+			plugin.statusBar.showActivity(`${label}：拉取其他电脑状态…`);
 			pullOk = await syncGitNow(plugin, { quiet: true });
 		}
 
@@ -377,7 +377,7 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 			return;
 		}
 
-		plugin.statusBar.showActivity(`${label}：导出包…`);
+		plugin.statusBar.showActivity(`${label}：导出同步包…`);
 		const exported = await exportBundlesNow(plugin, label, {
 			quiet: true,
 			silent: true,
@@ -426,15 +426,15 @@ export async function syncNow(plugin: LocallySavePlugin, label = '立即同步')
 		 * 对方没拉、没应用之前，内容仍然是"待上报"。
 		 */
 		if (acted) {
-			parts.push('已应用对方的包');
+			parts.push('已应用其他电脑的包');
 			// 应用完立刻推一次：新的内容校验值 / 基准要让对面下一次拉取就看得到，
 			// 别等下一次 30 秒节拍（不然对面会在这一小段时间里报"不同步"）
 			await syncGitNow(plugin, { quiet: true });
 		} else if (exported?.wrote && !exported.fullWritten) {
-			parts.push(plugin.settings.syncDirection === 'upload' ? '已推送，等待对方拉取' : '已推送');
+			parts.push(plugin.settings.syncDirection === 'upload' ? '已推送，等待其他电脑拉取' : '已推送');
 		} else if (exported?.fullWritten) {
 			// 完整备份在 .git/info/exclude 里，不随 git 走 —— 别写成"已推送"
-			parts.push('完整备份不通过 Git 传输，需手动复制给对方');
+			parts.push('完整备份不通过 Git 传输，需手动复制给其他电脑');
 		} else if (exported?.noChanges) {
 			parts.push('没有新改动');
 		} else {
@@ -530,7 +530,7 @@ async function writePlannedBundles(
 			if (mode === 'full') {
 				fullWritten = true;
 				/**
-				 * 完整备份不进 git —— 导完顺手给**还仍使用旧的完整备份**的那几台各导一份差分更新包
+				 * 完整备份不提交到 Git —— 导完同时给**还仍使用旧的完整备份**的那几台各导一份差分更新包
 				 * （谁的起点在本机、谁和我同一分支都算在计划里）。
 				 *
 				 * 阈值别放宽：**一台都没上报过就什么都不做**（那种情况本来就把完整备份整份复制过去），
@@ -547,7 +547,7 @@ async function writePlannedBundles(
 					+ `${result.outcome.moveCount > 0 ? `、移动 ${result.outcome.moveCount} 处` : ''}）`
 					+ describeExportRange(result.outcome));
 			if (result.outcome.retired.length > 0) {
-				notes.push(`${result.outcome.retired.length} 个更新包的基准已无电脑使用，已移到回收站`);
+				notes.push(`${result.outcome.retired.length} 个更新包的完整备份已无电脑使用，已移到回收站`);
 			}
 			continue;
 		}
@@ -830,16 +830,16 @@ function confirmIncomingApply(
 	if (counts.rename > 0) parts.push(`改名 ${counts.rename} 处`);
 	if (counts.delete > 0) parts.push(`删除 ${counts.delete} 个`);
 	if (counts.restore > 0) parts.push(`恢复 ${counts.restore} 个误改的文件`);
-	if (counts.conflict > 0) parts.push(`${counts.conflict} 处两边都改过`);
+	if (counts.conflict > 0) parts.push(`${counts.conflict} 处两台电脑都改动过`);
 	if (plan.foldersToRemove.length > 0) parts.push(`删 ${plan.foldersToRemove.length} 个空文件夹`);
 	const summary = parts.length > 0 ? parts.join('、') : '只有目录调整';
 	return new Promise<boolean | 'defer'>(resolve => {
 		new ConfirmModal(plugin.app, {
-			title: '收到对方的更新包',
+			title: '收到其他电脑的更新包',
 			lines: [
 				`「${candidate.bundle.name}」会：${summary}。`,
 				'本地被覆盖或删除的文件会先移入回收目录，可从回收目录恢复。',
-				'应用完会把本机的改动导成更新包，对方拉到后两边一致。',
+				'应用完会把本电脑的改动导成更新包，其他电脑拉到后两台电脑内容一致。',
 			],
 			confirmText: '应用',
 			onResolve: resolve,
@@ -917,7 +917,7 @@ export async function checkIncomingBundles(
 		 *
 		 * 放在这条路上，是因为它同时覆盖**点一次「立即同步」**和**每 30 秒的自动节拍** ——
 		 * 用户不用再记一步。补之前会核对校验值（`planBaselineCopy`），不一致就不补、只如实说。
-		 * 完整备份不进 git，但它占了本机几百 MB，所以照规矩说一句。
+		 * 完整备份不提交到 Git，但它占了本机几百 MB，所以照规矩说一句。
 		 */
 		if (sweep.applied.length > 0) {
 			const baseline = await ensureLocalBaselineBundle(plugin, base);
@@ -962,22 +962,22 @@ async function reportIncomingSweep(
 		if (item.stateIdCompare !== 'match') mismatch = true;
 		pending = Math.max(pending, item.pending);
 		plugin.log.debug(
-			`已自动应用对方更新：写入 ${item.written} 个文件，删除 ${item.deleted} 个，恢复误改 ${item.restored} 个`,
+			`已自动应用其他电脑更新：写入 ${item.written} 个文件，删除 ${item.deleted} 个，恢复误改文件 ${item.restored} 个`,
 		);
 	}
 	if (sweep.applied.length > 0) {
 		const parts = [`写入 ${written} 个文件`];
 		if (deleted > 0) parts.push(`删除 ${deleted} 个`);
 		if (restored > 0) parts.push(`恢复误改 ${restored} 个`);
-		if (recovered > 0) parts.push(`${recovered} 份先回退到基准`);
-		const tail = mismatch ? (pending > 0 ? `。本机还有 ${pending} 个待发` : '。两边内容尚未完全一致') : '';
+		if (recovered > 0) parts.push(`${recovered} 份先回退到完整备份`);
+		const tail = mismatch ? (pending > 0 ? `。本电脑还有 ${pending} 个待发` : '。两台电脑内容尚未完全一致') : '';
 		/**
 		 * 自动接收不弹通知，只在状态栏顶一句；只有动了用户已有的东西才弹出。
 		 * 一次扫到多份包时合并成一条，不按包刷屏。
 		 */
-		plugin.statusBar.flash(`已应用对方更新：${parts.join('，')}${tail}。`);
+		plugin.statusBar.flash(`已应用其他电脑更新：${parts.join('，')}${tail}。`);
 		if (deleted > 0 || restored > 0 || recovered > 0) {
-			new Notice(`已自动应用对方更新：${parts.join('，')}${tail}。`, 7000);
+			new Notice(`已自动应用其他电脑更新：${parts.join('，')}${tail}。`, 7000);
 		}
 		await refreshStatusBar(plugin);
 	}
@@ -1001,7 +1001,7 @@ async function reportIncomingSweep(
 		: sweep.waiting.filter(name => !waitingNotified.has(name));
 	for (const name of fresh) waitingNotified.add(name);
 	if (fresh.length > 0) {
-		new Notice(`收到 ${fresh.length} 个更新包，但起点与本机基准不一致。请对方以你的完整备份为基准重新导出。`, 8000);
+		new Notice(`收到 ${fresh.length} 个更新包，但起点与本电脑当前使用的完整备份不一致。请其他电脑以本电脑的请其他电脑按本电脑当前使用的完整备份重新导出。重新导出。`, 8000);
 	}
 }
 

@@ -14,7 +14,7 @@ import type { FieldSection } from './types';
 export const GENERAL_SECTION: FieldSection = {
 	type: 'page',
 	heading: '通用',
-	desc: '总开关、日志、左侧栏图标和状态栏。',
+	desc: '总开关、日志、左侧栏图标与状态栏。',
 	groups: [
 		{
 			heading: '基本',
@@ -29,14 +29,14 @@ export const GENERAL_SECTION: FieldSection = {
 				{
 					key: 'logLevel',
 					name: '日志级别',
-					desc: '开发者控制台的输出量。排查问题时选「全部输出」，日常使用「只记错误」。',
+					desc: '开发者控制台的输出量。排查问题时选择「全部输出」，日常使用「只记错误」。',
 					control: { type: 'dropdown', options: LOG_LEVEL_OPTIONS },
 					coerce: value => coerceChoice(value, LOG_LEVELS, DEFAULT_SETTINGS.logLevel),
 				},
 				{
 					key: 'debugLog',
 					name: '调试日志',
-					desc: '将同步失败的异常写入插件目录下的 debug.log；排查结束后可关闭。',
+					desc: '把同步失败的异常写入插件目录下的 debug.log。排查结束后可以关闭该项。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.debugLog),
 				},
@@ -48,7 +48,7 @@ export const GENERAL_SECTION: FieldSection = {
 				{
 					key: 'ribbonSyncIcon',
 					name: '立即导出',
-					desc: '在左侧栏显示图标，点击后立即导出一份同步包。',
+					desc: '在左侧栏显示图标，点击后导出一份同步包。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.ribbonSyncIcon),
 				},
@@ -61,7 +61,7 @@ export const GENERAL_SECTION: FieldSection = {
 				},
 				{
 					key: 'ribbonApplyIcon',
-					name: '打开同步包并应用',
+					name: '应用同步包',
 					desc: '在左侧栏显示图标，点击后打开应用对话框。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.ribbonApplyIcon),
@@ -74,7 +74,7 @@ export const GENERAL_SECTION: FieldSection = {
 				{
 					key: 'showStatusBar',
 					name: '显示同步包状态',
-					desc: '在状态栏显示上次导出的结果与进行中的进度。',
+					desc: '在状态栏显示上次同步的结果与进行中的进度。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.showStatusBar),
 				},

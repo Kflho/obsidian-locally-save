@@ -7,7 +7,7 @@
  *
  * 用法（在 `src/` 下跑）：
  *   npm run check-bom            只报告
- *   npm run check-bom -- --fix   顺手把 BOM 去掉、旧名改掉
+ *   npm run check-bom -- --fix   同时把 BOM 去掉、旧名改掉
  */
 import fs from 'node:fs';
 import path from 'node:path';

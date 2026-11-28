@@ -48,7 +48,7 @@ function register(
  * 命令注册。
  *
  * **命令 ID 一旦发布就是稳定接口**，改名会让用户的快捷键失效 —— 别改。
- * 所以 0.8.0 砍掉「同步到本地副本」通道时：
+ * 所以 0.8.0 删除「同步到本地副本」通道时：
  * - `sync-now` / `sync-preview` 这两个 ID **留着，改指导出**（立即留一次 / 先预览会装什么），
  *   快捷键照旧能用，做的正好是最接近的那件事；
  * - `upload-to-copy` / `download-from-copy` 也留一版，只弹一句指路通知 ——
@@ -56,12 +56,12 @@ function register(
  */
 export function registerCommands(plugin: LocallySavePlugin): void {
 	register(plugin, 'sync-now', '立即同步（导出、推送与拉取）', () => syncNow(plugin));
-	register(plugin, 'sync-preview', '预览这次会导出什么', () => previewBundleExport(plugin));
+	register(plugin, 'sync-preview', '预览本次导出的内容', () => previewBundleExport(plugin));
 
-	// 下面两条是 0.8.0 砍掉的副本通道留下的 ID：**ID 不变**（用户的快捷键还认它们），
+	// 下面两条是 0.8.0 删除的副本通道留下的 ID：**ID 不变**（用户的快捷键还认它们），
 	// 现在接到 git 远程仓库的"推 / 拉"上 —— 语义正好是当年那两个方向。
-	register(plugin, 'upload-to-copy', '使对方与本机一致（推送）', () => uploadNow(plugin));
-	register(plugin, 'download-from-copy', '使本机与对方一致（拉取）', () => downloadNow(plugin));
+	register(plugin, 'upload-to-copy', '推送本电脑的改动', () => uploadNow(plugin));
+	register(plugin, 'download-from-copy', '拉取其他电脑的改动', () => downloadNow(plugin));
 
 	register(plugin, 'export-bundle', '导出同步包…', () => exportBundleAction(plugin));
 	register(plugin, 'apply-bundle', '打开同步包并应用…', () => applyBundleAction(plugin));
@@ -73,13 +73,13 @@ export function registerCommands(plugin: LocallySavePlugin): void {
 	register(plugin, 'sync-status', '查看各台电脑同步状态…', () =>
 		openPeerStatus(plugin, () => { void syncGitNow(plugin, { manual: true }); }));
 	// 换基准之后：还仍使用旧的完整备份的电脑靠这一份差分更新包一次变成新基准
-	register(plugin, 'export-rebaseline-diff', '导出换基准的差分更新包…', () =>
+	register(plugin, 'export-rebaseline-diff', '导出换完整备份的差分更新包…', () =>
 		rebaselineDiffAction(plugin.app, plugin, defaultBundleDir(plugin)));
 	// 应用差分更新包之后本机没有这个基准的包文件：补一份（自动接收那条路已经自动做，这里手动补漏）
-	register(plugin, 'copy-baseline-bundle', '给现在的基准导出一份完整备份…', () =>
+	register(plugin, 'copy-baseline-bundle', '导出当前库的完整备份…', () =>
 		baselineCopyAction(plugin));
 	// 换过几次基准之后"到底哪份对得上"：本机基准 / 盘上的完整备份 / 各台电脑报的基准
-	register(plugin, 'check-baseline', '检查两边的完整备份…', () =>
+	register(plugin, 'check-baseline', '检查本电脑与其他电脑的完整备份…', () =>
 		baselineHealthAction(plugin.app, plugin, defaultBundleDir(plugin)));
 
 	// 这条不受总开关限制 —— 它就是用来把插件重新打开的

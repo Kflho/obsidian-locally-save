@@ -34,10 +34,10 @@ src/                             源码 + npm 工程
   ui/                            导出/应用/包列表/管理/更新记录/帮助、动作层、状态栏
   settings/                      设置模型 + 字段表 + 面板
   scripts/                       构建、部署、发版、体检
-bin/exports/                     交付包（构建产物，除 README 外不进 git）
-bin/reference_docs/              规范、设计记录、调研（进 git）
-data/                            中间产物（除 README 外不进 git）
-dev/                             本机草稿、日志（不进 git）
+bin/exports/                     交付包（构建产物，除 README 外不提交到 Git）
+bin/reference_docs/              规范、设计记录、调研（提交到 Git）
+data/                            中间产物（除 README 外不提交到 Git）
+dev/                             本机草稿、日志（不提交到 Git）
 ```
 
 测试不在本仓：`kf-development-project/obsidian-locally-save-test`（`src` / `node_modules` 用 junction 指回本仓）。
@@ -60,7 +60,7 @@ dev/                             本机草稿、日志（不进 git）
 10. **命令 ID 与设置字段名是稳定接口**：`sync-now` / `sync-preview` 语义已改但 ID 保留；`upload-to-copy` / `download-from-copy` 暂留指路通知，下一版删。删设置项要守语义不悄悄变、能力不丢，迁移写在 `settingsFrom`。
 11. **`bundleDir` 必填**；留空时导出/应用按钮灰显并提示。三个自动触发字段名不变，语义是自动导出的时机；两个自动导出开关都关时触发了不做事、不报错。
 12. **界面文字只写当前状态与要求用户操作**：例行后台同步/自动导出/自动接收不弹通知；只有删本机文件、恢复误改、强制回退、需要用户动手、出错才弹。设置项一行名字 + 一句话说明；长解释进 README / 帮助弹窗；报数一行一项。
-13. **UI 守社区规矩**：不用废弃 API、不写死 `.obsidian`、定时器用 `window.setTimeout`、README 留英文概览。
+13. **UI 守社区规矩**：不用废弃 API、不硬编码 `.obsidian`、定时器用 `window.setTimeout`、README 留英文概览。
 
 ## 命令
 

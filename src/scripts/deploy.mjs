@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 /** 项目根（本脚本在 `src/scripts/` 下）。 */
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** 本机插件目录配置，不进版本库。 */
+/** 本机插件目录配置，不提交到版本库。 */
 const LOCAL_CONFIG = path.join(projectRoot, "deploy.local.json");
 
 /** 需要同步的运行用文件：main.js 来自交付包，manifest 在仓库根，styles 在 src。 */

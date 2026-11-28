@@ -1,4 +1,16 @@
 /**
+ * 统一弹窗外观：宽度类加在 `.modal` 上，内容类加在 `.modal-content` 上。
+ *
+ * 以前只给内容区加类，选择器写的是 `.modal.locally-save-modal`，两边对不上，
+ * 弹窗实际一直是默认 560px；说明一长就折成三四行、列表行被按钮挤成竖排。
+ * 1.15 实测：`--modal-width` 不改变 `.modal` 宽度，`width` 才生效。
+ */
+export function setupModal(modal: { modalEl?: HTMLElement; contentEl?: HTMLElement }): void {
+	modal.modalEl?.addClass?.('locally-save-modal');
+	modal.contentEl?.addClass?.('locally-save-modal-content');
+}
+
+/**
  * 打开"应用同步包"对话框时，把 Obsidian 窗口**叫到前台**。
  *
  * 为什么：双击 .lsave（走 obsidian:// 链接）或把文件拖进来时，Obsidian 可能还在别的窗口后面，

@@ -177,7 +177,7 @@ export interface ShelfPrepared {
 export async function prepareShelf(options: ShelfOptions): Promise<ShelfPrepared> {
 	const dir = path.resolve(options.dir);
 	const remote = options.remote.trim();
-	if (remote === '') throw new Error('还没填远程地址：先建一个私有空仓库，把地址填进来');
+	if (remote === '') throw new Error('还没填远程地址：先建一个私有空仓库，把地址写入来');
 	const branch = normalizeBranch(options.branch);
 
 	await ensureDir(dir);
@@ -350,7 +350,7 @@ function excludeContent(dir: string, trashDir?: string | null): string {
 /** 包是二进制：不做文本 diff / 合并 / 换行转换（本地文件，不版本化） */
 const ATTRIBUTES = '*.lsave -text -diff -merge\n';
 
-/** 第一次建仓时写死的几项：换行/权限位/签名都关掉，别让两台机器的差异变成假改动 */
+/** 第一次建仓时硬编码的几项：换行/权限位/签名都关掉，别让两台机器的差异变成假改动 */
 async function configureShelf(git: GitRunner): Promise<void> {
 	const settings: [string, string][] = [
 		['core.autocrlf', 'false'],

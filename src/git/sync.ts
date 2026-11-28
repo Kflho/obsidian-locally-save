@@ -398,7 +398,7 @@ async function commitPending(git: GitRunner): Promise<{ commit: string; files: s
  * 子目录形态的提交：**只提交远程仓库自己那一段**。
  *
  * cwd 就在远程仓库里，所以 `-- .` 正好圈住它；`commit` 也带同一个 pathspec，
- * 外层仓库里用户自己暂存的文件不会被顺手提交进去。
+ * 外层仓库里用户自己暂存的文件不会被同时提交进去。
  */
 async function commitScoped(
 	git: GitRunner,
@@ -574,7 +574,7 @@ function pushOnce(git: GitRunner, branch: string): Promise<GitResult> {
  *
  * 判据是 git 自己的差异（`baseHead..HEAD` 里新增的 `.lsave`），不是"磁盘上前后多了哪些文件"：
  * - 磁盘快照会把**本机在同步窗口里自己写下的东西**算成"从远程收到" —— 导出的包、
- *   回收站备份、`full/` 里刚写的完整备份（它根本不走 git）；读目录偶发失败时更糟：
+ *   回收站备份、`full/` 里刚写的完整备份（它根本不通过 Git）；读目录偶发失败时更糟：
  *   `before` 少看见几个，`after` 全算成新拉下来的；
  * - 界面上那句「已从 Git 远程接收 N 个同步包」就是拿这个数报的。报错了，另一台会以为
  *   自己发出了包（用户报的"一边没有更新包、另一边一直提示收到"）。
@@ -887,7 +887,7 @@ async function listBundlePaths(dir: string, trashDir?: string | null): Promise<S
 /**
  * 远程仓库里有没有"还没提交的东西"（只看本地，不联网）。
  *
- * 节拍靠它判断"要不要现在跑一次同步"：本机刚留了包 → 脏 → 下一个 30 秒就提交 + 推送。
+ * 节拍靠它判断"要不要现在执行一次同步"：本机刚留了包 → 脏 → 下一个 30 秒就提交 + 推送。
  * 独立远程仓库用整仓 `status`（被 `.git/info/exclude` 挡住的完整备份、回收站不会让它变脏）；
  * 子目录形态只看远程仓库自己那一段 —— 外层仓库里用户改了别的文件，不该让插件一直"以为有活干"。
  */

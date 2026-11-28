@@ -8,7 +8,7 @@ import { toNative } from '../utils/paths';
  * 面板怎么渲染不在这里（见 `fields/` 与 `tab.ts`）；这里只回答
  * "有哪些设置、默认是多少、脏数据怎么收敛"。
  *
- * 0.8.0 砍掉「同步到本地副本」通道、0.11.0 把应用收成"严格同步"之后，设置只剩两件事：
+ * 0.8.0 删除「同步到本地副本」通道、0.11.0 把应用收成"严格同步"之后，设置只剩两件事：
  * **包放在哪 / 什么时候自动导出**。
  */
 
@@ -70,7 +70,7 @@ export const GIT_PULL_OPTIONS: Record<string, string> = {
 /**
  * **同步方向**（0.8.0 之前也有这一项，那会儿管的是"本地副本"；现在管 git 远程仓库）。
  *
- * 三种取值不是"冲突策略"，而是"这台机器负责哪一半"（0.15 起是硬边界）：
+ * 三种取值表示"这台机器负责哪一半"（0.15 起是硬边界）：
  * - `both`：收发都做 —— 收到先弹窗确认，应用后把本机改动导出回传；
  * - `upload`：只推 —— 只发不收，不应用对方的包；
  * - `download`：只拉 —— 只收不发，收到直接应用（本机改动进回收目录），**也不导出任何包**。
@@ -84,7 +84,7 @@ export const DIRECTION_OPTIONS: Record<SyncDirection, string> = {
 };
 
 /**
- * 「更新包攒到多大就提醒立新基准」的可选值：**0 ＝ 不提醒**（键是存进 data.json 的 MB 数）。
+ * 「更新包累积到多大就提醒立新基准」的可选值：**0 ＝ 不提醒**（键是存进 data.json 的 MB 数）。
  *
  * 更新包是"自起点那份完整备份累积"的，变大了就该导一份新的完整备份换基准 ——
  * 这是新模型里唯一需要用户做的维护动作（0.14 起；0.11 删过这一项，现在它又有前提了）。
@@ -111,7 +111,7 @@ export interface PluginSettings {
 	debugLog: boolean;
 
 	// ------------------------------------------------------------ 包的内容
-	/** 不进包的文件：一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
+	/** 不纳入同步包的文件：一行一条（写法同 .gitignore，见 src/sync/exclude.ts） */
 	excludePatterns: string;
 
 	// 0.11.0 删掉了「应用同步包时的默认处理」那一组三项（`propagateDeletions` /
@@ -166,7 +166,7 @@ export interface PluginSettings {
 	 *
 	 * （0.14 起"留空"的含义从"自动接在这条线的最新点后面"变成"本机当前使用的这一份完整备份"：
 	 * 点只有完整备份了，没有线头可接。日常完全一样 —— 只有在"我落在后面"时才会不同，
-	 * 而那正是这次要砍掉的那种隐式行为。）
+	 * 而那正是这次要删除的那种隐式行为。）
 	 */
 	changesFromState: string;
 	/**
@@ -175,7 +175,7 @@ export interface PluginSettings {
 	 */
 	changesToState: string;
 	/**
-	 * **更新包攒到多大就提醒立新基准**（MB，`0` ＝ 不提醒）。
+	 * **更新包累积到多大就提醒立新基准**（MB，`0` ＝ 不提醒）。
 	 *
 	 * 0.11 删过这一项（那会儿是链条模型：更新包只装一环，不存在"越攒越大"）；
 	 * 0.14 更新包又回到"自起点那份完整备份累积"，这个提醒重新有了前提 ——
@@ -188,7 +188,7 @@ export interface PluginSettings {
 	 * **把同步包文件夹接到一个 git 仓库**（默认关）。
 	 *
 	 * 关着时插件一个网络请求都不发；打开后也只是"同步包文件夹"这一个 git 工作区在推送和拉取 ——
-	 * **整库永远不进 git**，库多大都不影响。
+	 * **整库永远不提交到 Git**，库多大都不影响。
 	 */
 	gitEnabled: boolean;
 	/** 远程地址：HTTPS 或 SSH。**只在"接入"动作里写进 `.git/config`**，不会自动改已有的 */
@@ -258,7 +258,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 };
 
 // ------------------------------------------------------------------ 取值收敛
-// data.json 可能是旧版本写的、也可能被手工改坏。设置面板读 / 写与插件启动
+// data.json 有两个来源：旧版本写入，或手工改坏。设置面板读 / 写与插件启动
 // 读盘都走这几个函数，保证拿到的永远是合法值。
 
 export function coerceBoolean(value: unknown, fallback: boolean): boolean {
@@ -330,7 +330,7 @@ export function settingsFrom(data: unknown): PluginSettings {
 	 */
 	const saveDelay = raw.syncAfterSave === false ? 0 : raw.syncAfterSaveDelay;
 	/**
-	 * 迁移：0.8.0 砍掉了「同步到本地副本」通道，`targetDir` 与 `syncDirection` 随之消失。
+	 * 迁移：0.8.0 删除了「同步到本地副本」通道，`targetDir` 与 `syncDirection` 随之消失。
 	 *
 	 * 老用户的包默认就放在 `<目标文件夹>/.lsave/bundles` —— 把「同步包文件夹」
 	 * 迁移成这个路径：包还在原处，用户不必重新找一遍。自己填过包目录的照旧不动。

@@ -10,8 +10,8 @@ import type { FieldSection } from './types';
  */
 export const AUTO_SECTION: FieldSection = {
 	type: 'page',
-	heading: '自动导出',
-	desc: '自动导出的时机与类型，默认全关。',
+	heading: '自动导出同步包',
+	desc: '自动导出同步包的时机与类型，默认全部关闭。',
 	groups: [
 		{
 			heading: '触发时机',
@@ -25,8 +25,8 @@ export const AUTO_SECTION: FieldSection = {
 				},
 				{
 					key: 'autoSyncInterval',
-					name: '定时同步（导出 + git）',
-					desc: '每隔一段时间导出一份同步包（若已开启自动导出），并与 Git 远程推送、拉取一次；0 表示只手动触发。',
+					name: '定时同步（导出与 Git）',
+					desc: '定时导出一份同步包（需要开启「导出更新包」），并与 Git 远程推送、拉取一次；选择 0 时只手动触发。',
 					control: { type: 'dropdown', options: SYNC_INTERVAL_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,
@@ -48,20 +48,20 @@ export const AUTO_SECTION: FieldSection = {
 			],
 		},
 		{
-			heading: '留哪种包',
+			heading: '导出的同步包类型',
 			// 两个开关各自独立：都要就都开（顺序仍是先完整、后更新）
 			fields: [
 				{
 					key: 'autoExportChanges',
 					name: '导出更新包',
-					desc: '仅包含自起点完整备份以来发生变更的文件。首次使用需先导出一份完整备份。',
+					desc: '只导出自上次完整备份以来改动的文件。首次使用需要先导出一份完整备份。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportChanges),
 				},
 				{
 					key: 'autoExportFull',
 					name: '导出完整备份',
-					desc: '重写整个仓库，大仓库会明显变慢。它同时是基准和还原点。',
+					desc: '重新写入整个仓库，大仓库会明显变慢。完整备份同时作为之后更新包的起点与还原点。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoExportFull),
 				},

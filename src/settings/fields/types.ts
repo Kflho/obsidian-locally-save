@@ -41,7 +41,7 @@ export type DropdownOptions =
 	| Record<string, string>
 	| ((plugin: LocallySavePlugin) => Record<string, string>);
 
-/** 取某个控件此刻该显示的选项（固定表原样返回；函数就当场算） */
+/** 取某个控件此刻该显示的选项（固定表原样返回；函数就立即算） */
 export function dropdownOptions<T>(control: ControlSpec<T>, plugin: LocallySavePlugin): Record<string, string> {
 	if (control.type !== 'dropdown') return {};
 	if (typeof control.options !== 'function') return control.options;
@@ -97,7 +97,7 @@ export interface FieldGroup<T = PluginSettings> {
 }
 
 /**
- * 一个「动作」：不是设置项，而是一行按钮（导出同步包、打开包、看说明这类）。
+ * 一个「动作」：一行按钮（导出同步包、打开包、看说明这类）。
  *
  * 单独一类而不是放进 FieldSpec：动作没有 key、不存进 data.json，
  * 也不参与"每个设置字段都必须有定义"的那套核对。

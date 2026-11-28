@@ -98,7 +98,7 @@ export async function testSshHost(host: string): Promise<{ ok: boolean; text: st
 	const hint = ok
 		? null
 		: /host key verification failed/i.test(text)
-			? '这台机器还没确认过远程主机的校验值：先在终端跑一次 ssh -T git@' + host
+			? '这台机器还没确认过远程主机的内容编号：先在终端执行一次 ssh -T git@' + host
 				+ '，看到 "successfully authenticated" 之后再点测试'
 			: null;
 	return { ok, text: text || `ssh 退出码 ${result.code}`, ...(hint ? { hint } : {}) };
@@ -140,7 +140,7 @@ export async function addKeyWithGh(key: SshKey): Promise<{ ok: boolean; text: st
 	const hint = result.missing
 		? '没找到 GitHub CLI（gh）：直接复制公钥到 GitHub 网页也行'
 		: /404|403|not found|forbidden|missing.*scope/i.test(text)
-			? `gh 的 token 缺 admin:public_key 权限：在终端跑 ${GH_REFRESH_COMMAND} 之后再试；或者直接复制公钥到网页`
+			? `gh 的 token 缺 admin:public_key 权限：在终端执行 ${GH_REFRESH_COMMAND} 之后再试；或者直接复制公钥到网页`
 			: null;
 	return {
 		ok: false,

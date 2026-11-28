@@ -29,15 +29,15 @@ import type { FieldSection } from './types';
 export const GIT_SECTION: FieldSection = {
 	type: 'page',
 	heading: 'Git 远程',
-	desc: '把同步包文件夹接入 Git 仓库，通过推送和拉取搬运同步包。完整备份体积较大，不通过 Git 传输。',
+	desc: '把同步包文件夹接入 Git 仓库，通过推送和拉取传输同步包。完整备份较大，不通过 Git 传输。',
 	groups: [
 		{
 			heading: '连接',
 			fields: [
 				{
 					key: 'gitEnabled',
-					name: '启用 git 传输',
-					desc: '开启后自动提交并推送新包，并定时拉取对方的包；关闭时不发起任何网络请求。',
+					name: '启用 Git 传输',
+					desc: '开启后自动提交并推送新的同步包，并定时拉取其他电脑的包；关闭后不发起网络请求。',
 					control: { type: 'toggle' },
 					// 打开 / 关掉之后，「当前状态」那一行要跟着变（旧版 DOM 靠它整块重画）
 					rerenderOnChange: true,
@@ -46,47 +46,47 @@ export const GIT_SECTION: FieldSection = {
 				{
 					key: 'gitRemote',
 					name: '远程地址',
-					desc: 'HTTPS 或 SSH 地址。请用私有仓库：更新包里是笔记内容。',
+					desc: 'HTTPS 或 SSH 地址。请使用私有仓库，因为更新包中包含笔记内容。',
 					control: { type: 'text', placeholder: 'git@github.com:you/lsave-bundles.git' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.gitRemote),
 				},
 				{
 					key: 'syncDirection',
-					name: '方向',
-					desc: '决定这台电脑负责哪一半：只发送、只接收，还是收发都做。',
+					name: '同步方向',
+					desc: '本电脑负责发送、接收，还是两者都做。',
 					control: { type: 'dropdown', options: DIRECTION_OPTIONS },
 					coerce: value => coerceDirection(value),
 				},
 			],
 		},
 		{
-			heading: '状态与接入',
-			// 按钮**不再按条件变灰**：变灰只会让人问"为什么点不了"。点了就当场说清差什么、下一步做什么。
+			heading: '连接状态',
+			// 按钮**不再按条件变灰**：变灰只会让人问"为什么点不了"。点了就立即说清差什么、下一步做什么。
 			fields: [],
 			actions: [
 				{
-					name: '当前状态',
+					name: '连接状态',
 					desc: plugin => describeGitConnection(plugin),
-					button: '看详情',
+					button: '查看详情',
 					run: plugin => { void checkGitEnvironment(plugin); },
 				},
 				{
-					name: '接入这个远程',
-					desc: '把同步包文件夹初始化为 Git 仓库并连接远程；信息不完整时会提示缺少什么。',
-					button: '接入…',
+					name: '连接远程仓库',
+					desc: '把同步包文件夹初始化为 Git 仓库并连接远程地址；信息不完整时提示缺少什么。',
+					button: '连接…',
 					cta: true,
 					run: plugin => { void connectGitRemote(plugin); },
 				},
 				{
-					name: '测试连通性',
-					desc: '检查 Git、远程地址和 SSH 凭据是否可用。该操作会联网。',
-					button: '测试',
+					name: '检查连接',
+					desc: '检查 Git、远程地址与 SSH 凭据是否可用。此操作会联网。',
+					button: '检查',
 					run: plugin => { void checkGitConnectivity(plugin); },
 				},
 				{
-					name: 'SSH 接入',
+					name: 'SSH 密钥',
 					desc: '生成或复制公钥、添加密钥，并测试 SSH 登录。',
-					button: 'SSH 设置…',
+					button: '设置 SSH 密钥…',
 					run: plugin => { new SshKeyModal(plugin.app, plugin.settings.gitRemote).open(); },
 				},
 			],
@@ -97,29 +97,29 @@ export const GIT_SECTION: FieldSection = {
 			actions: [
 				{
 					name: '立即同步',
-					desc: '导出同步包、与远程推送与拉取，并应用收到的包。无需等待下一个定时周期。',
+					desc: '导出同步包，与远程仓库推送和拉取，并应用收到的包；不必等待下一个定时周期。',
 					button: '同步',
 					cta: true,
 					run: plugin => { void syncNow(plugin); },
 				},
 				{
 					name: '各台电脑同步状态',
-					desc: '每台电脑的内容校验值、版本号和最后上报时间。',
+					desc: '查看每台电脑的内容编号、版本号与最后上报时间。',
 					button: '查看…',
 					run: plugin => {
 						void openPeerStatus(plugin, () => { void syncGitNow(plugin, { manual: true }); });
 					},
 				},
 				{
-					name: '让对面和我一致',
-					desc: '把本机改动导出为更新包并推送，对方应用后与本机一致。',
-					button: '推上去',
+					name: '推送本电脑的改动',
+					desc: '把本电脑改动导出为更新包并推送；其他电脑应用后与本电脑一致。',
+					button: '推送',
 					run: plugin => { void uploadNow(plugin); },
 				},
 				{
-					name: '让我和对面一致',
-					desc: '拉取对方最新的包并对齐。本机改动会先移入回收目录。',
-					button: '拉下来',
+					name: '拉取其他电脑的改动',
+					desc: '拉取其他电脑最新的包并对齐；本电脑改动先移到回收站。',
+					button: '拉取',
 					run: plugin => { void downloadNow(plugin); },
 				},
 			],

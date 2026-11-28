@@ -12,60 +12,50 @@ import {
 } from '../bundle/manage';
 import type { ManagedBundle } from '../bundle/manage';
 import { baselineOfBundle } from '../bundle/baseline';
-import { describeLocalState } from '../bundle/log';
 import { dirExists } from '../sync/disk';
 import { loadState, loadStateSync } from '../sync/state';
 import type { PluginState } from '../sync/state';
 import { formatBytes, formatTime } from '../utils/format';
 import { syncGitNow } from './git';
-import { markDestructive } from './modal-layout';
+import { markDestructive, setupModal } from './modal-layout';
 import { openFolderInExplorer } from './reveal';
 
 /**
- * 同步包列表 —— 导出弹窗、导入弹窗、管理弹窗**共用同一套**。
+ * 同步包列表：导出、应用、管理三个弹窗共用。
  *
- * 以前只有导入弹窗列包，而且除了"点一下检查它"什么也做不了：
- * 想删掉一个过时的包、想看看它到底在哪个目录，都只能去资源管理器里翻。
- * 这里把"常用操作"直接放到每一行上：检查 / 应用、打开所在文件夹、复制路径、删除。
+ * 每行显示两行信息：第一行写类型、版本与“当前基准”，第二行写内容编号、大小与时间。
+ * 行内只放一个主要动作和一个“更多”按钮；删除、复制路径、打开文件夹放进展开区，
+ * 避免一行五六个按钮把信息列压成竖排。
  *
- * 列表只是**显示与转发**：扫描、删除、回收站都在 `bundle/manage.ts` 里（不 import obsidian，能直接测）。
+ * 列表只负责显示与转发：扫描、删除、回收站在 `bundle/manage.ts` 里（不 import obsidian，能直接测）。
  * Modal 不继承 Component，所以事件监听由本类自己挂、元素被清空时一起丢。
  */
 
-/** 列表里最多列多少个包（再多也没人往下翻，还给"省略"一行说明） */
+/** 列表里最多显示多少个包；超出时列出一行说明与总数。 */
 const MAX_BUNDLES = 20;
 
 export interface BundleListViewOptions {
-	/** 此刻要显示哪个目录里的包：弹窗里用户可能刚改过路径，所以给的是函数 */
+	/** 此刻显示哪个目录里的包：弹窗里用户可能刚改过路径，所以给函数。 */
 	baseDir: () => string;
-	/** 点某一行（选中） */
+	/** 点某一行（选中）。 */
 	onSelect?: (item: ManagedBundle) => void;
-	/** 行内主动作（如「应用…」「检查」）；不给就不显示这个按钮 */
+	/** 行内主要动作（如「应用」）；不提供时不显示按钮。 */
 	actionLabel?: string;
 	onAction?: (item: ManagedBundle) => void;
 	/**
-	 * **完整备份**那一行多出来的动作（如「以这一份为基准…」）。
-	 *
-	 * 只对完整备份出现：完整备份自带完整清单，可以直接站上去；
-	 * 更新包是"完整备份 → 完整备份（或最新状态）"的差量，它自己不是一份完整内容
-	 * （要走「应用…」那条路，由那边算清楚会变成什么样）。
-	 * 给的是回调而不是直接在这里干活 —— 真正的动作走应用对话框（先出报告、再动手），
-	 * 免得管理窗口里点一下就把仓库改了。
+	 * 完整备份那一行多出来的动作（如「以这一份为基准」）。
+	 * 只对完整备份出现：更新包本身不是完整内容，要由应用那边计算目标状态。
+	 * 回调进入应用对话框，先出报告再动手。
 	 */
 	baselineLabel?: string;
 	onBaseline?: (item: ManagedBundle) => void;
-	/** 某个包被移到回收站之后（导入弹窗要把当前选中的清掉） */
+	/** 某个包被移到回收站之后（应用弹窗要清掉当前选中项）。 */
 	onRemove?: (file: string) => void;
-	/** 显示回收站那一行（只有管理弹窗要） */
+	/** 显示回收站那一行（管理弹窗与导出弹窗需要）。 */
 	showTrash?: boolean;
-	/**
-	 * 顶部那行「本机现在在哪儿」（第几代 · 基于哪份完整备份 · 内容校验值）。
-	 *
-	 * 用户提的：同步包界面（管理 / 导出 / 应用）都得能一眼看到"我这台现在基于第几代、
-	 * 文件状态是什么" —— 光有版本号认不出跟对方是不是同一份东西，得跟内容校验值一起看。
-	 */
+	/** 顶部状态条：本电脑版本、当前基准、内容编号。 */
 	showPosition?: boolean;
-	/** 列表为空时显示什么 */
+	/** 列表为空时显示的文字。 */
 	emptyText?: string;
 }
 
@@ -74,42 +64,35 @@ export class BundleListView {
 	private options: BundleListViewOptions;
 	private headEl!: HTMLElement;
 	private listEl!: HTMLElement;
-	/** 路径不存在 / 没有包之类的说明 */
+	/** 路径不存在 / 没有包之类的说明。 */
 	private noteEl!: HTMLElement;
-	/** 顶部那行"本机现在在哪儿"（可选，见 showPosition） */
+	/** 顶部状态条（可选，见 showPosition）。 */
 	private positionEl: HTMLElement | null = null;
 	private trashEl: HTMLElement | null = null;
 	private items: ManagedBundle[] = [];
 	private selected: string | null = null;
-	/** 我这边的状态：行里标出"哪个包就是我现在的基准"，顶部写"第几代 + 内容校验值" */
+	/** 本电脑状态：标出“哪个包是当前基准”，并填充顶部状态条。 */
 	private local: PluginState | null = null;
-	/** 同步包文件夹在不在：不在跟"里面没有包"要分开说，路径打错时前者更有用 */
+	/** 同步包文件夹在不在：与“里面没有包”分开说明。 */
 	private baseExists = true;
-	/** 刷新序号：连打几个字会触发好几次，异步读目录会乱序返回 */
+	/** 刷新序号：连续输入会触发多次刷新，异步读目录可能乱序返回。 */
 	private token = 0;
-	/** 攒着的那次刷新（见 schedule） */
-	// 用 window.setTimeout 而不是裸的 setTimeout：弹窗（popout window）里也能对上号
+	/** 待执行的那次刷新（见 schedule）。 */
 	private pending: number | null = null;
 
 	constructor(plugin: LocallySavePlugin, parent: HTMLElement, options: BundleListViewOptions) {
 		this.plugin = plugin;
 		this.options = options;
 		this.headEl = parent.createDiv({ cls: 'locally-save-bundles-head' });
-		// 「本机现在在哪儿」放在最上面：管理和导出时最先要知道的就是"我这边是哪一代、
-		// 内容校验值是什么"，再往下才是"文件夹里都有哪些包"
 		if (options.showPosition) this.positionEl = parent.createDiv({ cls: 'locally-save-position' });
 		this.noteEl = parent.createDiv({ cls: 'locally-save-hint' });
-		// 回收站那一行放在**列表上面**：放下面时会被"最多 40vh 的滚动列表"顶出视野，
-		// 用户翻不到就会问"删掉的包到底去哪了、回收用哪"（报过）
 		if (options.showTrash) this.trashEl = parent.createDiv({ cls: 'locally-save-trash' });
 		this.listEl = parent.createDiv({ cls: 'locally-save-list' });
 	}
 
 	/**
-	 * 路径输入框每敲一个字都会调它：攒 250 毫秒再扫。
-	 *
-	 * 直接 refresh 的话，敲一个路径就是十几次「读目录 + 挨个读包头部」——
-	 * 包多的时候卡的是自己。按钮点击、删完包这种要立刻看到结果的**仍然直接 refresh**。
+	 * 路径输入框每输入一个字都会调用它：等待 250 毫秒再扫描。
+	 * 按钮点击、删除之后仍直接调用 refresh，立即看到结果。
 	 */
 	schedule(): void {
 		if (this.pending) window.clearTimeout(this.pending);
@@ -119,14 +102,13 @@ export class BundleListView {
 		}, 250);
 	}
 
-	/** 重新扫一遍同步包文件夹并重画 */
+	/** 重新扫描同步包文件夹并重画。 */
 	async refresh(): Promise<void> {
 		const token = ++this.token;
 		const base = this.options.baseDir();
 		const exists = base !== '' && await dirExists(base);
 		const items = exists ? await listBundles(base) : [];
-		if (token !== this.token) return; // 有更新的刷新在跑，这次的结果作废
-		// 我这边的状态（第几代 / 基于哪份完整备份 / 内容校验值）：读不到就只画包列表
+		if (token !== this.token) return;
 		if (this.positionEl) {
 			try {
 				this.local = await loadState(this.plugin.stateFile());
@@ -137,13 +119,12 @@ export class BundleListView {
 
 		this.baseExists = exists;
 		this.items = items;
-		// 选中的包可能已经被删 / 被换过目录了
 		if (this.selected && !items.some(item => item.file === this.selected)) this.selected = null;
 		this.render();
 		if (this.trashEl) await this.renderTrash();
 	}
 
-	/** 选中某个包（外面拖进来 / 粘了路径时同步高亮） */
+	/** 选中某个包（拖入 / 粘贴路径时同步高亮）。 */
 	markSelected(file: string): void {
 		this.selected = file;
 		this.render();
@@ -168,11 +149,14 @@ export class BundleListView {
 		const changes = this.items.filter(item => item.mode === 'changes').length;
 		const unknown = this.items.filter(item => item.mode === null).length;
 		this.headEl.createSpan({
-			text: this.items.length > 0
-				? `同步包 ${this.items.length} 个：更新 ${changes}、完整 ${full}`
-					+ `${unknown > 0 ? `、读不出信息 ${unknown}` : ''}`
-				: '同步包',
+			text: this.items.length > 0 ? `同步包 ${this.items.length} 个` : '同步包',
 		});
+		if (this.items.length > 0) {
+			this.headEl.createSpan({
+				text: `更新 ${changes} · 完整 ${full}${unknown > 0 ? ` · 读不出信息 ${unknown}` : ''}`,
+				cls: 'locally-save-hint',
+			});
+		}
 		const refreshButton = this.headEl.createEl('button', { text: '重新列出', cls: 'locally-save-mini' });
 		refreshButton.addEventListener('click', () => { void this.refresh(); });
 
@@ -184,8 +168,6 @@ export class BundleListView {
 			return;
 		}
 
-		// 分组：先按来源（我导出的 / 收下来的），再按类型，组内从新到老
-		// （规则在 bundle/manage.ts 的 groupBundles；来源认包头部那个 `source.copyId`）
 		let mine: string | null = null;
 		try {
 			mine = loadStateSync(this.plugin.stateFile())?.copyId ?? null;
@@ -206,51 +188,56 @@ export class BundleListView {
 		}
 		if (this.items.length > shown) {
 			this.listEl.createDiv({
-				text: `… 其余 ${this.items.length - shown} 个已省略（仍在文件夹里，可在资源管理器按时间找）`,
+				text: `未显示 ${this.items.length - shown} 个（仍在文件夹里，可在资源管理器中按时间查找）`,
 				cls: 'locally-save-more',
 			});
 		}
 	}
 
+	/** 一行：标题与元数据各一行，右侧一个主要动作与“更多”。 */
 	private renderRow(item: ManagedBundle): void {
 		const row = this.listEl.createDiv({
 			cls: `locally-save-row is-bundle${item.file === this.selected ? ' is-selected' : ''}`
 				+ `${item.header ? '' : ' is-unknown'}`,
 		});
-		// 文件名不写进行里（用户提的：名字一长串挤占大量空间，一行就废了）——
-		// 想认它是哪个包，鼠标停在这行上就是完整路径；「复制路径」也还在。
 		row.setAttribute('title', item.error ? `读不出包信息：${item.error}` : item.file);
-		// 类型由分组标题说了，行里只写**看包的判据**：第几代 → 第几代 · 内容校验值 · 大小 · 时间
-		row.createSpan({ text: this.describeRow(item), cls: 'locally-save-reason' });
-		// 这就是我现在站着的那份完整备份：标出来，用户才知道"我这台基于第几代包"。
-		// **光比文件名不够**：应用完整备份时如果有一批文件没写成，`fullFile` 可能已经指过去、
-		// 内容却没写成（老版本留下的状态就这样），再标"本机现在的基准"就是骗人 ——
-		// 还要比对基准校验值（那份包自己的清单算出来的）。
-		if (this.local?.bundle?.fullFile === item.name
-			&& item.header
-			&& this.local.bundle.fullHash === baselineOfBundle(item.header)) {
-			row.createSpan({ text: '← 本机现在的基准', cls: 'locally-save-current' });
+
+		const main = row.createDiv({ cls: 'locally-save-row-main' });
+		main.createSpan({ text: this.titleOf(item), cls: 'locally-save-row-title' });
+		if (this.isCurrentBaseline(item)) {
+			main.createSpan({ text: '当前完整备份', cls: 'locally-save-current' });
 		}
 
-		const actions = row.createDiv({ cls: 'locally-save-bundle-actions' });
+		const meta = row.createDiv({ cls: 'locally-save-row-meta', text: this.metaOf(item) });
+		const stateId = item.header?.stateId?.id;
+		if (stateId) meta.setAttribute('title', stateId);
+
+		const actions = row.createDiv({ cls: 'locally-save-row-actions' });
 		if (this.options.actionLabel && this.options.onAction) {
 			this.addButton(actions, this.options.actionLabel, false, () => this.options.onAction?.(item));
 		}
-		// 「以这一份为基准」只给完整备份：更新包自己不是一份完整内容，
-		// 谈不上"以我为基准"（它送到的状态由应用那边算）
+		const moreButton = actions.createEl('button', { text: '更多', cls: 'locally-save-mini' });
+		moreButton.setAttribute('aria-label', '更多操作');
+		let actionsOpen = false;
+		moreButton.addEventListener('click', (event: Event) => {
+			event?.stopPropagation?.();
+			actionsOpen = !actionsOpen;
+			row.toggleClass('is-actions-open', actionsOpen);
+		});
+
+		const more = row.createDiv({ cls: 'locally-save-row-more' });
 		if (this.options.baselineLabel && this.options.onBaseline && item.mode === 'full' && item.header) {
-			this.addButton(actions, this.options.baselineLabel, false, () => this.options.onBaseline?.(item));
+			this.addButton(more, this.options.baselineLabel, false,
+				() => this.options.onBaseline?.(item));
 		}
-		this.addButton(actions, '文件夹', false, () => openFolderInExplorer(
+		this.addButton(more, '打开文件夹', false, () => openFolderInExplorer(
 			item.dir,
 			// App 的类型里没有声明 openWithDefaultApp（Obsidian 有，类型文件没跟上）
 			this.plugin.app as unknown as { openWithDefaultApp?: (path: string) => void },
 		));
-		this.addButton(actions, '复制路径', false, () => { void copyPath(item.file); });
-		// 两个删除并排：默认那个是"移到回收站"（还能恢复），旁边才是真删 ——
-		// 只有"移走"的话，想单独扔掉一个没用的包就得清空整个回收站（用户提的）
-		this.addButton(actions, '移到回收站', false, () => this.confirmTrash(item));
-		this.addButton(actions, '彻底删除', true, () => this.confirmDelete(item));
+		this.addButton(more, '复制路径', false, () => { void copyPath(item.file); });
+		this.addButton(more, '移到回收站', false, () => this.confirmTrash(item));
+		this.addButton(more, '彻底删除', true, () => this.confirmDelete(item));
 
 		row.addEventListener('click', () => {
 			this.selected = item.file;
@@ -259,58 +246,59 @@ export class BundleListView {
 		});
 	}
 
-	/**
-	 * 一行里写的那些字 —— **没有文件名**，只有认包要用的判据。
-	 *
-	 * 顺序按"最想先看到的"排：**是第几代 · 内容校验值**（认包靠这两个），再是大小与修改时间。
-	 * 用户提的："名字一长串挤占大量空间" —— 包名里那串本来就是这几项拼出来的
-	 * （`<仓库名>-完整-36代-状态xxxx-5f4807`），把它整个抄一遍等于同一件事说两遍，
-	 * 还把行撑到换行。要文件名的地方照样有：鼠标停在行上是完整路径，「复制路径」也在。
-	 *
-	 * 头部读不出来的（不是我们的包 / 传坏了）连版本都没有，那就只剩大小与时间，
-	 * 后面跟一句"读不出头部" —— 它照样列得出来、删得掉。
-	 */
-	private describeRow(item: ManagedBundle): string {
-		const size = formatBytes(item.size);
-		// 时间用**包里记的导出时间**：从 git 拉下来的包，文件 mtime 是拉取那一刻，
-		// 照 mtime 显示的话所有远程包都会变成"刚刚导出"
-		const time = formatTime(item.created ?? item.mtime);
-		return item.header
-			? `${this.describeGeneration(item)} · ${size} · ${time}`
-			: `${size} · ${time} · 读不出包信息（可能不是本插件的包）`;
-	}
-
-	/**
-	 * 一个包"是第几代"——**版本与内容校验值一起写**。
-	 *
-	 * 只写版本会认错包：版本号说不出"我们用哪一份完整备份上"；内容校验值才是"这一刻文件长什么样"。
-	 * 完整备份写「第 N 版」；更新包写「第 N → M 代」（M ＝ 应用它之后到达的版本，
-	 * 差分更新包的 M 就是它送到的那一刻）。
-	 */
-	private describeGeneration(item: ManagedBundle): string {
+	/** 第一行：类型与版本。 */
+	private titleOf(item: ManagedBundle): string {
 		const header = item.header;
-		if (!header) return '';
-		const stateId = header.stateId?.id ? `校验值 ${header.stateId.id}` : '状态未记（旧版包）';
-		const generation = header.mode === 'full'
-			? `第 ${header.targetGeneration} 版`
-			: `第 ${header.baseGeneration ?? '?'} → ${header.targetGeneration} 代`;
-		return `${generation} · ${stateId}`;
+		if (!header) return '无法读取包信息';
+		if (header.mode === 'full') return `完整备份 · 第 ${header.targetGeneration} 版`;
+		return `更新包 · 第 ${header.baseGeneration ?? '?'} 版 → 第 ${header.targetGeneration} 版`;
 	}
 
-	/** 顶部那行：本机第几代、基于哪份完整备份、内容校验值是什么 */
+	/** 第二行：内容编号、大小、时间；完整编号放悬停。 */
+	private metaOf(item: ManagedBundle): string {
+		const size = formatBytes(item.size);
+		const time = formatTime(item.created ?? item.mtime);
+		const id = item.header?.stateId?.id;
+		const idText = id ? `内容编号 ${id.slice(0, 8)}` : '内容编号未记录';
+		if (!item.header) return `${size} · ${time} · 读不出包信息`;
+		return `${idText} · ${size} · ${time}`;
+	}
+
+	/** 这一行是不是本电脑当前使用的完整备份：文件名与基准校验值都要对上。 */
+	private isCurrentBaseline(item: ManagedBundle): boolean {
+		const local = this.local?.bundle;
+		if (!local?.fullFile || !item.header) return false;
+		return local.fullFile === item.name && local.fullHash === baselineOfBundle(item.header);
+	}
+
+	/** 顶部状态条：三个事实，代替一句长话。 */
 	private renderPosition(): void {
 		const host = this.positionEl;
 		if (!host) return;
 		host.empty();
 		const state = this.local;
 		if (!state) {
-			host.setText('无法读取本机状态：下面只列出同步包文件夹中的内容');
+			host.setText('无法读取本电脑状态：下面只列出同步包文件夹中的内容');
 			return;
 		}
-		host.createSpan({ text: describeLocalState(state) });
+		const id = state.stateId?.id ?? '';
+		const facts: [string, string][] = [
+			['本电脑内容', `第 ${state.generation} 版`],
+			['当前完整备份', state.bundle?.fullGeneration
+				? `第 ${state.bundle.fullGeneration} 版完整备份`
+				: '未记录'],
+			['内容编号', id ? id.slice(0, 8) : '未计算'],
+		];
+		const strip = host.createDiv({ cls: 'locally-save-facts-strip' });
+		for (const [label, value] of facts) {
+			const cell = strip.createDiv({ cls: 'locally-save-fact' });
+			cell.createDiv({ text: label, cls: 'locally-save-fact-label' });
+			const valueEl = cell.createDiv({ text: value, cls: 'locally-save-fact-value' });
+			if (label === '内容编号' && id) valueEl.setAttribute('title', id);
+		}
 	}
 
-	/** 行内小按钮：点了别让整行的"选中"也跟着触发 */
+	/** 行内小按钮：点击时不触发行选中。 */
 	private addButton(host: HTMLElement, text: string, danger: boolean, handler: () => void): void {
 		const button = host.createEl('button', {
 			text,
@@ -323,49 +311,39 @@ export class BundleListView {
 	}
 
 	/**
-	 * 删除 = **移到回收站**，不是真删：同步包往往是"改动唯一的备份"，
-	 * 手滑一下整份改动就没了。真要腾地方：单个包用旁边的「彻底删除」，
-	 * 或者清空整个回收站。
+	 * 删除 = 移到回收站，不是直接删除：同步包往往是某次改动唯一的备份。
+	 * 要腾出空间时，单个包可用「彻底删除」，或者清空整个回收站。
 	 */
 	private confirmTrash(item: ManagedBundle): void {
-		const root = bundleTrashRoot(this.options.baseDir());
 		new ConfirmBundleModal(this.plugin.app, {
-			title: '把同步包移到回收站？',
+			title: '移到回收站',
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整备份' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）`,
 			],
-			note: `文件会移入 ${root}/时间戳/，需要时可从回收站恢复。`
-				+ '确认无用后，可用旁边的「彻底删除」，或在回收站那一行点击「清空回收站」。',
+			note: '文件会移入回收站里的时间戳目录，可从回收站恢复。确认无用后，可在回收站那一行清空。',
 			confirmText: '移到回收站',
 			onConfirm: async () => {
 				const outcome = await trashBundles(this.options.baseDir(), [item.file]);
 				if (outcome.failed.length > 0) {
 					new Notice(`无法移动 ${outcome.failed[0]?.path}。原因：${outcome.failed[0]?.error}。`, 9000);
 				} else {
-					// 把落脚点也报出来：用户想反悔时知道去哪儿恢复
-					new Notice(`已移到回收站：${item.name}（${outcome.target}）`, 12000);
+					new Notice(`已移到回收站：${item.name}`, 8000);
 				}
 				this.options.onRemove?.(item.file);
-				// 删完立刻推一次：删除在本地只是一笔没推上去的改动，留个窗口期就容易被「刷新包」撤回来
 				if (this.plugin.settings.gitEnabled) void syncGitNow(this.plugin, { quiet: true });
 				await this.refresh();
 			},
 		}).open();
 	}
 
-	/**
-	 * **彻底删除**：直接删文件，不进回收站。
-	 *
-	 * 跟"移到回收站"分成两个按钮是刻意的：默认那条路永远能恢复，
-	 * 只有用户在这一步（标题、按钮文字、说明都写明"无法恢复"）再点一次才真删。
-	 */
+	/** 彻底删除：直接删除文件，不进入回收站。 */
 	private confirmDelete(item: ManagedBundle): void {
 		new ConfirmBundleModal(this.plugin.app, {
-			title: '彻底删除这个同步包？',
+			title: '删除同步包',
 			lines: [
 				`${item.name}（${item.mode === 'full' ? '完整备份' : item.mode === 'changes' ? '更新包' : '类型未知'}，${formatBytes(item.size)}）会被直接删除，不进入回收站`,
 			],
-			note: '删除后无法恢复。如只想从列表中移除，请使用旁边的「移到回收站」。',
+			note: '删除后无法恢复。只想从列表中移除时，请使用「移到回收站」。',
 			confirmText: '彻底删除',
 			onConfirm: async () => {
 				const outcome = await deleteBundles([item.file], this.options.baseDir());
@@ -381,28 +359,34 @@ export class BundleListView {
 		}).open();
 	}
 
+	/** 回收站：计数、打开目录、清空。 */
 	private async renderTrash(): Promise<void> {
 		const host = this.trashEl;
 		if (!host) return;
 		host.empty();
-		// 同步包文件夹都不存在时没什么好说的（下面那句"文件夹不存在"已经解释了）
 		if (!this.baseExists) return;
 		const contents = await readBundleTrash(this.options.baseDir());
 		if (contents.count === 0) {
-			host.createSpan({ text: '回收站：空的' });
+			host.createSpan({ text: '回收站为空' });
 			host.createSpan({
-				text: '（删除的同步包会移到这里，可从回收站恢复）',
+				text: '删除的包会移入回收站，可从回收站恢复。',
 				cls: 'locally-save-hint',
 			});
 			return;
 		}
-		host.createSpan({ text: `回收站：${contents.count} 个包（${formatBytes(contents.bytes)}）` });
-		const empty = host.createEl('button', { text: '清空回收站', cls: 'locally-save-mini is-danger' });
+		host.createSpan({ text: `回收站 ${contents.count} 个包 · ${formatBytes(contents.bytes)}` });
+		const open = host.createEl('button', { text: '打开', cls: 'locally-save-mini' });
+		open.setAttribute('title', bundleTrashRoot(this.options.baseDir()));
+		open.addEventListener('click', () => openFolderInExplorer(
+			bundleTrashRoot(this.options.baseDir()),
+			this.plugin.app as unknown as { openWithDefaultApp?: (path: string) => void },
+		));
+		const empty = host.createEl('button', { text: '清空', cls: 'locally-save-mini is-danger' });
 		empty.addEventListener('click', () => {
 			new ConfirmBundleModal(this.plugin.app, {
-				title: '清空回收站？',
-				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被真正删掉`],
-				note: '清空后无法恢复。如只想删除某一个同步包，请使用那一行的「彻底删除」。',
+				title: '清空回收站',
+				lines: [`回收站里的 ${contents.count} 个包（${formatBytes(contents.bytes)}）会被真正删除`],
+				note: '清空后无法恢复。只想删除某一个同步包时，使用那一行的「彻底删除」。',
 				confirmText: '彻底删除',
 				onConfirm: async () => {
 					await emptyBundleTrash(this.options.baseDir());
@@ -411,28 +395,22 @@ export class BundleListView {
 				},
 			}).open();
 		});
-		// 路径照实写出来：回收使用的位置跟着同步包文件夹走，别让用户去找"那个 .lsave 到底在哪"
-		host.createSpan({
-			text: `删除的包都在这儿：${bundleTrashRoot(this.options.baseDir())}`,
-			cls: 'locally-save-hint',
-		});
 	}
 }
 
-/** 复制路径：Obsidian 没给公开的剪贴板 API，用浏览器的；写不进去就把路径显示出来让人手抄 */
+/** 复制路径：Obsidian 没有公开的剪贴板 API，使用浏览器的；写入失败时提示原因。 */
 async function copyPath(file: string): Promise<void> {
 	try {
 		await navigator.clipboard.writeText(file);
-		new Notice(`已复制路径：${file}`, 6000);
+		new Notice('已复制包文件的完整路径。', 5000);
 	} catch {
-		new Notice(`无法写入剪贴板，路径为：${file}`, 12000);
+		new Notice(`无法写入剪贴板。路径为：${file}`, 12000);
 	}
 }
 
 /**
- * 一个很小的确认框：把"要动哪些文件、动到哪儿去"摊开说清楚再动手。
- *
- * 删除与清空回收站都是不可逆（或看着像不可逆）的动作，界面上必须先问一次。
+ * 确认框：列出要动的包、移动到哪里，再执行。
+ * 删除与清空回收站都不可逆，界面上先确认一次。
  */
 class ConfirmBundleModal extends Modal {
 	private options: {
@@ -451,7 +429,7 @@ class ConfirmBundleModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: this.options.title });
 
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });

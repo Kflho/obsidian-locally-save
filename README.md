@@ -41,8 +41,9 @@ folder, or through a chat app, then apply it on the other machine.
   be a git worktree. New bundles are committed and pushed, the other machine's are pulled and applied,
   and each machine publishes a tiny status file (`.lsave-peers/`) with its state id, generation,
   baseline and host name. The status bar separates the git result (`已推送 / 已拉取 / 远程已是最新`)
-  from per-machine content status (`一致 / 不同步 / 待上报`). Full copies are never pushed; you still
-  carry the first one on a USB drive.
+  from per-machine content status (`一致 / 不同步 / 待上报`). Clicking the status bar opens a compact
+  per-machine table with version, short state id, status and last report time; full ids stay in
+  tooltips. Full copies are never pushed; you still carry the first one on a USB drive.
 - **Install** from the Obsidian community plugin browser, or download `main.js`, `manifest.json` and
   `styles.css` from [Releases](https://github.com/Kflho/obsidian-locally-save/releases) and put them
   in `<vault>/.obsidian/plugins/locally-save/`. Requires Obsidian 1.7+ on desktop.

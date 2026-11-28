@@ -1,4 +1,5 @@
 import { Modal, Notice, Setting } from 'obsidian';
+import { setupModal } from './modal-layout';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { mergeBundleGroup, planBundleMerges, planSupersededSiblings, trimSupersededSiblings } from '../bundle/merge';
@@ -59,7 +60,7 @@ export async function mergeAdjacentBundles(
 					onProgress: (count, total, file) =>
 						plugin.reportProgress({ done: count, total, path: file, label: '导出中' }),
 				}, plan);
-				done.push(`${plan.anchorGeneration} → ${plan.targetGeneration} 代（${plan.links.length} 份并成 1 份）`);
+				done.push(`${plan.anchorGeneration} → ${plan.targetGeneration} 版（${plan.links.length} 份合并为 1 份）`);
 				if (outcome.failed.length > 0) {
 					failed.push(`${plan.links.length} 份里有 ${outcome.failed.length} 份未能移入回收站`);
 				}
@@ -101,7 +102,7 @@ export function renderShelfTools(
 	new Setting(container)
 		.addButton(button => button
 			.setButtonText('刷新包（对齐远程）')
-			.setTooltip('丢掉本地远程仓库那一段没推的提交，整段对齐远程，把新包拉下来')
+			.setTooltip('丢掉本地远程仓库那一段没推的提交，整段对齐远程，把新包拉取')
 			.onClick(() => {
 				void refreshBundlesAction(plugin).then(() => onChanged?.());
 			}))
@@ -130,7 +131,7 @@ class ConfirmMergeModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '整理更新包' });
 		contentEl.createEl('p', {
 			text: '两件事：首尾相接的几份并成一份；同一份起点的旧包只留最新的一份。内容一份不少。',
@@ -147,12 +148,12 @@ class ConfirmMergeModal extends Modal {
 		}
 		for (const trim of this.trims) {
 			facts.createEl('li', {
-				text: `第 ${trim.baseGeneration ?? '?'} 版那群包：清掉 ${trim.drop.length} 份旧包`
+				text: `第 ${trim.baseGeneration ?? '?'} 版那群包：删除 ${trim.drop.length} 份旧包`
 					+ `（${formatBytes(trim.bytes)}），留第 ${trim.keep.target} 版那一份`,
 			});
 		}
 		contentEl.createEl('p', {
-			text: '移除的同步包会进入回收站，可随时恢复。已处于这些包送达状态的电脑，仍可接收保留的那一份。',
+			text: '移除的同步包会进入回收站，可随时恢复。已处于这些同步包送达状态的电脑，仍可接收保留的那一份。',
 			cls: 'locally-save-hint',
 		});
 

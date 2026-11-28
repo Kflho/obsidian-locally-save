@@ -1,4 +1,5 @@
 import { Modal, Setting } from 'obsidian';
+import { setupModal } from './modal-layout';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import type { BundleExportPreview } from '../bundle/export';
@@ -37,13 +38,13 @@ export class ExportPreviewModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '导出预览' });
 		contentEl.createEl('p', {
 			text: '只预览，不会写入。下面是按当前设置导出时会装进包里的内容。',
 			cls: 'locally-save-hint',
 		});
-		// 对方仍使用别的基准：现在就说清"从哪份开始它才接得上"，别等它收到才报拒收
+		// 对方仍使用别的基准：现在就说清"从哪一份开始才能应用"，别等它收到才报拒收
 		if (this.hint) {
 			contentEl.createEl('p', { text: this.hint, cls: 'locally-save-warn' });
 		}

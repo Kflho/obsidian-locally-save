@@ -38,7 +38,7 @@ const PARAM_BUNDLE = 'bundle';
  *
  * 两种情况都要认：
  * - 我们自己生成的链接是 URL 编码过的；
- * - 系统文件关联里用的是 `%1`，原样传进来（带反斜杠、可能带引号、可能带空格）。
+ * - 系统文件关联里用的是 `%1`，原样传进来（带反斜杠，可能带引号或空格）。
  */
 export function normalizeProtocolPath(raw: string): string {
 	const trimmed = raw.trim().replace(/^"+|"+$/g, '');

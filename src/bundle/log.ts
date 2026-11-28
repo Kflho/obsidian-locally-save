@@ -50,7 +50,7 @@ export function describeLogEntry(entry: BundleLogEntry): string {
  * 状态栏那一行：最近一次导出 / 应用干了什么。
  *
  * 0.8.0 之前这句话来自「上次同步到本地副本」的记录（`LastSyncRecord`）。
- * 副本通道砍掉之后改读**更新记录的最后一条** —— 只有一条真相来源：
+ * 副本通道删除之后改读**更新记录的最后一条** —— 只有一条真相来源：
  * 状态栏那句话就是它的简版，用户点开「更新记录…」看到的是详情。
  */
 export function describeLastActivity(state: PluginState): string {

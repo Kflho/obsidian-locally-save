@@ -222,7 +222,7 @@ async function collectLocalEdits(
 	});
 	if (!anchor) return { edits: [], extra: [] };
 
-	// 本机改过的：字节在磁盘上（extractPath 的 abs 走本地文件），来源记空串
+	// 本机改过的：字节在磁盘上（extractPath 的 abs 使用本地文件），来源记空串
 	const edits: LocalEdit[] = [];
 	const extra: string[] = [];
 	for (const [file, record] of inventory.files) {

@@ -93,7 +93,7 @@ export class SshKeyModal extends Modal {
 				if (this.gh.hasPublicKeyScope) {
 					new Setting(contentEl)
 						.setName('用 GitHub CLI 添加')
-						.setDesc('用已经登录的 gh 把公钥加到你的 GitHub 账户')
+						.setDesc('用已经登录的 gh 把公钥加到本电脑的 GitHub 账户')
 						.addButton(button => button
 							.setButtonText('添加')
 							.onClick(() => { void this.addWithGh(); }));
@@ -101,7 +101,7 @@ export class SshKeyModal extends Modal {
 					new Setting(contentEl)
 						.setName('用 GitHub CLI 添加')
 						.setDesc('gh 已登录，但 token 缺 admin:public_key（添加会报 404）。'
-							+ '先在这台机器的终端跑下面这条，然后关掉窗口重开；也可以直接复制公钥到网页。')
+							+ '先在本电脑的终端执行下面这条命令，然后关掉窗口重开；也可以直接复制公钥到网页。')
 						.addButton(button => button
 							.setButtonText('复制命令')
 							.onClick(() => { void this.copyText(GH_REFRESH_COMMAND); }));
@@ -111,7 +111,7 @@ export class SshKeyModal extends Modal {
 			new Setting(contentEl)
 				.setName('测试 SSH 登录')
 				.setDesc('只测这把密钥能不能登录远程主机，不改任何东西。'
-					+ 'GitHub 不提供 shell，认证成功也可能返回退出码 1，所以这里只看输出里的 '
+					+ 'GitHub 不提供 shell，认证成功也可能返回退出码 1，所以这里只看输出中的提示 '
 					+ '“successfully authenticated”。')
 				.addButton(button => button
 					.setButtonText('测试')
@@ -121,7 +121,7 @@ export class SshKeyModal extends Modal {
 		if (this.key) {
 			contentEl.createEl('p', {
 				cls: 'locally-save-hint',
-				text: '第一次连接可能会问主机校验值：先在终端里跑一次 ssh -T git@' + host + '，'
+				text: '第一次连接可能会问主机内容编号：先在终端里执行一次 ssh -T git@' + host + '，'
 					+ '或者点「测试」看报错。',
 			});
 		}

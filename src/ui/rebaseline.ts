@@ -1,4 +1,5 @@
 import { Modal, Notice, Setting } from 'obsidian';
+import { setupModal } from './modal-layout';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { listFullAnchorsSync } from '../bundle/anchor';
@@ -25,7 +26,7 @@ import { syncGitNow } from './git';
 /**
  * 换基准的两件收尾事（界面层）：**导出差分更新包** 与 **清理无电脑使用的旧完整备份**。
  *
- * 为什么要有第一件：完整备份按决定不进 git（几百 MB），而更新包只跟"同一份完整备份"算。
+ * 为什么要有第一件：完整备份按决定不提交到 Git（几百 MB），而更新包只跟"同一份完整备份"算。
  * 我导了一份新的完整备份之后，仍在使用旧那台上的电脑收到的更新包会被判"基准不一致"，
  * 两边就卡住 —— 除非有一份**差分更新包**（两端都是完整备份，只装两者之间的差异）。
  * 它收下应用完就换到新基准上，手里不需要有新的完整备份。
@@ -65,7 +66,7 @@ async function planFor(plugin: LocallySavePlugin, dir: string): Promise<Rebaseli
 /**
  * 按计划导出差分更新包并推远程仓库，返回**一句给人看的话**（null ＝ 没导出任何东西）。
  *
- * 供命令 / 按钮与"导出完整备份之后顺手来一下"共用：后者不该自己再拼一套判断。
+ * 供命令 / 按钮与"导出完整备份之后一并执行一次"共用：后者不该自己再拼一套判断。
  */
 export async function runRebaselineDiffs(
 	plugin: LocallySavePlugin,
@@ -159,7 +160,7 @@ export async function cleanupStaleFullBundlesAction(
 		const why = plan.kept.map(item => item.why);
 		new Notice(why.length > 0
 			? `没有可清理的旧完整备份：${why.join('；')}`
-			: '没有能清的旧完整备份（除本机当前基准外，没有其他完整备份）', 12000);
+			: '没有能清的旧完整备份（除本电脑当前使用的完整备份外，没有其他完整备份）', 12000);
 		return;
 	}
 	const lines = plan.trash.map(item =>
@@ -199,10 +200,10 @@ class RebaselineDiffModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
-		contentEl.createEl('h2', { text: '导出换基准的差分更新包' });
+		setupModal(this);
+		contentEl.createEl('h2', { text: '导出换完整备份的差分更新包' });
 		contentEl.createEl('p', {
-			text: '完整备份不进 git；差分更新包只装两份完整备份之间的差异，对方应用完就变成你现在这份上。',
+			text: '完整备份不提交到 Git；差分更新包只装两份完整备份之间的差异，其他电脑应用完就变成你现在这份上。',
 			cls: 'locally-save-hint',
 		});
 		const facts = contentEl.createEl('ul', { cls: 'locally-save-facts' });
@@ -245,7 +246,7 @@ class StaleFullModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '清理无电脑使用的旧完整备份' });
 		contentEl.createEl('p', {
 			text: `这 ${this.options.lines.length} 份一共 ${formatBytes(this.options.total)}，`
@@ -286,11 +287,11 @@ class StaleFullModal extends Modal {
 	}
 }
 
-/** 导出结果里那句"顺手导了差分更新包"（一句话，别展开） */
+/** 导出结果里那句"一并导出了差分更新包"（一句话，别展开） */
 export function describeRebaselinePeers(plan: RebaselineDiffPlan): string | null {
 	const ready = plan.tasks.filter(task => task.status === 'ready');
 	if (ready.length === 0) return null;
-	return ready.map(task => `${peerLabel(task.peer)} 仍以第 ${task.peer.baselineGeneration ?? '?'} 版为基准`).join('、');
+	return ready.map(task => `${peerLabel(task.peer)} 仍以第 ${task.peer.baselineGeneration ?? '?'} 版完整备份为起点`).join('、');
 }
 
 /** 界面上的默认目录（设置里那个） */
@@ -337,7 +338,7 @@ export async function ensureLocalBaselineBundle(
 			fresh.bundle.fullFile = existing.name;
 			await saveState(plugin.stateFile(), fresh);
 		}
-		return `本机已经有第 ${existing.generation} 版那份完整备份，已记成本机的完整备份`;
+		return `本电脑已经有第 ${existing.generation} 版那份完整备份，已记成本电脑的完整备份`;
 	}
 
 	const inventory = await scanTree(plugin.vaultRoot(), {
@@ -348,8 +349,8 @@ export async function ensureLocalBaselineBundle(
 	if (!plan.needed) return null;
 	const generation = plan.generation ?? '?';
 	if (!plan.matches) {
-		return `本机这份与第 ${generation} 版基准不一致（${plan.driftCount} 个路径的大小或时间不同），`
-			+ '没有拿它当完整备份 —— 让对面再发一份完整备份，或手动「导出同步包…」勾完整备份';
+		return `本电脑这份与第 ${generation} 版完整备份不一致（${plan.driftCount} 个路径的大小或时间不同），`
+			+ '没有拿它当完整备份 —— 让其他电脑再发一份完整备份，或手动「导出同步包…」勾选「完整备份」';
 	}
 	const outcome = await exportBundle({
 		settings: plugin.settings,
@@ -362,10 +363,10 @@ export async function ensureLocalBaselineBundle(
 		configDir: plugin.configDir(),
 	});
 	if (!outcome.file) {
-		return `无法为第 ${generation} 版基准导出一份完整备份。原因：${outcome.reason ?? '没有生成'}。`;
+		return `无法导出第 ${generation} 版完整备份。原因：${outcome.reason ?? '没有生成'}。`;
 	}
-	return `已给第 ${generation} 版这个基准留了一份完整备份（${formatBytes(outcome.fileBytes)}）：`
-		+ '两边各自都有这一份，接着按同一份基准更新';
+	return `已为第 ${generation} 版保留一份完整备份（${formatBytes(outcome.fileBytes)}）：`
+		+ '两台电脑各自都有这一份，接着按同一份完整备份更新';
 }
 
 /** 一份差分更新包/完整备份的说明里只留前一小段名字（界面一行放不下整串） */
@@ -400,7 +401,7 @@ export async function baselineHealthAction(
 		const outcome = await trashBundles(dir, files);
 		const parts = [`已移到回收站 ${outcome.moved.length} 份`];
 		if (outcome.failed.length > 0) parts.push(`${outcome.failed.length} 份未能移动`);
-		parts.push('把对面那份完整备份复制进 full/，再在「管理同步包」里选它点「以这一份为基准…」');
+		parts.push('把其他电脑那份完整备份复制进 full/，再在「管理同步包」里选它点「以这一份为完整备份…」');
 		new Notice(parts.join('；'), 15000);
 		// 别在这里『刷新包』：那是 reset --hard origin，刚移走的会回来。改成把这次删除推出去
 		if (plugin.settings.gitEnabled) await syncGitNow(plugin, { quiet: true });
@@ -429,7 +430,7 @@ class BaselineHealthModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '完整备份体检' });
 		for (const note of this.health.notes) {
 			contentEl.createEl('p', { text: note, cls: 'locally-save-hint' });
@@ -440,14 +441,14 @@ class BaselineHealthModal extends Modal {
 		}
 		for (const item of this.health.anchors) {
 			facts.createEl('li', {
-				text: `${item.mine ? '✔ 就是本机这个基准' : '✘ 不是本机这个基准'}`
+				text: `${item.mine ? '✔ 就是本电脑这个完整备份' : '✘ 不是本电脑这个完整备份'}`
 					+ ` · 第 ${item.generation} 版 · ${formatBytes(item.size)} · ${shortName(item.name)}`,
 			});
 		}
 		for (const peer of this.health.peers) {
 			facts.createEl('li', {
 				text: `${peer.label}：${peer.generation !== null ? `第 ${peer.generation} 版` : '未记'}`
-					+ ` · ${peer.same ? '和本机一致' : '和本机不一样'}`,
+					+ ` · ${peer.same ? '和本电脑一致' : '和本电脑不一样'}`,
 			});
 		}
 		const row = new Setting(contentEl);
@@ -455,7 +456,7 @@ class BaselineHealthModal extends Modal {
 		if (this.removable.length > 0) {
 			row.addButton(button => button
 				.setButtonText(`把不一致的 ${this.removable.length} 份移到回收站`)
-				.setTooltip('没有任何电脑使用它们的基准；移入回收站后可从回收站恢复')
+				.setTooltip('没有任何电脑使用它们的完整备份；移入回收站后可从回收站恢复')
 				.onClick(() => {
 					const files = this.removable.map(item => item.file);
 					this.close();
@@ -478,5 +479,5 @@ export async function baselineCopyAction(plugin: LocallySavePlugin): Promise<voi
 		return;
 	}
 	const sentence = await ensureLocalBaselineBundle(plugin, dir);
-	new Notice(sentence ?? '本机已有当前基准的完整备份，无需补充', 12000);
+	new Notice(sentence ?? '本电脑已有当前完整备份，无需补充', 12000);
 }

@@ -27,13 +27,157 @@
 
 /* ---------------------------------------------------------------- 弹窗 */
 /*
- * **弹窗要够宽**：这些框里一行是「名字 + 一句说明 + 控件」，Obsidian 默认的模态框偏窄，
- * 说明文字一长就折成三四行、跟下一项糊在一起（用户报的"文字堵一起"）。
- * 1.13+ 用 `--modal-width`，旧版本用 `width`（两边都写，互不冲突）。
+ * 这些框里一行是「名字 + 一句说明 + 控件」；默认 560px 时说明折成三四行、
+ * 列表行被按钮挤成竖排。1.15 实测 `--modal-width` 不改变 `.modal` 宽度，`width` 才生效。
  */
 .modal.locally-save-modal {
-	--modal-width: min(780px, 92vw);
-	width: min(780px, 92vw);
+	width: min(880px, 94vw);
+	max-width: 94vw;
+}
+
+/* 「本机在哪」用事实格，不再用一句长话 */
+.locally-save-facts-strip {
+	display: flex;
+	margin: 0.4em 0 0.8em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	overflow: hidden;
+}
+
+.locally-save-fact {
+	flex: 1 1 0;
+	min-width: 0;
+	padding: 0.45em 0.7em;
+	border-left: 1px solid var(--background-modifier-border);
+}
+
+.locally-save-fact:first-child {
+	border-left: none;
+}
+
+.locally-save-fact-label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.locally-save-fact-value {
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+/* 各电脑同步状态：一张紧凑表，不再用长句 */
+.locally-save-peer-table {
+	width: 100%;
+	margin-top: 0.6em;
+	border-collapse: collapse;
+	font-size: var(--font-ui-small);
+}
+
+.locally-save-peer-table th {
+	text-align: left;
+	font-weight: 600;
+	color: var(--text-muted);
+	padding: 0.35em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	white-space: nowrap;
+}
+
+.locally-save-peer-table td {
+	padding: 0.4em 0.5em;
+	border-bottom: 1px solid var(--background-modifier-border);
+	vertical-align: middle;
+}
+
+.locally-save-peer-table tr:last-child td {
+	border-bottom: none;
+}
+
+.locally-save-peer-table .is-code {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.locally-save-peer-table .is-num {
+	font-variant-numeric: tabular-nums;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.locally-save-peer-name {
+	max-width: 16em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.locally-save-peer-status {
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+}
+
+.locally-save-peer-status.is-same { color: var(--text-success); }
+.locally-save-peer-status.is-diff,
+.locally-save-peer-status.is-pending { color: var(--text-warning); }
+.locally-save-peer-status.is-error { color: var(--text-error); }
+.locally-save-peer-status.is-muted { color: var(--text-muted); }
+
+/* 同步包一行：两行信息 + 右侧动作；窄窗口下动作换到下一行 */
+.locally-save-row.is-bundle {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 0.2em 0.75em;
+	align-items: center;
+	padding: 0.5em 0.65em;
+	border-left: none;
+	border-bottom: 1px solid var(--background-modifier-border);
+	cursor: pointer;
+}
+
+.locally-save-row.is-bundle:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.locally-save-row-main {
+	grid-column: 1;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.5em;
+	min-width: 0;
+}
+
+.locally-save-row-title {
+	font-weight: var(--font-semibold);
+	overflow-wrap: anywhere;
+}
+
+.locally-save-row-meta {
+	grid-column: 1;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.locally-save-row-actions {
+	grid-column: 2;
+	grid-row: 1 / span 2;
+	display: flex;
+	align-items: center;
+	gap: 0.3em;
+}
+
+.locally-save-row-more {
+	grid-column: 1 / -1;
+	display: none;
+	flex-wrap: wrap;
+	gap: 0.3em;
+	padding-top: 0.35em;
+}
+
+.locally-save-row.is-actions-open .locally-save-row-more {
+	display: flex;
 }
 
 .locally-save-modal .setting-item {

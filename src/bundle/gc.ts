@@ -35,7 +35,7 @@ import type { PeerState } from '../git/peers';
  *
  * 什么时候跑：`main.runTick` 每一拍在 git 推送和拉取**之前**看一遍（30 秒一次，读几个包头部，
  * 不扫仓库）。所以"最后一台机器跟上来"之后最多 30 秒，那份老包就从所有地方消失。
- * 导出时顺手清（`removeSupersededChanges`）那条路照旧保留：它多一道"内容被新包完全覆盖"的判据。
+ * 导出时同时清（`removeSupersededChanges`）那条路照旧保留：它多一道"内容被新包完全覆盖"的判据。
  */
 
 export interface GcDrop {
@@ -158,7 +158,7 @@ export async function planBundleGc(
 	// 同一份起点 ＋ 同一形态 ＋ 同一台机器导的：只留目标版本最新的那一份
 	const groups = new Map<string, Row[]>();
 	for (const row of rows) {
-		// 别的机器导的那一份装的是它那一半改动，不参与"只留最新"
+		// 别的机器导出的那一份，装的是它那一半改动，不参与"只留最新"
 		if (row.header.source?.copyId !== state.copyId) continue;
 		const key = `${row.base}|${row.checkpoint ? 'to-full' : 'to-latest'}|${row.checkpoint ? (row.header.targetBaselineHash ?? '') : ''}`;
 		const list = groups.get(key);

@@ -53,9 +53,9 @@ export function hasNewerSameGenerationSibling(
 /**
  * 「收到的包」—— **自动应用**那一步要用的挑选与判断。
  *
- * 为什么要有这个功能：砍掉「同步到本地副本」之后，接收端只剩手动一条路
+ * 为什么要有这个功能：删除「同步到本地副本」之后，接收端只剩手动一条路
  * （打开 Obsidian → 选包 → 看报告 → 应用）。文件搬过来了却没人点，两边就不一致 ——
- * 这是包通道唯一的"手感缺口"。补法不是把副本通道请回来，而是：
+ * 这是包通道唯一的"手感缺口"。补法如下：
  *
  * **每 30 秒看一眼同步包文件夹，按「方向」决定怎么处理**（策略见 `IncomingPolicy`）：
  * - 默认（没开 git、或 direction 都不是）＝只认**更新包 / 差分更新包**、只做不会动到本地已有东西的：
@@ -583,7 +583,7 @@ export async function sweepIncoming(
 	for (let guard = 0; guard < 64 && pending.length > 0; guard++) {
 		const mine = pending.filter(item => item.bundle.header?.mode === 'changes'
 			&& baselineOfBundle(item.bundle.header) === cursor);
-		if (mine.length === 0) break; // 没有接得上的了（缺那一份完整备份，或者剩下的都是别的基准）
+		if (mine.length === 0) break; // 没有可以衔接的了（缺那一份完整备份，或者剩下的都是别的基准）
 
 		const newest = new Map<string, IncomingCandidate>();
 		for (const item of mine) {
@@ -597,7 +597,7 @@ export async function sweepIncoming(
 
 		/**
 		 * 同一个源头、被它取代的那几份：**记一笔"不用管"就不再回头看了**。
-		 * 不记的话每 30 秒都会重新挑到它们（基准没变，它们看着还是"接得上"），
+		 * 不记的话每 30 秒都会重新挑到它们（基准没变，它们看着仍然可以衔接），
 		 * 而它们的内容确实过时了 —— 更新的那一份是累积差量，把旧的说的全说了。
 		 */
 		for (const item of mine) {

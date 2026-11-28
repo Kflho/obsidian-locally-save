@@ -22,7 +22,7 @@ import { YIELD_EVERY, yieldToUi } from '../utils/async';
  *   不用回头改写头部（回写是断电时最容易把包写坏的写法）；
  * - **负载不压缩**：笔记与附件多半已经是压缩格式（jpg/png/zip），再压一遍白费 CPU，
  *   还拖慢"几秒钟搬完"这个核心体验；
- * - **尾部记校验和**：U 盘、网盘搬来搬去，最怕静默损坏。
+ * - **尾部记校验和**：U 盘、网盘移入搬去，最怕静默损坏。
  */
 
 export const BUNDLE_MAGIC = Buffer.from('LOCALLYSAVE1\n', 'utf8');
@@ -52,7 +52,7 @@ export interface CopyRef {
  * `base*` 是**导出方认为接收方在应用前应该有的样子**（更新包才有）：
  * 接收方拿它做三方合并 —— 本地文件等于 base 才敢直接覆盖，
  * 否则说明本地也改过，得走冲突处理。这是"更新包必须同一副本"这条规矩的写入方式：
- * 不是拒绝服务，而是逐文件判断。
+ * 这里逐文件判断，不整体拒绝。
  */
 export interface BundleEntry {
 	path: string;
@@ -301,7 +301,7 @@ export async function writeBundle(
 		let doneFiles = 0;
 
 		for (const source of sources) {
-			// 内容可能来自仓库里的文件，也可能来自另一份包里的某一段（导 a→b 的差分更新包）
+			// 内容有两个来源：仓库里的文件，或另一份包里的某一段（导 a→b 的差分更新包）
 			const sourceHandle = await fs.promises.open(source.from?.file ?? source.abs, 'r');
 			const start = source.from?.offset ?? 0;
 			const where = source.from ? `包里的那一段（${source.from.file}）` : source.abs;
@@ -370,7 +370,7 @@ export async function readBundleInfo(file: string): Promise<BundleInfo> {
 	return readBundleInfoSync(file);
 }
 
-/** 同步读包的头部与尾部（设置面板列"本地有哪些状态"时用；语义与上一版完全一致） */
+/** 同步读包的头部与尾部（设置面板列"本地有哪些状态"时用；语义与旧版本完全一致） */
 export function readBundleInfoSync(file: string): BundleInfo {
 	const stat = fs.statSync(file);
 	if (stat.size < BUNDLE_MAGIC.length + 4 + BUNDLE_TRAILER_MAGIC.length + 4) {

@@ -33,7 +33,7 @@ import type { ConflictStrategy, FileRecord, Inventory, SyncAction } from '../syn
  *
  * **界面上的手动应用只有一种语义：严格同步**（`strictness: 'mirror'`，见 `APPLY_CHOICES`）——
  * 包里点名的文件一律用包里的版本（本地那份先进回收目录）、`header.deleted` 点名的照删、
- * 本地多出来的文件也移到回收目录。应用完**仓库 == 包送到的状态**，两边的内容校验值当场可比
+ * 本地多出来的文件也移到回收目录。应用完**仓库 == 包送到的状态**，两边的内容校验值立即可比
  * （见 `sync/state-id.ts`）。这是「基准链条」能成立的前提：链条上的每个点内容都是确定的，
  * 谁也不必猜着合，文件也就不会冲突。
  *
@@ -88,7 +88,7 @@ export const APPLY_CHOICES: Record<'full' | 'changes', ApplyChoice[]> = {
 	full: [
 		{
 			key: 'mirror',
-			label: '完全镜像（完整备份只有这一种）：包里没有的本地文件全移到回收目录，仓库 = 包',
+			label: '完全镜像（完整备份只有这一种应用方式）：包里没有的本地文件全移到回收站，仓库内容与包一致',
 			strictness: 'mirror',
 		},
 	],
@@ -321,7 +321,7 @@ export interface ApplyReport {
 	 *
 	 * 为什么会发生：更新包是**累积**的，同一条移动会一直带在包里；接收方上次已经搬过、
 	 * 后来旧路径又被重新建了出来（改名时旧文件夹留成空壳、用户手建、`emptyDirs` 补建都算）。
-	 * 这时"源在 + 目标在"不是冲突，而是**这条移动已经做过**——见 `moveSpecs` 那段。
+	 * 这时"源在 + 目标在"说明**这条移动已经做过**——见 `moveSpecs` 那段。
 	 */
 	moveReplacements: number;
 	/** 这次要在仓库里补建几个文件夹（包里有的目录，本地还没有） */
@@ -368,7 +368,7 @@ export type ApplyAction =
 	 *
 	 * `replace` ＝ 目标位置已经有东西（多半是**同一份累积包里这条移动早就做过**、
 	 * 旧路径又被重新建了出来）。严格档下以包为准：先把目标那份移到回收目录的「冲突」，
-	 * 再把源搬过去 —— 这是"目标已存在"唯一会被自动执行的那条路（见 `moveSpecs` 那段）。
+	 * 再把源移动过去 —— 这是"目标已存在"唯一会被自动执行的那条路（见 `moveSpecs` 那段）。
 	 */
 	| { kind: 'rename'; path: string; from: string; dir?: boolean; replace?: boolean }
 	/**
@@ -411,7 +411,7 @@ export interface ApplyPlan {
 	 * **计划阶段认定"磁盘上已经搬完"的移动**（源没了、目标在）：`from` → `to` 一条一对。
 	 *
 	 * 为什么执行阶段还要它：这类移动**没有动作**（不需要再搬），可状态里的记录仍在使用旧路径。
-	 * 不把记录跟着搬过去，下一份累积包还会按旧路径算"点上该有什么"，于是刚搬过去的东西
+	 * 不把记录跟着移动过去，下一份累积包还会按旧路径算"点上该有什么"，于是刚移动过去的东西
 	 * 又被当成"本地多出来的"移到回收目录（用户报的「application 里只剩 1111」就是这个）。
 	 */
 	relocated: { from: string; to: string }[];
@@ -510,7 +510,7 @@ export interface ApplyResult {
 	restored: number;
 	/** 新建的目录（包里记着的空文件夹） */
 	foldersCreated: number;
-	/** 删空之后顺手收拾掉的空目录 */
+	/** 删空之后同时收拾掉的空目录 */
 	foldersRemoved: number;
 	bytesWritten: number;
 	failed: { path: string; error: string }[];
@@ -601,7 +601,7 @@ interface BaselineAnchor {
 	 * 拿包的起点当祖先，会把"我仍在使用 112 的内容"整批算成"我改过它"。
 	 */
 	baseListing: Record<string, FileRecord>;
-	/** **包那一侧的整份内容**：起点清单打上条目、划掉点名删除（＝对方那一点的真实样子） */
+	/** **包那一侧的整份内容**：起点清单打上条目、删除点名项（＝对方那一点的真实样子） */
 	remoteFiles: Record<string, FileRecord>;
 	remoteDirs: string[];
 	/** 本机相对我记的那份基准的改动（这一趟会保留） */
@@ -645,8 +645,8 @@ function listingOfFullHeader(header: BundleHeader): Record<string, FileRecord> {
 /**
  * **包的起点是本机** → 按它「接上后续基准」；否则给一条"只能镜像"的指路。
  *
- * 怎么判"接得上"：同一分支里，包的起点（那份完整备份的版本）**比本机的基准更靠后**。
- * 这时正确做法不是拒收，也不是先镜像 500MB，而是**三方合并**：
+ * 怎么判能否衔接：同一分支里，包的起点（那份完整备份的版本）**比本机的基准更靠后**。
+ * 这时按**三方合并**处理：不拒收，也不先镜像 500MB。
  *
  * - 祖先 ＝ **我记的基准的清单**（`state.bundle.fullFiles`，我最清楚"我相对它改了什么"）；
  * - 我这边 ＝ 当前扫描；
@@ -686,7 +686,7 @@ function resolveAnchor(
 		// 差分更新包是"完整备份 → 完整备份"的搬运体：它的终点就是一份完整备份，
 		// 仍在使用更老的基准时别拿它当中转（让对方直接发那份完整备份更直白）。
 		&& header.targetFullBundle !== true
-		// 同一条分支才算"后续基准"：别的分支的代数是它自己数的，拿它当"更靠后"没意义
+		// 同一条分支才算"后续基准"：别的分支的版本号由它自己计数，拿它当"更靠后"没意义
 		&& header.lineage === state.lineage
 		&& options.alignToPeer !== true;
 	if (canCatchUp && baseListing !== null && mine !== null) {
@@ -735,7 +735,7 @@ function resolveAnchor(
  *    更新包一律拒绝：它只有"变过的那部分"，没有起点连算都算不出来。
  * 2. **完整备份** → 放行，`full`。它自带完整清单，就是一份新基准：
  *    对方重新立了基准、导了一份新的完整备份发过来 —— 这是**正路**，不是"没有共同祖先"。
- *    能不能接得上由三方比对逐文件回答（基准检查照样在，本机独有的文件不会被删）。
+ *    能不能衔接由三方比对逐文件回答（基准检查照样在，本机独有的文件不会被删）。
  * 3. **更新包** → 必须跟本机**同一份**基准（`baselineHash` 相等），否则拒绝。
  *    这条是要害：更新包只有变过的那部分，"基准里有、包里没有"才敢当成"对方删过它"；
  *    基准不是同一份时，本机一大批文件会被当成"对方删过"删掉 —— **那是丢数据的路**。
@@ -1005,7 +1005,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		: 'remote-wins';
 	// 删除传播与备份只在"合并"那条路上听调用方/设置；严格档必然传播、必然先备份
 	const propagateDeletions = strictness === 'normal' ? (anchor ? true : (options.propagateDeletions ?? true)) : true;
-	// **应用必然先备份**：严格档会覆盖/移走本地东西，强制档更可能一次删很多 ——
+	// **应用必然先备份**：严格档会覆盖/移使用本地东西，强制档更可能一次删很多 ——
 	// "关掉回收目录 + 严格档" = 不可恢复的批量删除，这个组合不给走
 	const keepBackup = strictness !== 'normal' || (options.keepBackup ?? true);
 
@@ -1047,7 +1047,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * **为什么不能无条件压过本机记录**（0.16.14，用户报的"我删了又被撤回"）：
 	 * 更新包是**累积**的，包里那个 `base` 取自**起点那份完整备份**，它可能比"我上次交换到的
 	 * 那一版"更旧（上一份累积包早就把那个文件带到我这儿了）。拿它当祖先，本机删掉的文件
-	 * 会被判成"两边都改过"→ 走"保导出里那一版"的分支写回来，删除当场被撤回；
+	 * 会被判成"两边都改过"→ 走"保导出里那一版"的分支写回来，删除立即被撤回；
 	 * 本机改过的文件也会被算成冲突，白存一份冲突副本、白记一笔"待回传"。
 	 *
 	 * 所以只在 `base` 确实更新（修改时间超出容差）时才用它；否则以**我上次跟对方交换到的
@@ -1071,7 +1071,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	// "对方"＝包：完整备份是完整清单；更新包只有它提到的那部分（这正是我们要的 ——
 	// 没提到的一律当作"与我无关"，绝不推断删除）
 	//
-	// **接上后续基准**时"对方"不是这个包，而是**那份完整备份 ＋ 这个包**：
+	// **接上后续基准**时"对方"由**那份完整备份 ＋ 这个包**组成：
 	// 我仍在使用更旧的一份上，缺的正是完整备份里那一段。
 	const entriesByPath = new Map(header.entries.map(entry => [entry.path, entry]));
 	const remote: Inventory = anchor
@@ -1178,7 +1178,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	/**
 	 * **这个包送到的那一点上该有哪些文件**（"目标版本"）。
 	 *
-	 * 严格镜像的删除收尾、以及移动"点上的记录跟着搬过去"，都以**它**为准 ——
+	 * 严格镜像的删除收尾、以及移动"点上的记录跟着移动过去"，都以**它**为准 ——
 	 * 不能以"我上次记下的样子"（`contentBefore`）或"本机当前使用的那份完整备份"为准：
 	 * - `contentBefore` 会过时 / 被写坏：本机手工把文件夹改过名、或者旧版本改名失败
 	 *   却把记录划掉了，它就少掉一批文件；照它判，这些文件会被当成"本地多出来的"删掉
@@ -1299,7 +1299,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			}
 		}
 		// 严格镜像那一批**推迟到移动算完之后**再删：判据是"**送到的点上**有没有它"，
-		// 而移动会把路径换掉 —— 先删就会把刚搬过去 / 早就手工搬好的东西当成
+		// 而移动会把路径换掉 —— 先删就会把刚移动过去 / 早就手工搬好的东西当成
 		// "本地多出来的"移到回收目录（用户报的「application 里只剩 1111」，见下面那段）。
 	}
 
@@ -1561,7 +1561,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	/**
 	 * 这一趟**已经在磁盘上做完**的移动（源没了 / 目标里已经有同一份）：执行阶段照它把
 	 * 状态里的记录从旧路径移到新路径。不这么做，下一份累积包仍按旧路径算"点上有什么"，
-	 * 刚搬过去的东西又会被当成"本地多出来的"删掉。
+	 * 刚移动过去的东西又会被当成"本地多出来的"删掉。
 	 */
 	const relocations: { from: string; to: string }[] = [];
 	const caseOnly = (a: string, b: string): boolean => a !== b && a.toLowerCase() === b.toLowerCase();
@@ -1570,10 +1570,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 * **把这一趟的移动先"演"一遍**（只改这份影子清单，不碰磁盘）。
 	 *
 	 * 为什么不能只看扫描快照：累积更新包里，链式移动是**两条**操作（旧 → 中间、中间 → 新）。
-	 * 接收方可能仍在使用**基准**上（手里只有"旧"）—— 第一条把它搬到"中间"之后，第二条的源
+	 * 接收方可能仍在使用**基准**上（手里只有"旧"）—— 第一条把它移到"中间"之后，第二条的源
 	 * 在扫描快照里根本不存在，会被判成"两个路径都不在"而整包拒绝。
 	 * 用户报的现场：对面仍使用 100 代基准，打不开「…/electronic/… 改名成 …/theory/electronic/…」那个包。
-	 * 影子清单让"前面那条移动搬过去的东西"能被后面的移动看见（执行阶段本来就按顺序做）。
+	 * 影子清单让"前面那条移动移动过去的东西"能被后面的移动看见（执行阶段本来就按顺序做）。
 	 */
 	const plannedFiles = new Map(local.files);
 	/** 这一趟的移动**送到**的路径：后面拿它区分"本地原来就有"和"刚才搬过来的" */
@@ -1609,7 +1609,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		if (move.kind === 'file') {
 			/**
 			 * **源可能停在某个中间路径上**（0.17）：累积包现在只留"基准 → 现在"这一条移动，
-			 * 上几份包把它搬到的那个中间路径由 `header.deleted` 点名（`state.bundle.ghosts`）。
+			 * 上几份包把它移到的那个中间路径由 `header.deleted` 点名（`state.bundle.ghosts`）。
 			 * 两个路径都不在时，按包带的 `size/mtime` 找唯一对得上的那一份当源 —— 见 `aliasSourceForFile`。
 			 */
 			let from = move.from;
@@ -1662,7 +1662,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			 * **源不是我记录里的那一份**、也不像包记录的版本 → 这个路径是后来新建的
 			 * （累积包里同一条移动会一直带着，接收方早搬过、又在旧名字下写了新东西）。
 			 * - 目标已经在 → 这条移动早做完了：跳过（新内容是条目 / 完整备份的事）；
-			 * - 目标也不在 → 搬不了：包里只有一条改名、没有内容，说不清该把谁搬过去。
+			 * - 目标也不在 → 搬不了：包里只有一条改名、没有内容，说不清该把谁移动过去。
 			 */
 			if (!base && !producedHere && !sameAsMove) {
 				if (targetTaken) {
@@ -1728,7 +1728,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 * **源目录可能停在某个中间路径上**（0.17）：包里只留"基准 → 现在"这一条目录移动，
 		 * 上一份包把它搬成的中间目录由删除清单点名（`state.bundle.ghosts`）。
 		 * 两个目录都不在时按"子树里的文件与起点那一份逐条对得上"认出中间目录（`aliasSourceForDir`），
-		 * 整棵搬过去；认不出来才报错（走强制回退）。
+		 * 整棵移动过去；认不出来才报错（走强制回退）。
 		 */
 		let fromDir = move.from;
 		let fromPrefix = `${fromDir}/`;
@@ -1762,7 +1762,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 				/**
 				 * **中间的旧路径在删除清单里点过名时，`deliveredFiles` 里已经没有它了**
 				 * （幽灵删除 / 别名那一跳）：这时用"我这边记录里那一版"把记录接到新路径上 ——
-				 * 不接的话严格镜像把刚搬过去的东西当成"本地多出来的"全移到回收目录。
+				 * 不接的话严格镜像把刚移动过去的东西当成"本地多出来的"全移到回收目录。
 				 */
 				const record = deliveredFiles[file] ?? contentBefore[file];
 				if (record) {
@@ -1777,7 +1777,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		};
 		/**
 		 * **移动包里没有内容**（`move` 只带路径）：点上该有的文件在磁盘上找不到、
-		 * 包里也没有它的条目，就是真补不上 —— 报出来，别假装搬到了。
+		 * 包里也没有它的条目，就是真补不上 —— 报出来，别假装移到了。
 		 * （目标那边其实已经有了的话（手工搬过 / 上一份包搬过），`plannedFiles` 里就有它。）
 		 */
 		const verifyRelocated = (): void => {
@@ -1816,13 +1816,13 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 *
 		 * 这一步以前是直接 `continue` 的 —— 那正是「application 里只剩 1111」的来源：
 		 * `deliveredFiles` 仍在使用旧路径，严格镜像于是把**目标那边**的文件当成"本地多出来的"
-		 * 全删了。现在点上的记录照样搬到新路径，目标那边的东西就都在"那一点"上了。
+		 * 全删了。现在点上的记录照样移到新路径，目标那边的东西就都在"那一点"上了。
 		 */
 		if (!sourceDir || sourceUnder.length === 0) {
 			/**
 			 * **仍使用中间目录**（0.17）：包里只有"基准 → 现在"这一条移动，上一份包已经把它
 			 * 搬成了某个中间目录；那个目录在删除清单里点着名。按子树的文件逐条对得上认出来，
-			 * 从这里整棵搬过去 —— 不必先镜像回基准。
+			 * 从这里整棵移动过去 —— 不必先镜像回基准。
 			 */
 			if (!sourceDir) {
 				const alias = aliasSourceForDir(move, fullFilesBefore ?? {}, plannedFiles, deliveredFiles, localDeleted);
@@ -1834,7 +1834,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 					sourceDir = sourceUnder.length > 0 || await dirExists(fromAbs);
 				}
 			}
-			// 认出中间那一跳了（真有文件在）：往下走正常的"整棵搬过去 / 按文件并"
+			// 认出中间那一跳了（真有文件在）：往下走正常的"整棵移动过去 / 按文件并"
 			if (!sourceDir || sourceUnder.length === 0) {
 				if (targetDir) {
 					relocatePoint();
@@ -1889,7 +1889,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			relocatePoint();
 			/**
 			 * **源里少了"点上该有的文件"就停下**：包里只有改名、没有内容，
-			 * 就这么整棵搬过去会少一个文件、编号永远不一致。
+			 * 就这么整棵移动过去会少一个文件、编号永远不一致。
 			 * 调用方会拿这条错误去走**强制回退到基准再应用**（`recoverToBaselineAndApply`）——
 			 * 有基准完整备份就有内容，补得回来（用户要的"不管本机怎么改过都能成功"）。
 			 */
@@ -1899,7 +1899,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			continue;
 		}
 
-		/** 目标是同名文件：整棵搬过去、把那一个文件替换掉（只有严格档会走到这儿） */
+		/** 目标是同名文件：整棵移动过去、把那一个文件替换掉（只有严格档会走到这儿） */
 		if (targetIsFile) {
 			if (!strict) {
 				throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它移走`);
@@ -1925,10 +1925,10 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		 * **目标目录已经存在：按文件并进去，不整棵替换。**
 		 *
 		 * 整棵替换（先把目标移到回收目录、再把源 rename 过来）会连带扔掉目标里**已经在该在**
-		 * 的东西：累积包里这条移动会一直带着，目标那边多半装着上几份包搬过去的文件，
+		 * 的东西：累积包里这条移动会一直带着，目标那边多半装着上几份包移动过去的文件，
 		 * 而源这边可能只剩一个空壳 —— 一次替换就把它们全扫进回收目录，用户看到的就是
-		 * 「application 里只剩新写的那一个 1111」。按文件并：目标上没有的搬过去、
-		 * 目标上已有的（同一份）不动、目标上占着别的版本的按严格档进回收目录的「冲突」。
+		 * 「application 里只剩新写的那一个 1111」。按文件并：目标上没有的移动过去、
+		 * 目标上已有的（同一份）不动、目标上占着别的版本时，按严格档把它移进回收目录，标记为「冲突」。
 		 */
 		if (!strict) {
 			throw new Error(`包里要把文件夹 ${move.from} 移到 ${move.to}，但本地目标已经存在：先把它移走`);
@@ -1950,7 +1950,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 			} else if (!pointRecord) {
 				/**
 				 * 点上没有它、目标也没有：这是"记录被旧版本写坏过"的现场 —— 那棵树其实还在源里。
-				 * 搬过去比留在旧路径下被当成"本地多出来的"删掉强（内容不动，下一轮再对账）。
+				 * 移动过去比留在旧路径下被当成"本地多出来的"删掉强（内容不动，下一轮再对账）。
 				 */
 				deliveredFiles[toPath] = { size: disk.size, mtime: disk.mtime };
 				relocatedHere.push(toPath);
@@ -1971,7 +1971,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	/**
 	 * **被 replace 掉的目标，底下的条目要重写一遍。**
 	 *
-	 * 计划阶段算条目的时候，目标仍在使用"上一趟搬过去的那一版"上，跟条目一比一样就跳过了写入；
+	 * 计划阶段算条目的时候，目标仍在使用"上一趟移动过去的那一版"上，跟条目一比一样就跳过了写入；
 	 * 可 `replace` 的 rename 会把目标换成**源**那一份（源里可能是基准版本 / 旧版本）。
 	 * 不补写的话，应用完目标那里是旧内容 → 内容校验值不一致（真机复现：恢复完最后差一个文件）。
 	 * 内容一样时多写一次也无害（这个操作本来就要求幂等）。
@@ -1999,7 +1999,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 	 *
 	 * **判据必须用磁盘快照 + 移动影子清单（`plannedFiles`），不能用 `baseline`**：
 	 * `baseline` 只是我上次记下的样子，本机手工改过名 / 旧版本改名失败时它就过时了；
-	 * 照它判，刚搬过去（或手工搬好）的文件会被当成"本地多出来的"整批删掉。
+	 * 照它判，刚移动过去（或手工搬好）的文件会被当成"本地多出来的"整批删掉。
 	 */
 	if (mirrorFull || strict) {
 		for (const file of plannedFiles.keys()) {
@@ -2052,7 +2052,7 @@ export async function planBundleApply(options: ApplyOptions): Promise<ApplyPlan>
 		/**
 		 * **移动过的路径整棵子树都不恢复**：目录移动只点了一条 `move`，
 		 * 它底下的文件（`旧/一.md` 那些）不在 `touched` 里 —— 只按精确路径排除的话，
-		 * 已经搬到新位置的文件会被判成"本机误改"，从基准完整备份恢复回**旧路径**，
+		 * 已经移到新位置的文件会被判成"本机误改"，从基准完整备份恢复回**旧路径**，
 		 * 新路径那份又被当成"本地多出来的"移走。第二步（再来一份累积包）就会
 		 * 旧路径、新路径同时在 → 报"本地目标已经存在"（真机复现的 bug）。
 		 */
@@ -2527,7 +2527,7 @@ function dirsInBundle(header: BundleInfo['header']): Set<string> {
 
 /** 真正落盘 */
 /**
- * 同一时间只允许跑一次应用。
+ * 同一时间只允许执行一次应用。
  *
  * 同步那边有 plugin 层的串行锁，应用这边以前没有 —— 两个对话框一起点、或者
  * "应用完顺便同步副本"还没跑完又点一次，两份计划会互相踩着写同一批文件。
@@ -2661,7 +2661,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 					await ensureDir(path.dirname(target));
 					/**
 					 * 目标位置已经有东西（严格档的"以包为准"）：先把它移到回收目录的「冲突」，
-					 * 再把源搬过去。两份都在，可以恢复；不这么做，`rename` 在 Windows 上会
+					 * 再把源移动过去。两份都在，可以恢复；不这么做，`rename` 在 Windows 上会
 					 * 直接失败（"目标已存在"），整包停在那儿、每轮重试都过不去。
 					 */
 					if (action.replace && await pathExists(target)) {
@@ -2743,11 +2743,11 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 		}
 	}
 
-	// 收尾：**把那一点上没有的目录清掉**（空目录也是内容的一部分，所以这不是"顺手收拾空壳"，
+	// 收尾：**把那一点上没有的目录清掉**（空目录也是内容的一部分，所以这不是"同时收拾空壳"，
 	// 而是镜像的收尾动作）。`plan.deliveredDirs` 就是"这一趟之后该有哪些目录"：
 	// 那一点上有、本地没建出来的（比如空文件夹）上面刚建好了，剩下的空目录就都是那一点上没有的。
 	// 传 `keep` 是为了**别把刚建好的那些又收掉**（踩过：对面把一个文件夹里的文件删光、
-	// 文件夹留着，这边删完文件顺手把空壳收掉 → 内容校验值当场不一致，用户看到"还差一点"而文件一个不差）。
+	// 文件夹留着，这边删完文件同时把空壳收掉 → 内容校验值立即不一致，用户看到"还差一点"而文件一个不差）。
 	result.foldersRemoved += await pruneEmptyDirs(
 		options.vaultRoot,
 		[
@@ -2914,7 +2914,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	// （`isFull` 在上面那段"版本说真话"里已经取过）
 
 	// 基准的正确含义是**"两边上次达成一致的样子"**，所以只能记两边都见过的东西：
-	// - 包里有的 → 真的写成了包里的样子才记（冲突没写成的、失败的都不记）
+	// - 包里有的 → 只有当磁盘上确实写成包里的样子才记录（冲突没写成的、失败的都不记）
 	// - 包里点名删的 → 划掉
 	// - 其余（我独有的、对方从没见过的文件）→ **保持原样**，绝不能记进去
 	// 以前这里图省事写成"当前仓库的完整清单"，于是把我独有的文件也记进了基准；
@@ -3041,7 +3041,7 @@ async function runPlan(plan: ApplyPlan, options: ApplyOptions): Promise<ApplyRes
 	 *
 	 * 留着就是"假记录"：`state.bundle.files` 声称某个路径存在，磁盘上却没有。
 	 * 下一次应用会拿它算"送到的点"（`deliveredFiles`），多出一条谁都没有的路径 ——
-	 * `checkAncestor` 的"算一遍目标版本"跟着算错，一份明明接得上的包会被判成"无法应用"；
+	 * `checkAncestor` 的"算一遍目标版本"跟着算错，一份本来可以应用的包会被判成"无法应用"；
 	 * `hasChanges` 也会因此永远判"有变化"，自动导出白扫一遍、状态栏还一直说"没同步"。
 	 * 删除失败（文件被占用 / 权限）时路径还在，记录就留着 —— 它确实是本机的内容。
 	 */
@@ -3298,7 +3298,7 @@ async function repairToBundle(
 	/**
 	 * 旧版本导的包头部没有 `emptyDirs`：它说不出"我这边有哪些空目录"，
 	 * 拿它反推"本地多出来的都该删"会删错（对面把一个文件夹里的文件删光、
-	 * 文件夹留着，这边会顺手把空壳收掉）。这条规则和计划阶段一致：只建不删。
+	 * 文件夹留着，这边会同时把空壳收掉）。这条规则和计划阶段一致：只建不删。
 	 */
 	const dirsKnown = plan.report.bundleDirsUnknown !== true;
 	if (dirsKnown) {

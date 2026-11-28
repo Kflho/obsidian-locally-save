@@ -11,7 +11,7 @@ import type { FileRecord, Inventory } from './types';
  *
  * 为什么不走 Obsidian 的 vault API：同步目标是仓库之外的文件夹，vault API 出不了库；
  * 而且 fs.copyFile 走的是系统调用，几百 MB 也是一两秒的事 —— 这正是本插件存在的理由
- * （对比 Remotely Save 走网络的耗时）。代价是只能桌面端用，见 manifest 的 isDesktopOnly。
+ * （对比 Remotely Save 使用网络的耗时）。代价是只能桌面端用，见 manifest 的 isDesktopOnly。
  */
 
 export interface ScanOptions {
@@ -59,7 +59,7 @@ export async function scanTree(root: string, options: ScanOptions): Promise<Inve
 		let visible = false;
 		for (const entry of entries) {
 			const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
-			// 符号链接一律跳过：可能绕成环，也可能指到仓库外面去
+			// 符号链接一律跳过：可能绕成环，或指到仓库外面去
 			if (entry.isSymbolicLink()) continue;
 
 			if (entry.isDirectory()) {
@@ -118,8 +118,8 @@ export async function removeEmptyDir(absPath: string): Promise<boolean> {
  *
  * `keep` 是**不许删的目录**：应用同步包时要传"这份包说它存在的目录"
  * （`dirsInBundle` = 包里的空文件夹 ＋ 条目的上级目录）。踩过：对面把一个文件夹里的文件
- * 全删了、那个文件夹它留着（空文件夹也是要同步的内容），接收方这边删完文件顺手把空壳收掉，
- * 于是**内容校验值当场不一致**（编号把目录也算进去）—— 用户看到的是一句
+ * 全删了、那个文件夹它留着（空文件夹也是要同步的内容），接收方这边删完文件同时把空壳收掉，
+ * 于是**内容校验值立即不一致**（编号把目录也算进去）—— 用户看到的是一句
  * "跟对方导出时的 xxxx 还差一点"，而文件一个都不差。
  */
 export async function pruneEmptyDirsDetailed(
@@ -339,7 +339,7 @@ export async function listFiles(absDir: string): Promise<{ name: string; size: n
 }
 
 /**
- * 同步版 `listFiles`：设置面板要**当场**把本地那几份完整备份列成下拉选项。
+ * 同步版 `listFiles`：设置面板要**立即**把本地那几份完整备份列成下拉选项。
  *
  * 只在包目录上用（那几个目录里文件数很少），所以同步读一次的开销可以忽略；
  * 读不到（目录不存在、没权限）照样返回空 —— 选项里就只剩「最新」那一项。

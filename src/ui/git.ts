@@ -38,9 +38,9 @@ import { peerStatusText, refreshStatusBar } from './status';
 
 /** 同步的入口参数：手动那一路演一句过程，其余安静（真出事再说） */
 export interface GitSyncOptions {
-	/** 自动 / 顺手推（导出、应用之后）：正常结果不弹通知，**也不写状态栏**（发起方自己有文案） */
+	/** 自动 / 一并推送（导出、应用之后）：正常结果不弹通知，**也不写状态栏**（发起方自己有文案） */
 	quiet?: boolean;
-	/** 用户点的：开头一句「正在同步…」，结束时给结果 + 对方状态 */
+	/** 用户点的：开头一句「正在同步…」，结束时给结果 + 其他电脑状态 */
 	manual?: boolean;
 	/**
 	 * **后台的例行对表**（每 30 秒那一拍）：连状态栏都不写。
@@ -108,9 +108,9 @@ export async function syncGitNow(
 
 	plugin.gitBusy = true;
 	/**
-	 * **只有用户点的同步才演过程**：开头一句「正在同步…」，收工回车。
+	 * **只有用户点的同步才演过程**：开头一句「正在同步…」，结束后回到结果。
 	 *
-	 * 原来按五个步骤刷「同步 2/5 · 连接远程…」；导出 / 应用之后顺手推的那一下
+	 * 原来按五个步骤刷「同步 2/5 · 连接远程…」；导出 / 应用之后一并推送的那一下
 	 * 也走这条路，右下角就一直在跳状态（用户报的"连跳很多状态"）。
 	 * 现在：quiet（发起方自己有文案）与后台对表都不写，结果就一条 ——
 	 * 完成后的动作 + 对方的内容状态（`refreshStatusBar` 那一句）。
@@ -123,7 +123,7 @@ export async function syncGitNow(
 		// 状态文件还没建时，`loadState` 每次都会给一个新的 copyId —— 先落盘，别让状态文件在远程仓库上"换名字"
 		if (!fs.existsSync(plugin.stateFile())) await saveState(plugin.stateFile(), state);
 		const peer = await writePeer(shelf.dir, state, plugin.vaultName());
-		if (peer.error) plugin.log.debug(`写本机状态失败：${peer.error}`);
+		if (peer.error) plugin.log.debug(`写本电脑状态失败：${peer.error}`);
 
 		const report = await syncShelf(shelf);
 		plugin.lastGitAt = Date.now();
@@ -156,7 +156,7 @@ export async function syncGitNow(
 			 * **仅推例外**：那个方向根本不看接收文件夹（`wantsIncoming` 为 false），
 			 * 这些包没有人会替你应用 —— 得说一句，不然它们会一直躺在远程仓库上。
 			 */
-			plugin.log.debug(`从 git 远程收到 ${report.pulled.length} 个包，撤下 ${report.deleted.length} 个`);
+			plugin.log.debug(`从 Git 远程收到 ${report.pulled.length} 个包，移走 ${report.deleted.length} 个`);
 			// 排障要能回答「到底拉下来 / 撤下哪几个」：只有文件名时，分不清是对方的包还是自己的
 			if (report.pulled.length > 0) {
 				debugEvent('git.pulled', {
@@ -170,7 +170,7 @@ export async function syncGitNow(
 			/**
 			 * **撤下要说一句**：那是删掉本机已有的文件（约定第 10 条：删了本机文件才弹）。
 			 * 只说撤下几个，不说去处：单提交模式会先移进回收站，子目录形态是直接删
-			 * （git 合流删的，插件没经手）；写死一处就等于对另一种形态说谎。
+			 * （git 合流删的，插件没经手）；硬编码一处就等于对另一种形态说谎。
 			 */
 			if (report.deleted.length > 0) {
 				debugEvent('git.deleted', {
@@ -271,7 +271,7 @@ export async function maybeGitSync(plugin: LocallySavePlugin): Promise<boolean> 
  * **对方仍使用别的基准时，导出前提醒一句**（0.15.9）。
  *
  * 导出默认从"本机当前使用的那份完整备份"算起；对方若仍在使用更老（或另一份）完整备份上，
- * 这份包它无法应用。这里直接说清"从哪一份开始它才接得上"、以及本机有没有那份副本。
+ * 这份包它无法应用。这里直接说清"从哪一份开始才能应用"、以及本机有没有那份副本。
  *
  * 只读 peer 文件；包目录没填 / 状态读不出 / peers 读不出都返回 null ——
  * 提示是加分项，不能反过来把导出拦住。
@@ -300,9 +300,9 @@ export function peerBaselineHint(plugin: LocallySavePlugin): string | null {
 		const who = peer.host || peer.copyId.slice(0, 8);
 		const short = (peer.baselineHash ?? '').slice(0, 8);
 		if (anchors.some(anchor => anchor.hash === peer.baselineHash)) {
-			return `${who} 以基准为准 ${short}：导出前把「更新包：从哪个状态开始」选成它，对方才接得上`;
+			return `${who} 以完整备份为准 ${short}：导出前把「更新包起点」选成它，其他电脑才能应用`;
 		}
-		return `${who} 以基准为准 ${short}，本机没有它的完整备份：让它发一份完整备份过来，或把本机这份基准发给它`;
+		return `${who} 以完整备份为准 ${short}，本电脑没有它的完整备份：请其他电脑发一份完整备份，或把本电脑的完整备份发给其他电脑。`;
 	});
 	return lines.join('；');
 }
@@ -329,7 +329,7 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 	const current = readOriginUrl(layout.repo);
 	if (!current) {
 		return layout.hosted
-			? `这个文件夹在仓库 ${layout.repo} 里，但那个仓库没有远程地址。先在仓库里配好 origin。`
+			? `同步包文件夹在仓库 ${layout.repo} 里，但那个仓库没有远程地址。先在仓库里配好 origin。`
 			: '尚未接入。请点击下方「接入这个远程…」补上远程地址。';
 	}
 	if (current !== remote) {
@@ -346,7 +346,7 @@ export function describeGitConnection(plugin: LocallySavePlugin): string {
 	const git = state?.git;
 	if (!git) return `已连接 ${where}，尚未同步（请点击「现在同步一次」）。`;
 	if (!git.ok) {
-		return `已连接 ${where}，上次同步失败。原因：${git.error ?? '详情见日志'}（请点击「测试连通性」排查）。`;
+		return `已连接 ${where}，上次同步失败。原因：${git.error ?? '详情见日志'}（请点击「检查」排查）。`;
 	}
 	const parts = [`已连接 ${where}，并在 ${hhmm(git.at)} 完成一次推送与拉取`];
 	if (git.pulled > 0) parts.push(`收到 ${git.pulled} 个同步包`);
@@ -412,11 +412,11 @@ export async function checkGitConnectivity(plugin: LocallySavePlugin): Promise<v
 		lines.push('接入状态：尚未接入（点击「接入这个远程…」；也可以将它放入已有仓库的子目录）');
 	}
 
-	// 真正联网的一步：ls-remote 会走 SSH / 凭据，把"连不上 / 没权限"当场暴露出来
+	// 真正联网的一步：ls-remote 会走 SSH / 凭据，把"连不上 / 没权限"立即暴露出来
 	const ls = await run(['ls-remote', '--heads', remote, branch], 60_000)
 		.catch(error => ({ code: -1, stdout: '', stderr: describe(error), timedOut: false }));
 	if (ls.timedOut) {
-		lines.push('连通性：超时。网络或凭据阻塞；SSH 可能在等待口令或确认主机校验值。');
+		lines.push('连通性：超时。网络或凭据阻塞；SSH 可能在等待口令或确认主机内容编号。');
 	} else if (ls.code === 0) {
 		lines.push(ls.stdout.trim() !== ''
 			? `连通性：正常，远程有分支 ${branch}`
@@ -531,7 +531,7 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
 			created
 				? '已接入 Git：此后导出会自动提交并推送'
 				: hosted
-					? '该文件夹已在远程仓库中：不新建仓库，使用该仓库当前分支（仅提交这一段）'
+					? '同步包文件夹已在远程仓库中：不新建仓库，使用该仓库当前分支（仅提交这一段）'
 					: '已经接入过，这一轮也同步完了',
 			8000,
 		);
@@ -542,7 +542,7 @@ export async function connectGitRemote(plugin: LocallySavePlugin): Promise<void>
  * 「让对面和我一致」：把我这边的改动导成更新包、推上去。
  *
  * **只推不收**（方向那项也是这么写的）：对面拉下来、应用之后才会变成我这样。
- * 不在这里替用户决定"要不要顺手收对方的包" —— 那是 `both` 与「让我和对面一致」的事。
+ * 不在这里替用户决定"要不要一并接收对方的包" —— 那是 `both` 与「让我和对面一致」的事。
  */
 export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 	if (!plugin.settings.enabled) return;
@@ -585,7 +585,7 @@ export async function uploadNow(plugin: LocallySavePlugin): Promise<void> {
 		new Notice('推送或拉取失败：详情见状态栏或日志；已导出的包会在下次同步时重试', 9000);
 		return;
 	}
-	new Notice(exported ? '已推送，等对方拉取并应用' : '没有新改动，远程已是最新', 6000);
+	new Notice(exported ? '已推送，等其他电脑拉取并应用' : '没有新改动，远程已是最新', 6000);
 }
 
 /**
@@ -621,7 +621,7 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 	try {
 		state = await loadState(plugin.stateFile());
 	} catch {
-		new Notice('读不到本机状态', 6000);
+		new Notice('读不到本电脑状态', 6000);
 		return;
 	}
 	const baseline = state.bundle?.fullHash ?? null;
@@ -632,18 +632,18 @@ export async function downloadNow(plugin: LocallySavePlugin): Promise<void> {
 		.sort((a, b) => (b.header?.targetGeneration ?? 0) - (a.header?.targetGeneration ?? 0));
 	const target = candidates[0];
 	if (!target) {
-		new Notice('没有对方的更新包可对齐', 6000);
+		new Notice('没有其他电脑的更新包可对齐', 6000);
 		return;
 	}
 
 	new ConfirmModal(plugin.app, {
-		title: '让我和对面一致',
+		title: '推送本电脑的改动',
 		lines: [
-			`会用对方的更新包「${target.name}」把本机改成对面那一份状态。`,
-			'本机改动或新增的文件会先移入回收目录，可从回收目录恢复。',
-			'做完两边内容校验值应当一致；你的新改动之后靠「让对面和我一致」推回去。',
+			`会用其他电脑的更新包「${target.name}」把本电脑改成其他电脑那一份状态。`,
+			'本电脑改动或新增的文件会先移入回收目录，可从回收目录恢复。',
+			'做完两台电脑的内容编号应当一致；本电脑的新改动之后靠「拉取其他电脑的改动」推回去。',
 		],
-		confirmText: '以对面为准',
+		confirmText: '以其他电脑为准',
 		onConfirm: () => { void applyAlign(plugin, target.file); },
 	}).open();
 }
@@ -687,7 +687,7 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 		const ahead = status?.ahead ?? 0;
 		if (ahead > 0 || pending > 0) {
 			const lines = [
-				'刷新是「整段对齐远程」：本地还没推上去的东西会被丢掉，远程还留着的包会重新拉下来。',
+				'刷新是「整段对齐远程」：本地还没推送的东西会被丢掉，远程还留着的包会重新拉取。',
 			];
 			if (pending > 0) {
 				lines.push(`有 ${pending} 处删除尚未推送：刷新后那些包会重新出现。`);
@@ -720,7 +720,7 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 		});
 		plugin.reportProgress(null);
 		plugin.log.debug(
-			`刷新包：丢掉本地 ${report.dropped} 笔提交，新到 ${report.pulled.length} 个包（HEAD ${report.head ?? '?'}）`,
+			`从远程刷新：丢弃本地 ${report.dropped} 笔提交，收到 ${report.pulled.length} 个同步包（HEAD ${report.head ?? '?'}）`,
 		);
 		new Notice(
 			`已与远程仓库对齐，丢弃本地 ${report.dropped} 次提交。`
@@ -740,7 +740,7 @@ export async function refreshBundlesAction(plugin: LocallySavePlugin): Promise<v
 	}
 }
 
-/** 真正按对方对齐（见 `downloadNow` 的说明）；strictness 用界面上那唯一一种：mirror */
+/** 真正按其他电脑对齐（见 `downloadNow` 的说明）；strictness 用界面上那唯一一种：mirror */
 async function applyAlign(plugin: LocallySavePlugin, file: string): Promise<void> {
 	const options: ApplyOptions = {
 		settings: plugin.settings,
@@ -760,17 +760,17 @@ async function applyAlign(plugin: LocallySavePlugin, file: string): Promise<void
 		// 状态变了：赶紧把"我现在的状态"写进远程仓库，别让对面看到旧的那份
 		const state = await loadState(plugin.stateFile());
 		const peer = await writePeer(bundleBaseDir(plugin.settings), state, plugin.vaultName());
-		if (peer.error) plugin.log.debug(`写本机状态失败：${peer.error}`);
+		if (peer.error) plugin.log.debug(`写本电脑状态失败：${peer.error}`);
 		await syncGitNow(plugin, { quiet: true });
 		new Notice(
 			result.stateIdCompare === 'match'
-				? '已与对方一致'
-				: '应用完成，但内容校验值尚未完全一致（详情见更新记录）',
+				? '已与其他电脑一致'
+				: '应用完成，但内容编号尚未完全一致（详情见更新记录）',
 			6000,
 		);
 	} catch (error) {
 		new Notice(`应用失败。原因：${brief(describe(error))}。`, 8000);
-		plugin.log.error('按对方对齐失败', error);
+		plugin.log.error('按其他电脑对齐失败', error);
 	}
 }
 
@@ -806,8 +806,8 @@ export async function checkGitEnvironment(plugin: LocallySavePlugin): Promise<vo
 			// 对表：对方现在在哪一步（远程仓库里的 `.lsave-peers/*.json`）
 			try {
 				const state = await loadState(plugin.stateFile());
-				lines.push(`我这台的内容校验值是 ${state.stateId?.id ?? '尚未计算'}，当前是第 ${state.generation} 版。`
-					+ ` · 基准 ${state.bundle?.fullGeneration ?? '?'} 代 ${state.bundle?.fullHash ?? '未记'}`);
+				lines.push(`本电脑的内容编号是 ${state.stateId?.id ?? '尚未计算'}，当前是第 ${state.generation} 版。`
+					+ ` · 完整备份 ${state.bundle?.fullGeneration ?? '?'} 版 ${state.bundle?.fullHash ?? '未记'}`);
 				const peers = readPeers(shelf.dir, state.copyId);
 				if (peers.length === 0) {
 					lines.push('另一台尚未上报状态（它完成一次同步后才会出现）。');

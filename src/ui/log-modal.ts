@@ -1,4 +1,5 @@
 import { Modal, Setting } from 'obsidian';
+import { setupModal } from './modal-layout';
 import type { App } from 'obsidian';
 import type LocallySavePlugin from '../main';
 import { describeBundlePosition, describeLogEntry } from '../bundle/log';
@@ -9,7 +10,7 @@ import { formatTime } from '../utils/format';
 /**
  * 「同步包更新记录」—— 像 git log 那样把来龙去脉摊开。
  *
- * 为什么不塞进别的窗口：这份记录回答的是"我现在用哪份完整备份上、中间收发过哪些更新包"，
+ * 为什么不放进别的窗口：这份记录回答的是"我现在用哪份完整备份上、中间收发过哪些更新包"，
  * 用户想核对/排查时会专门来看它（用户提的："类似 git 的更新记录功能，比较直观"）。
  */
 export class BundleLogModal extends Modal {
@@ -24,12 +25,12 @@ export class BundleLogModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '同步包更新记录' });
 		contentEl.createEl('p', {
-			text: '每次导出或应用记一笔，最近的在上。「状态」编号相同，两边内容就一致。'
-				+ '版本只说内容走到第几版；要认是不是同一份完整备份，看基准校验值。'
-				+ '本机当前使用的那份完整备份只在导出或应用完整备份时变，更新包不会动它。',
+			text: '每次导出或应用记一笔，最近的在上。「状态」编号相同，两台电脑内容一致。'
+				+ '版本只说内容走到第几版；要认是不是同一份完整备份，看完整备份编号。'
+				+ '本电脑当前使用的那份完整备份只在导出或应用它时改变，更新包不会动它。',
 			cls: 'locally-save-hint',
 		});
 

@@ -22,18 +22,18 @@ import type { FieldSection } from './types';
 export const ADVANCED_SECTION: FieldSection = {
 	type: 'page',
 	heading: '高级',
-	desc: '不常用的设置：进包规则、更新包端点、校验、自动应用与 Git 细节。',
+	desc: '不常用的设置：同步包排除的文件、更新包起点与终点、应用与校验、Git 细节。',
 	groups: [
 		{
 			heading: '包内容',
 			fields: [
 				{
 					key: 'excludePatterns',
-					name: '不进包的文件',
-					desc: '一行一条，写法与 .gitignore 相同（目录/、*.tmp、a/**/*.md）。默认已排除配置目录、回收目录和系统临时文件。',
+					name: '同步包排除的文件',
+					desc: '每行填写一条排除规则，写法与 .gitignore 相同（目录/、*.tmp、a/**/*.md）。默认已排除配置目录、回收站与系统临时文件。',
 					control: {
 						type: 'textarea',
-						placeholder: '一行一条，例如：\n附件/临时/\n*.tmp',
+						placeholder: '每行一条规则，例如：\n附件/临时/\n*.tmp',
 						rows: 6,
 					},
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.excludePatterns),
@@ -46,22 +46,22 @@ export const ADVANCED_SECTION: FieldSection = {
 			fields: [
 				{
 					key: 'changesFromState',
-					name: '从哪个状态开始',
-					desc: '默认是本机当前的基准。仅在对方仍使用更旧的一份时才需要修改。',
+					name: '更新包起点',
+					desc: '默认是本电脑当前使用的完整备份。仅当其他电脑仍在使用更早的完整备份时，才需要修改。',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
 				{
 					key: 'changesToState',
-					name: '到哪个状态为止',
-					desc: '默认「最新」（当前仓库）。选择另一份完整备份时，将导出这两份之间的差分更新包。',
+					name: '更新包终点',
+					desc: '默认到当前仓库。选择另一份完整备份时，导出两份之间的更新包。',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
 				{
 					key: 'bundleSizeWarnLimit',
-					name: '变大了提醒立新基准',
-					desc: '更新包超过该大小时，提醒导出新的完整备份并更换基准。',
+					name: '更新包超过大小时提醒',
+					desc: '更新包超过该大小时，提醒导出一份新的完整备份，并更换本电脑当前使用的完整备份。',
 					control: { type: 'dropdown', options: SIZE_WARN_OPTIONS },
 					coerce: value => coerceNumberChoice(
 						value,
@@ -77,14 +77,14 @@ export const ADVANCED_SECTION: FieldSection = {
 				{
 					key: 'autoApplyIncoming',
 					name: '自动应用收到的更新包',
-					desc: '未启用 Git 时，只自动应用不会删除文件、也不会覆盖本地改动的更新包；启用 Git 后由「方向」决定。',
+					desc: '未启用 Git 时，只自动应用不会删除文件、也不会覆盖本地改动的更新包；启用 Git 后由「同步方向」决定。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncoming),
 				},
 				{
 					key: 'autoApplyIncomingBoth',
-					name: '双向时收到包直接应用（不确认）',
-					desc: '启用 Git 且方向为双向时，收到同步包不再确认，直接按对方的状态覆盖本机；会覆盖或删除本地文件（移入回收目录）。供无人值守场景使用，默认关闭。',
+					name: '同步方向为双向时自动应用更新包（不确认）',
+					desc: '启用 Git 且同步方向为双向时，收到更新包不再确认，直接按其他电脑状态覆盖本电脑；会覆盖或删除本地文件（移到回收站）。供无人值守场景使用，默认关闭。',
 					control: { type: 'toggle' },
 					coerce: value => coerceBoolean(value, DEFAULT_SETTINGS.autoApplyIncomingBoth),
 				},
@@ -110,14 +110,14 @@ export const ADVANCED_SECTION: FieldSection = {
 				{
 					key: 'gitBranch',
 					name: '分支',
-					desc: '搬包用的分支。',
+					desc: '传输同步包使用的分支。',
 					control: { type: 'text', placeholder: 'main' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.gitBranch).trim() || DEFAULT_SETTINGS.gitBranch,
 				},
 				{
 					key: 'gitPath',
-					name: 'git 路径',
-					desc: '留空表示从 PATH 中查找；找不到时填写 git.exe 的完整路径。',
+					name: 'Git 路径',
+					desc: '留空时从 PATH 中查找；找不到时填写 git.exe 的完整路径。',
 					control: { type: 'text', placeholder: 'C:\\Program Files\\Git\\cmd\\git.exe' },
 					coerce: value => coerceText(value, DEFAULT_SETTINGS.gitPath),
 				},
@@ -132,8 +132,8 @@ export const ADVANCED_SECTION: FieldSection = {
  */
 function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<string, string> {
 	const fallback = end === 'from'
-		? { [LATEST_STATE]: '自动：本机现在的基准' }
-		: { [LATEST_STATE]: '最新（当前仓库）' };
+		? { [LATEST_STATE]: '自动：本电脑当前使用的完整备份' }
+		: { [LATEST_STATE]: '当前仓库' };
 	const current = end === 'from' ? plugin.settings.changesFromState : plugin.settings.changesToState;
 	try {
 		const base = bundleBaseDir(plugin.settings);
@@ -146,7 +146,7 @@ function stateChoices(plugin: LocallySavePlugin, end: 'from' | 'to'): Record<str
 		});
 		const wanted = coerceAnchorFingerprint(current);
 		if (wanted !== '' && !(wanted in options)) {
-			options[wanted] = `基准 ${wanted}（这个目录里找不到这一份完整备份）`;
+			options[wanted] = `完整备份 ${wanted}（这个文件夹里找不到这一份）`;
 		}
 		return options;
 	} catch {

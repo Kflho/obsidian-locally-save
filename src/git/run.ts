@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 
 /**
- * 跑一次 git 的薄封装。
+ * 执行一次 git 的薄封装。
  *
  * 三条纪律（后面写 git 相关的代码都靠它们）：
  * - **不经过 shell**：参数原样交给 `execFile` —— 路径里带空格、中文、引号都不用操心，
@@ -60,7 +60,7 @@ function defaultEnv(): NodeJS.ProcessEnv {
 	return env;
 }
 
-/** 跑一次 git：**不抛"命令失败"**，只有找不到程序才抛 `GitMissingError` */
+/** 执行一次 git：**不抛"命令失败"**，只有找不到程序才抛 `GitMissingError` */
 export function runGit(args: string[], options: GitRunOptions): Promise<GitResult> {
 	const gitPath = options.gitPath?.trim() || 'git';
 	return new Promise<GitResult>((resolve, reject) => {

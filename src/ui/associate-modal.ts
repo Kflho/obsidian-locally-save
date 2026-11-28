@@ -1,4 +1,5 @@
 import { Modal, Notice, Setting } from 'obsidian';
+import { setupModal } from './modal-layout';
 import type { App } from 'obsidian';
 import { associationSupported, installCommands } from './associate';
 import { applyFileAssociation, describeCommandError, removeFileAssociation } from './associate-runner';
@@ -23,7 +24,7 @@ export class AssociateModal extends Modal {
 	onOpen(): void {
 		const { contentEl } = this;
 		contentEl.empty();
-		contentEl.addClass('locally-save-modal');
+		setupModal(this);
 		contentEl.createEl('h2', { text: '用 Obsidian 直接打开同步包' });
 
 		contentEl.createEl('p', {

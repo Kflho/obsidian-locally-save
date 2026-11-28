@@ -21,7 +21,7 @@ export interface SyncProgress {
  *
  * 优先级：**进度（n/m）> 阶段（"推送和拉取中…"）> 上次结果**。
  * 用户提过右下角太啰嗦 —— 所以平时只有一句 `已同步 12:31 · 对方一致`，
- * 细节（上次导出几个文件、攒了多大）在更新记录 / 通知里。
+ * 细节（上次导出几个文件、累积了多大）在更新记录 / 通知里。
  */
 export class SyncStatusBar {
 	private el: HTMLElement;
@@ -55,11 +55,11 @@ export class SyncStatusBar {
 	}
 
 	/**
-	 * 同步进行中：显示 done/total；传 null 表示收工（回到上次结果）。
+	 * 同步进行中：显示 done/total；传 null 表示结束（回到上次结果）。
 	 *
 	 * **节流**：引擎是"每个文件报一次进度"，一万个文件就是一万次 `setText` ——
 	 * 光是这些 DOM 写入就够让界面发顿（用户报的"卡界面"里有它一份）。
-	 * 所以 100 毫秒内的重复更新直接丢掉，收工那一次（null）一定会写。
+	 * 所以 100 毫秒内的重复更新直接丢掉，结束那一次（null）一定会写。
 	 *
 	 * 动词由调用方给（导出中 / 应用中）：同一个数字在不同的活里
 	 * 意思不一样，别让用户在导出时看到"同步中"。
@@ -83,7 +83,7 @@ export class SyncStatusBar {
 
 	/**
 	 * 阶段文案（"同步中：拉取远程…"），用于**没有文件计数**的步骤（git 推送和拉取）。
-	 * 传 null 收工，回到上次结果。
+	 * 传 null 表示结束，回到上次结果。
 	 */
 	showActivity(text: string | null): void {
 		// 真要演别的了，就别让 `flash` 的收尾定时器把新文案提前清掉
@@ -116,7 +116,7 @@ export class SyncStatusBar {
 		}, ms);
 	}
 
-	/** 收工后写一句结果 */
+	/** 结束后写一句结果 */
 	setSummary(text: string): void {
 		this.summary = text;
 		this.render();

@@ -51,7 +51,7 @@ export interface PeerState {
 	 *
 	 * 为什么放进对表文件：接收失败只留在本机 `sync-state.json` / `debug.log`，
 	 * 对面想排查只能等这边的人手动发日志（283 就卡在这里）。peer 文件本来就跟着远程仓库同步，
-	 * 顺手带上"哪个包、什么原因"，对面拉一次就能看到，不用再要日志。
+	 * 同时带上"哪个包、什么原因"，对面拉一次就能看到，不用再要日志。
 	 */
 	lastError?: { file?: string; bundleId: string; message: string; at: number };
 	/**

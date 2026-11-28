@@ -249,7 +249,7 @@ export async function readBundleTrash(baseDir: string): Promise<TrashContents> {
 /** 清空回收站：**真删**，删完无法恢复（界面上必须先确认） */
 export async function emptyBundleTrash(baseDir: string): Promise<void> {
 	for (const root of trashRoots(baseDir)) await removeDirRecursive(root);
-	// 老位置的回收停在 `<base>/.lsave/` 底下，清完会剩一个空壳 —— 顺手收掉，
+	// 老位置的回收停在 `<base>/.lsave/` 底下，清完会剩一个空壳 —— 同时收掉，
 	// 别在 bundles 里面留个空 `.lsave`（那正是这次要修掉的乱）。走 rmdir：
 	// 里面但凡还有别的东西就删不动，不会误伤。
 	const legacy = legacyTrashRoot(baseDir);
