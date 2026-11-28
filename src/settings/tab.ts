@@ -158,6 +158,9 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 	 * 定义里的 key 就是 settings 的字段名；读取与写入使用 getControlValue / setControlValue。
 	 */
 	getSettingDefinitions(): SettingDefinitionItem[] {
+		// 先同步加一次，测试与已挂载容器立刻可见；再等下一帧补一次，防止 Obsidian
+		// 随后重设 className 时丢失。
+		this.containerEl?.addClass('locally-save-settings');
 		window.setTimeout(() => this.containerEl?.addClass('locally-save-settings'), 0);
 		return SETTINGS_SECTIONS.map(section => section.type === 'group'
 			? {
