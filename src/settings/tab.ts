@@ -57,6 +57,7 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 	private renderSettings(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		containerEl.addClass('locally-save-settings');
 		const settings = this.plugin.settings;
 
 		for (const section of SETTINGS_SECTIONS) {
@@ -154,9 +155,10 @@ export class LocallySaveSettingTab extends PluginSettingTab {
 
 	/**
 	 * 声明式设置（Obsidian 1.13+）。
-	 * 定义里的 key 就是 settings 的字段名，读写走下面的 getControlValue / setControlValue。
+	 * 定义里的 key 就是 settings 的字段名；读取与写入使用 getControlValue / setControlValue。
 	 */
 	getSettingDefinitions(): SettingDefinitionItem[] {
+		window.setTimeout(() => this.containerEl?.addClass('locally-save-settings'), 0);
 		return SETTINGS_SECTIONS.map(section => section.type === 'group'
 			? {
 				type: 'group',

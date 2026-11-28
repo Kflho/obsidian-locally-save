@@ -1,3 +1,42 @@
+/* 设置页字号与间距：分区标题、设置项名称、说明。
+   只作用于本插件容器；字号 20/16/14/13；行上下 12px，分组标题上 24px，控件与文字之间 8px。 */
+.locally-save-settings .setting-item {
+	padding: 12px 0;
+	align-items: flex-start;
+}
+
+.locally-save-settings .setting-item-name {
+	font-size: 14px;
+	font-weight: 500;
+	line-height: 1.4;
+}
+
+.locally-save-settings .setting-item-description {
+	max-width: 44em;
+	color: var(--text-muted);
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.locally-save-settings .setting-item-control {
+	flex: 0 0 auto;
+	max-width: 260px;
+}
+
+.locally-save-settings .setting-item-heading {
+	padding-top: 24px;
+}
+
+.locally-save-settings .setting-item-heading .setting-item-name {
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.locally-save-settings .setting-group > .setting-items > .setting-item.tappable .setting-item-name {
+	font-size: 16px;
+	font-weight: 600;
+}
+
 /* 设置面板里的小标题（Obsidian 的 Setting.setHeading() 只有一级，
    这里的分组层级用 h4 自己造，见 src/settings/tab.ts 的 addSubHeading） */
 .locally-save-settings-subheading h4 {
