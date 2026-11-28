@@ -47,14 +47,14 @@ export const ADVANCED_SECTION: FieldSection = {
 				{
 					key: 'changesFromState',
 					name: '更新包起点',
-					desc: '默认是本电脑当前使用的完整备份。仅当其他电脑仍在使用更早的完整备份时，才需要修改。',
+					desc: '本电脑当前使用的完整备份。仅当其他电脑仍在使用更早的完整备份时，才需要改动该设置。',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'from') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},
 				{
 					key: 'changesToState',
 					name: '更新包终点',
-					desc: '默认到当前仓库。选择另一份完整备份时，导出两份之间的更新包。',
+					desc: '导出终点指向当前仓库。选择另一份完整备份时，导出两份之间的更新包。',
 					control: { type: 'dropdown', options: plugin => stateChoices(plugin, 'to') },
 					coerce: value => coerceAnchorFingerprint(value),
 				},

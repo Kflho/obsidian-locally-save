@@ -153,7 +153,7 @@ class ConfirmMergeModal extends Modal {
 			});
 		}
 		contentEl.createEl('p', {
-			text: '移除的同步包会进入回收站，可随时恢复。已处于这些同步包送达状态的电脑，仍可接收保留的那一份。',
+			text: '移除的同步包会进入回收站，可随时恢复。已处于这些同步包送达状态的电脑，仍可接收保留的同步包。',
 			cls: 'locally-save-hint',
 		});
 
